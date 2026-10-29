@@ -98,6 +98,11 @@ The editor supports these built-in behaviors:
   display hosts support literal IPv4/IPv6, `/etc/hosts`, then DNS configured by
   `/etc/resolv.conf`, including search domains. Lookup shares the clipboard's
   10-second deadline and uses no libc NSS modules or additional link libraries.
+  The same overall deadline bounds X11 setup, replies, selection and INCR events;
+  incoming unrelated events do not restart it. INCR capture waits for the
+  zero-length terminator and deletes that property to acknowledge completion
+  to the clipboard owner. Missing events or a missing terminator fail the paste,
+  preserve the draft and remove any partial capture file.
   The default path is `${XDG_CACHE_HOME}/softline/{xid}.png` or `.jpeg`,
   falling back to `$HOME/.cache/softline/` when `XDG_CACHE_HOME` is unset or
   relative. The xid is 20 lowercase base32hex characters in the

@@ -869,9 +869,12 @@ compiler prefix, including installations with only dotted executable names.
 prefix and fails if its tools are missing instead of selecting another prefix.
 
 Linux clipboard protocol tests run without an X server. They check request and
-reply sequence wraparound, I/O failures, and byte preservation for a 17 MiB PNG
-transferred in small INCR chunks. The optional X11 tests also exercise real
-clipboard owners and forwarded displays.
+reply sequence wraparound, I/O failures, final property deletion for direct and
+INCR transfers, and byte preservation for a 17 MiB PNG transferred in small
+INCR chunks. Short test deadlines cover silent peers, truncated replies, missing
+selection/chunk/terminator events and continuous unrelated events/replies.
+The optional X11 tests also exercise real clipboard owners and forwarded
+displays.
 
 Package smoke links fully static GNU and musl consumers with fatal linker
 warnings. Linux X11 hostname lookup uses privately bundled MIT-licensed c-ares
