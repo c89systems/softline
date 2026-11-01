@@ -155,9 +155,11 @@ cleanup:
 }
 
 int main(int argc, char **argv) {
-  if (argc != 7)
+  if (argc != 7 && argc != 8)
     return 2;
-  c_chat = !strcmp(argv[1], "c");
+  c_chat = !strcmp(argv[1], "c") || !strcmp(argv[1], "remote");
+  if (argc == 8)
+    remote_owner = argv[7];
   executable = argv[2];
   root = argv[3];
   return exercise(argv[4], argv[5], argv[6]);

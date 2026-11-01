@@ -1356,6 +1356,14 @@ static int sl_cancel_method(sl_t *self) {
   return SL_OK;
 }
 
+static int sl_suspend_method(sl_t *self) {
+  sl_impl_t *impl = sl_impl(self);
+  if (!impl || !impl->active_readline)
+    return SL_ERROR_INVALID;
+  impl->request_suspend = 1;
+  return SL_OK;
+}
+
 static size_t sl_line_start(const char *buf, size_t pos) {
   while (pos > 0 && buf[pos - 1] != '\n')
     pos--;
@@ -5302,7 +5310,7 @@ static ssize_t sl_read_input_byte(sl_t *self, char *ch, int timeout_ms) {
   /* A callback that completes this prompt leaves all concurrently received
    * input for the next prompt. This must precede the buffered-input check and
    * fresh probe below because either may consume a byte. */
-  if (impl->request_submit || impl->request_cancel) {
+  if (impl->request_submit || impl->request_cancel || impl->request_suspend) {
     errno = 0;
     return 0;
   }
@@ -6236,10 +6244,8 @@ static int sl_handle_prompt_queue_key(sl_t *self, int key, int *handled,
          key == (int)keys->submit_or_promote_newest)) {
       *handled = 1;
       if (!impl->len && !impl->prompt_queue.editing.info.id &&
-          key == (int)keys->submit_or_promote_newest && impl->prompt_queue.len)
-        rc = sl_backend_action(
-            self, impl->prompt_queue.items[impl->prompt_queue.len - 1].info.id,
-            SL_QUEUE_SET_INTENT);
+          key == (int)keys->submit_or_promote_newest)
+        rc = sl_backend_promote_newest(self);
       else
         rc = sl_backend_submit(self, key == (int)keys->submit_or_promote_newest
                                          ? SL_PROMPT_QUEUE_MODE_STEER
@@ -6610,6 +6616,7 @@ static char *sl_readline_impl(sl_t *self, const char *prompt,
   impl->bracketed_paste = 0;
   impl->request_submit = 0;
   impl->request_cancel = 0;
+  impl->request_suspend = 0;
   impl->request_queue_dispatch = 0;
   impl->control_x_pending = 0;
   impl->active_readline = 1;
@@ -6648,6 +6655,7 @@ static char *sl_readline_impl(sl_t *self, const char *prompt,
     size_t paste_len;
     int key;
     int queue_key_checked = 0;
+    int replayed = 0, waiting_edit;
     sl_key_action_t action;
     sl_backend_pump(self);
     sl_edit_end(&impl->edit);
@@ -6664,10 +6672,28 @@ static char *sl_readline_impl(sl_t *self, const char *prompt,
     impl->active_prompt = render_prompt;
     sl_refresh_scroll_region(self);
     paste_len = 0;
-    if (impl->bracketed_paste)
+    waiting_edit = sl_backend_wait_keys(impl);
+    if (!waiting_edit &&
+        sl_backend_pop_key(impl, &key, paste_bytes, &paste_len))
+      replayed = 1;
+    else if (impl->bracketed_paste ||
+             (waiting_edit && sl_backend_reading_paste(impl)))
       key = sl_read_paste_input(self, paste_bytes, &paste_len);
     else
       key = sl_read_key(self);
+    if ((waiting_edit || sl_backend_wait_key(impl, key)) &&
+        key != SL_KEY_NONE && key != SL_KEY_CTRL_C && key != SL_KEY_CTRL_L &&
+        key != SL_KEY_ESCAPE) {
+      if (!paste_len && key >= 128 && key < 256)
+        (void)sl_read_utf8_input(self, (char)key, paste_bytes, &paste_len);
+      if (sl_backend_push_key(self, key, paste_bytes, paste_len) != SL_OK) {
+        failed = done = 1;
+        break;
+      }
+      key = SL_KEY_NONE;
+      paste_len = 0;
+      errno = 0;
+    }
     if (key != SL_KEY_NONE && impl->control_x_pending) {
       int approval_key =
           key == SL_KEY_ALT_A || key == SL_KEY_ALT_E ||
@@ -6685,7 +6711,8 @@ static char *sl_readline_impl(sl_t *self, const char *prompt,
         if (key >= 128 && key < 256) {
           char bytes[4];
           size_t byte_len;
-          (void)sl_read_utf8_input(self, (char)key, bytes, &byte_len);
+          if (!replayed)
+            (void)sl_read_utf8_input(self, (char)key, bytes, &byte_len);
         }
         key = SL_KEY_UNKNOWN;
       }
@@ -6773,6 +6800,11 @@ static char *sl_readline_impl(sl_t *self, const char *prompt,
           done = 1;
           break;
         }
+        if (impl->request_suspend) {
+          suspended = 1;
+          done = 1;
+          break;
+        }
         if (!impl->prompt_queue.approval_id) {
           int index = sl_prompt_approval_index(impl, 0);
           if (index >= 0) {
@@ -6836,6 +6868,8 @@ static char *sl_readline_impl(sl_t *self, const char *prompt,
         action = SL_KEY_ACTION_SUBMIT;
       else if (impl->request_cancel)
         action = SL_KEY_ACTION_CANCEL;
+      else if (impl->request_suspend)
+        action = SL_KEY_ACTION_SUSPEND;
       if (action != SL_KEY_ACTION_PASS)
         impl->edit.command = SL_EDIT_OTHER;
       if (action == SL_KEY_ACTION_HANDLED) {
@@ -7190,7 +7224,11 @@ static char *sl_readline_impl(sl_t *self, const char *prompt,
         if (key >= 32 && key < 256 && key != 127) {
           char bytes[4];
           size_t byte_len;
-          (void)sl_read_utf8_input(self, (char)key, bytes, &byte_len);
+          if (replayed && paste_len) {
+            memcpy(bytes, paste_bytes, paste_len);
+            byte_len = paste_len;
+          } else
+            (void)sl_read_utf8_input(self, (char)key, bytes, &byte_len);
           if (sl_buf_insert(self, impl->cursor, bytes, byte_len) == 0)
             impl->cursor += byte_len;
         }
@@ -7285,6 +7323,7 @@ static char *sl_readline_impl(sl_t *self, const char *prompt,
   }
   impl->active_prompt = prompt;
   if (interrupted) {
+    sl_backend_cancel_waiting(impl);
     if (impl->backend && impl->prompt_queue.editing.info.id)
       (void)sl_backend_cancel_edit(self);
     sl_prompt_queue_restore_edit(self);
@@ -7373,6 +7412,8 @@ static char *sl_readline_impl(sl_t *self, const char *prompt,
   if (eof || cancelled) {
     if (cancelled && impl->backend && impl->prompt_queue.editing.info.id)
       (void)sl_backend_cancel_edit(self);
+    if (cancelled)
+      sl_backend_cancel_waiting(impl);
     sl_prompt_queue_restore_edit(self);
     free(promoted);
     free(queued);
@@ -8657,6 +8698,7 @@ static sl_t *sl_create_with_config_impl(const sl_config_t *config) {
   self->set_cursor = sl_set_cursor_method;
   self->submit = sl_submit_method;
   self->cancel = sl_cancel_method;
+  self->suspend = sl_suspend_method;
   self->print_above = sl_print_above_method;
   self->last_readline_status = sl_last_readline_status_method;
   self->last_error = sl_last_error_method;
@@ -9230,6 +9272,10 @@ int sl_cancel(sl_t *self) {
   if (!self || !self->cancel)
     return SL_ERROR_INVALID;
   return self->cancel(self);
+}
+
+int sl_suspend(sl_t *self) {
+  return self && self->suspend ? self->suspend(self) : SL_ERROR_INVALID;
 }
 
 int sl_print_above(sl_t *self, sl_stream_callback_t callback, void *userdata) {

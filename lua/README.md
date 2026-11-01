@@ -680,6 +680,11 @@ All themes use the same key. `SOFTLINE_HISTORY_DIR` overrides their directory.
 
 ## Constructor-selected queue backend
 
+`sl:suspend()` lets an owner-thread idle/watch callback request the same
+draft-preserving terminal handoff as `KEY_ACTION_SUSPEND`. It returns `nil, status`
+outside active readline and does not stop backend work. Run the foreground
+child after readline returns `READLINE_SUSPENDED`, then resume the editor.
+
 Ordinary constructors retain the native local queue. `queue_backend` instead
 selects an application-owned asynchronous queue for the entire handle lifetime;
 `prompt_queue` must be enabled. `queue_backend_context` is any Lua value retained

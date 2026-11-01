@@ -1,7 +1,10 @@
 #define _POSIX_C_SOURCE 200809L
+#include "chat_demo_data.h"
 #include "queue_demo_wire.h"
 #include <arpa/inet.h>
 #include <errno.h>
+#include <limits.h>
+#include <netinet/tcp.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdio.h>
@@ -28,6 +31,7 @@ typedef struct client {
 typedef struct item {
   sl_queue_entry_t value;
   char id[128], revision[128], token[128], owner[64];
+  int direct_start;
 } item_t;
 typedef struct owner {
   demo_link_t link;
@@ -36,11 +40,21 @@ typedef struct owner {
   client_t *client;
   size_t count;
   unsigned long revision, serial, token;
-  int stopped, auto_approval, active, piece, injection;
-  unsigned long pace_ms;
+  int stopped, auto_approval, active, injection;
+  int gated, input_empty, shell_pending, shell_requested, attach_wait_seam,
+      initialized, demo_enabled, gate_fd, waiting_gate;
+  unsigned long delay_us, interval_ms;
+  unsigned int turn_index;
+  const char *answer;
+  size_t answer_pos;
+  char previous;
   double next_piece, next_injection;
 } owner_t;
 static volatile sig_atomic_t quitting;
+static volatile sig_atomic_t producer_paused;
+/* Optional deterministic fixture control: queue service remains live while
+ * response production is paused, just like the local demo's child producer. */
+static void pause_producer(int signum) { producer_paused = signum == SIGUSR1; }
 static void stop_server(int signum) {
   (void)signum;
   quitting = 1;
@@ -60,6 +74,8 @@ static char *duplicate(const char *text) {
 static void disconnect(owner_t *o) {
   demo_link_close(&o->link);
   o->client = NULL;
+  o->gated = o->shell_pending = o->shell_requested = 0;
+  o->input_empty = 1;
 }
 static void send_packet(owner_t *o, demo_packet_t *p) {
   if (o->link.fd >= 0 &&
@@ -69,17 +85,22 @@ static void send_packet(owner_t *o, demo_packet_t *p) {
 }
 static void text_event(owner_t *o, int kind, const char *text) {
   demo_packet_t p = {0};
-  if (!o->client)
+  if (!o->client || o->shell_pending)
     return;
   demo_put_number(&p, (unsigned long)kind);
   demo_put_string(&p, text);
   send_packet(o, &p);
 }
+static void handoff_shell(owner_t *o, const char *text) {
+  text_event(o, DEMO_SEGMENT_END, NULL);
+  text_event(o, DEMO_SHELL, text);
+  o->shell_requested = 0;
+  o->shell_pending = 1;
+}
 static sl_queue_entry_t exposed(owner_t *o, size_t index) {
   sl_queue_entry_t e = o->items[index].value;
-  e.stopped = o->stopped;
-  e.ready = !o->stopped && !e.held && !e.edit_held &&
-            (!o->active || e.mode == SL_PROMPT_QUEUE_MODE_STEER || e.action);
+  e.ready = !e.held && !e.edit_held && !e.stopped &&
+            (is_local_command(e.text) || !o->active);
   if (!o->client || strcmp(o->items[index].owner, o->client->name))
     e.edit_token = NULL;
   return e;
@@ -94,7 +115,7 @@ static void change(owner_t *o, sl_queue_change_kind_t kind, size_t index,
   if (kind != SL_QUEUE_SNAPSHOT)
     ++o->revision;
   (void)snprintf(revision, sizeof(revision), "q%lu", o->revision);
-  if (!o->client)
+  if (!o->client || o->shell_pending)
     return;
   memset(&c, 0, sizeof(c));
   c.kind = kind;
@@ -170,6 +191,7 @@ static item_t *add(owner_t *o, const char *text, sl_prompt_queue_mode_t mode,
   item->value.text = owned;
   item->value.mode = mode;
   item->value.held = held && !o->auto_approval;
+  item->value.stopped = request && !held ? 0 : o->stopped;
   item->value.action = action;
   touch(o, o->count - 1, request);
   return item;
@@ -215,28 +237,41 @@ static void set_approval(owner_t *o, int enabled,
     }
   change(o, SL_QUEUE_STATE, 0, NULL, request);
 }
+static void set_stopped(owner_t *o, int stopped,
+                        sl_queue_request_id_t request) {
+  size_t i;
+  o->stopped = stopped;
+  for (i = 0; i < o->count; ++i)
+    if (o->items[i].value.stopped != stopped) {
+      o->items[i].value.stopped = stopped;
+      change(o, SL_QUEUE_UPSERT, i, NULL, request);
+    }
+  change(o, SL_QUEUE_STATE, 0, NULL, request);
+}
+static void schedule_injection(owner_t *o, double now) {
+  unsigned long interval = o->interval_ms;
+  if (!interval)
+    interval = 10000u + (unsigned int)rand() % 10001u;
+  o->next_injection = now + (double)interval;
+}
 static void inject(owner_t *o) {
-  char text[768];
-  int n = ++o->injection;
-  (void)snprintf(
-      text, sizeof(text), "Remote %s request #%d: %s",
-      n % 2 ? "queued" : "steering", n,
-      n % 3 ? "Summarize the verification before continuing."
-            : "Check that typing remains responsive while output is streaming, "
-              "that queue and steering intent survive editing, "
-              "and that approval decisions stay in arrival order. Disconnect "
-              "the frontend while this request is held, then "
-              "reattach and confirm that the same accepted request is still "
-              "awaiting a decision.");
-  (void)add(o, text,
-            n % 2 ? SL_PROMPT_QUEUE_MODE_QUEUED : SL_PROMPT_QUEUE_MODE_STEER, 1,
-            0, 0);
+  char text[2048];
+  int steering = (o->injection % 2) != 0;
+  unsigned int shape = o->injection ? (unsigned int)rand() % 4u : 0u;
+  const char *details = shape ? approval_details[shape]
+                        : steering
+                            ? "Focus the next answer on verification."
+                            : "Summarize the next steps before continuing.";
+  (void)snprintf(text, sizeof(text), "Demo %s request #%u: %s",
+                 steering ? "steering" : "queued",
+                 (unsigned int)o->injection + 1, details);
+  if (add(o, text,
+          steering ? SL_PROMPT_QUEUE_MODE_STEER : SL_PROMPT_QUEUE_MODE_QUEUED,
+          1, 0, 0))
+    ++o->injection;
 }
 static int command(const char *text) {
-  return !strcmp(text, "/status") || !strcmp(text, "/stop") ||
-         !strcmp(text, "/resume") || !strcmp(text, "/approve") ||
-         !strcmp(text, "/approve on") || !strcmp(text, "/approve off") ||
-         !strcmp(text, "/inject");
+  return text[0] == '/' || text[0] == '!';
 }
 static void handle_request(owner_t *o, const sl_queue_request_t *r) {
   sl_queue_result_t result;
@@ -314,17 +349,15 @@ static void handle_request(owner_t *o, const sl_queue_request_t *r) {
         (r->mode != SL_PROMPT_QUEUE_MODE_QUEUED &&
          r->mode != SL_PROMPT_QUEUE_MODE_STEER))
       break;
-    if ((*r->text == '/' && !command(r->text)) || *r->text == '!') {
-      result.reason = "unsupported remote host command; /status /stop /resume "
-                      "/approve /inject";
-      break;
-    }
-    item = add(o, r->text,
-               command(r->text) ? SL_PROMPT_QUEUE_MODE_QUEUED : r->mode,
-               r->enabled, command(r->text), r->request_id);
+    item =
+        add(o, r->text, r->mode, r->enabled, command(r->text), r->request_id);
     if (!item) {
       result.reason = "demo queue is full (64 entries)";
       break;
+    }
+    if (!o->active && o->stopped && !r->enabled && !command(r->text)) {
+      item->direct_start = 1;
+      set_stopped(o, 0, r->request_id);
     }
     result.status = SL_QUEUE_ACCEPTED;
     break;
@@ -337,8 +370,7 @@ static void handle_request(owner_t *o, const sl_queue_request_t *r) {
     result.status = SL_QUEUE_ACCEPTED;
     break;
   case SL_QUEUE_END_EDIT:
-    if (!r->text || !*r->text || strlen(r->text) > 4096 ||
-        (*r->text == '/' && !command(r->text)) || *r->text == '!')
+    if (!r->text || !*r->text || strlen(r->text) > 4096)
       break;
     {
       char *text = duplicate(r->text);
@@ -346,7 +378,7 @@ static void handle_request(owner_t *o, const sl_queue_request_t *r) {
         break;
       free((void *)item->value.text);
       item->value.text = text;
-      item->value.mode = command(text) ? SL_PROMPT_QUEUE_MODE_QUEUED : r->mode;
+      item->value.mode = r->mode;
       item->value.action = command(text);
     }
     /* fall through */
@@ -375,15 +407,17 @@ static void handle_request(owner_t *o, const sl_queue_request_t *r) {
         &client->results[(client->next + RESULT_MAX - 1) % RESULT_MAX].value);
     return;
   case SL_QUEUE_SET_INTENT:
-    item->value.mode =
-        item->value.action ? SL_PROMPT_QUEUE_MODE_QUEUED : r->mode;
+    item->value.mode = r->mode;
+    if (o->stopped && !item->value.held && !item->value.edit_held) {
+      item->direct_start = 1;
+      set_stopped(o, 0, r->request_id);
+    }
     touch(o, index, r->request_id);
     result.status = SL_QUEUE_ACCEPTED;
     break;
   case SL_QUEUE_STOP:
   case SL_QUEUE_RESUME:
-    o->stopped = r->operation == SL_QUEUE_STOP;
-    change(o, SL_QUEUE_STATE, 0, NULL, r->request_id);
+    set_stopped(o, r->operation == SL_QUEUE_STOP, r->request_id);
     result.status = SL_QUEUE_ACCEPTED;
     break;
   case SL_QUEUE_CLEAR:
@@ -432,11 +466,13 @@ done:
   emit_result(
       o, &client->results[(client->next + RESULT_MAX - 1) % RESULT_MAX].value);
 }
-static void hello(owner_t *o, const char *name, unsigned long pace_ms,
-                  unsigned long request_high) {
+static void hello(owner_t *o, const char *name, unsigned long delay_us,
+                  unsigned long request_high, int approvals,
+                  unsigned long interval_ms, unsigned int seed) {
   size_t i;
   if (!name || !*name || strlen(name) >= sizeof(o->clients[0].name) ||
-      o->client || pace_ms > 1000) {
+      o->client || delay_us > 60000000 || approvals < 0 || approvals > 1 ||
+      interval_ms > 60000) {
     disconnect(o);
     return;
   }
@@ -461,8 +497,21 @@ static void hello(owner_t *o, const char *name, unsigned long pace_ms,
     disconnect(o);
     return;
   }
-  o->pace_ms = pace_ms;
+  o->delay_us = delay_us;
+  o->interval_ms = interval_ms;
+  if (!o->initialized) {
+    srand(seed);
+    schedule_injection(o, milliseconds());
+    o->initialized = 1;
+  }
+  o->demo_enabled = approvals;
+  o->gated = 1;
+  o->attach_wait_seam = o->active;
   change(o, SL_QUEUE_SNAPSHOT, 0, NULL, 0);
+  if (o->active)
+    text_event(o, DEMO_RESPONSE_BEGIN, NULL);
+  else
+    text_event(o, DEMO_OUTPUT_END, NULL);
 }
 static void input(owner_t *o) {
   int n;
@@ -479,94 +528,137 @@ static void input(owner_t *o) {
     kind = demo_number(&p);
     if (kind == DEMO_HELLO) {
       const char *name = demo_string(&p);
-      unsigned long pace_ms = demo_number(&p);
+      unsigned long delay_us = demo_number(&p);
       unsigned long request_high = demo_number(&p);
+      int approvals = (int)demo_number(&p);
+      unsigned long interval_ms = demo_number(&p);
+      unsigned int seed = (unsigned int)demo_number(&p);
       if (!p.failed && p.offset == p.length)
-        hello(o, name, pace_ms, request_high);
+        hello(o, name, delay_us, request_high, approvals, interval_ms, seed);
       else
         disconnect(o);
     } else if (kind == DEMO_REQUEST && o->client) {
       sl_queue_request_t r;
+      o->gated = 1;
       demo_get_request(&p, &r);
       if (!p.failed && p.offset == p.length)
         handle_request(o, &r);
       else
         disconnect(o);
     } else if (kind == DEMO_CANCEL && o->client && p.offset == p.length) {
-      o->active = 0;
-      text_event(o, DEMO_OUTPUT,
-                 "\n[turn cancelled; backlog remains stopped]\n");
+      o->active = o->waiting_gate = o->shell_requested = 0;
+      set_stopped(o, 1, 0);
+      text_event(o, DEMO_OUTPUT_END, NULL);
+    } else if (kind == DEMO_IDLE && o->client) {
+      o->input_empty = (int)demo_number(&p);
+      if (p.failed || p.offset != p.length)
+        disconnect(o);
+      else
+        o->gated = 0;
+    } else if (kind == DEMO_SHELL_BEGIN && o->client && p.offset == p.length) {
+      o->shell_requested = 1;
     } else
       disconnect(o);
     demo_packet_free(&p);
   }
 }
-static void host_action(owner_t *o, const char *text) {
-  if (!strcmp(text, "/resume")) {
-    o->stopped = 0;
-    change(o, SL_QUEUE_STATE, 0, NULL, 0);
-  } else if (!strcmp(text, "/stop")) {
-    o->stopped = 1;
-    change(o, SL_QUEUE_STATE, 0, NULL, 0);
-  } else if (!strncmp(text, "/approve", 8))
-    set_approval(o,
-                 !strcmp(text, "/approve on")    ? 1
-                 : !strcmp(text, "/approve off") ? 0
-                                                 : !o->auto_approval,
-                 0);
-  else if (!strcmp(text, "/inject"))
-    inject(o);
-  else {
+
+static void start_response(owner_t *o, double now) {
+  o->active = 1;
+  o->answer =
+      response_templates[o->turn_index++ % (sizeof(response_templates) /
+                                            sizeof(response_templates[0]))];
+  o->answer_pos = 0;
+  o->previous = 0;
+  o->next_piece = now;
+  o->attach_wait_seam = 0;
+  o->waiting_gate = o->gate_fd >= 0;
+  text_event(o, DEMO_RESPONSE_BEGIN, NULL);
+}
+static void host_action(owner_t *o, const char *text, int at_seam, double now) {
+  if (!strcmp(text, "/status")) {
     char line[256];
     (void)snprintf(line, sizeof(line),
-                   "\nOwner: %lu accepted, %s, auto-approval %s, turn %s.\n",
-                   (unsigned long)o->count, o->stopped ? "stopped" : "running",
-                   o->auto_approval ? "on" : "off",
-                   o->active ? "active" : "idle");
-    text_event(o, DEMO_OUTPUT, line);
+                   "Status: %s / backlog %s / %lu queued / auto-approval %s",
+                   o->active ? "busy" : "idle",
+                   o->stopped ? "paused" : "running", (unsigned long)o->count,
+                   o->auto_approval ? "on" : "off");
+    text_event(o, DEMO_MESSAGE, line);
+  } else if (!strcmp(text, "/resume")) {
+    set_stopped(o, 0, 0);
+    text_event(o, DEMO_MESSAGE, "Backlog resumed.");
+  } else if (command_named(text, "/approve")) {
+    int enabled = !o->auto_approval;
+    if (!strcmp(text, "/approve on"))
+      enabled = 1;
+    else if (!strcmp(text, "/approve off"))
+      enabled = 0;
+    else if (strcmp(text, "/approve")) {
+      text_event(o, DEMO_MESSAGE, "Usage: /approve [on|off]");
+      return;
+    }
+    set_approval(o, enabled, 0);
+    text_event(o, DEMO_MESSAGE,
+               enabled ? "Auto-approval ON (all waiting requests approved)."
+                       : "Auto-approval OFF (new requests need approval).");
+  } else if (!strcmp(text, "/quit")) {
+    text_event(o, DEMO_QUIT, NULL);
+  } else if (is_shell_command(text)) {
+    handoff_shell(o, text);
+  } else {
+    text_event(o, DEMO_PROMPT, text);
+    if (command_named(text, "/steer"))
+      text_event(o, DEMO_NOTE, "Steering applied.");
+    else if (!at_seam)
+      start_response(o, now);
   }
 }
-static void pump(owner_t *o, double now) {
-  size_t i;
-  /* Backend alone claims work at its turn/steering seams. */
-  for (i = 0; i < o->count; ++i) {
-    sl_queue_entry_t e = exposed(o, i);
-    if (e.held || e.edit_held || (!e.action && !e.ready))
-      continue;
-    text_event(o, DEMO_PROMPT, e.text);
-    if (e.action) {
-      char *text = duplicate(e.text);
-      if (!text)
-        break;
-      remove_item(o, i, 0);
-      host_action(o, text);
-      free(text);
-    } else {
-      remove_item(o, i, 0);
-      if (o->active)
-        text_event(o, DEMO_OUTPUT,
-                   "\n[steering accepted at the owner output seam]\n");
-      else {
-        o->active = 1;
-        o->piece = 0;
-        o->next_piece = now;
+static int ready(owner_t *o, item_t *item, int at_seam) {
+  if (o->gated || item->value.held || item->value.edit_held)
+    return 0;
+  if (is_local_command(item->value.text))
+    return 1;
+  if (item->value.stopped)
+    return 0;
+  if (!o->active)
+    return !is_shell_command(item->value.text) ||
+           (o->client && !o->shell_pending && o->input_empty);
+  return at_seam && item->value.mode == SL_PROMPT_QUEUE_MODE_STEER &&
+         !is_shell_command(item->value.text);
+}
+static void claim_ready(owner_t *o, int at_seam, double now) {
+  size_t i, selected, budget = DEMO_ITEM_MAX;
+  int segment_ended = 0;
+  while (budget--) {
+    selected = o->count;
+    for (i = 0; i < o->count; ++i)
+      if (ready(o, o->items + i, at_seam)) {
+        if (selected == o->count || (!o->active && o->items[i].direct_start))
+          selected = i;
+        if (o->active || o->items[i].direct_start)
+          break;
       }
+    if (selected == o->count)
+      return;
+    if (at_seam && !segment_ended) {
+      text_event(o, DEMO_SEGMENT_END, NULL);
+      segment_ended = 1;
     }
-    break;
-  }
-  if (o->active && now >= o->next_piece) {
-    static const char *pieces[] = {
-        "The queue ",       "belongs to ",        "the separate ",
-        "owner process. ",  "Typing, editing, ",  "approvals and ",
-        "terminal resize ", "remain available. ", "Disconnecting ",
-        "this frontend ",   "does not stop ",     "accepted work.\n"};
-    text_event(o, DEMO_OUTPUT, pieces[o->piece % 12]);
-    o->next_piece = now + (double)o->pace_ms;
-    if (++o->piece == 72) {
-      o->active = 0;
-      text_event(o, DEMO_OUTPUT_END, NULL);
+    {
+      char *text = duplicate(o->items[selected].value.text);
+      int was_active = o->active;
+      if (!text)
+        return;
+      remove_item(o, selected, 0);
+      host_action(o, text, was_active, now);
+      free(text);
+      if (!was_active && o->active)
+        return;
     }
   }
+}
+static void refresh(owner_t *o) {
+  size_t i;
   for (i = 0; i < o->count; ++i) {
     sl_queue_entry_t current = exposed(o, i);
     if (o->items[i].value.ready != current.ready ||
@@ -577,6 +669,50 @@ static void pump(owner_t *o, double now) {
     }
   }
 }
+static void pump(owner_t *o, double now) {
+  char chunk[65];
+  size_t used = 0, budget = o->delay_us ? 1 : 64;
+  if (o->shell_requested && !o->active)
+    handoff_shell(o, NULL);
+  claim_ready(o, 0, now);
+  while (o->active && !o->waiting_gate && !producer_paused &&
+         now >= o->next_piece && budget--) {
+    char byte = o->answer[o->answer_pos++];
+    if (!o->attach_wait_seam)
+      chunk[used++] = byte;
+    o->next_piece = now + (double)o->delay_us / 1000.0;
+    if (byte == '\n' && o->previous == '\n') {
+      if (used) {
+        chunk[used] = 0;
+        text_event(o, DEMO_OUTPUT, chunk);
+        used = 0;
+      }
+      o->attach_wait_seam = 0;
+      claim_ready(o, 1, now);
+      if (o->shell_requested)
+        handoff_shell(o, NULL);
+    }
+    o->previous = byte;
+    if (!o->answer[o->answer_pos]) {
+      if (used) {
+        chunk[used] = 0;
+        text_event(o, DEMO_OUTPUT, chunk);
+        used = 0;
+      }
+      o->active = 0;
+      text_event(o, DEMO_OUTPUT_END, NULL);
+      if (o->shell_requested)
+        handoff_shell(o, NULL);
+      claim_ready(o, 0, now);
+      break;
+    }
+  }
+  if (used) {
+    chunk[used] = 0;
+    text_event(o, DEMO_OUTPUT, chunk);
+  }
+  refresh(o);
+}
 int main(int argc, char **argv) {
   struct sockaddr_in address;
   socklen_t address_length = sizeof(address);
@@ -584,7 +720,7 @@ int main(int argc, char **argv) {
   char *end;
   long port = argc > 1 ? strtol(argv[1], &end, 10) : 7635;
   owner_t *o = calloc(1, sizeof(*o));
-  const char *approval = getenv("SOFTLINE_CHAT_APPROVAL_DEMO");
+  const char *gate = getenv("SOFTLINE_CHAT_GATE_FD");
   if (!o)
     return 1;
   if (argc > 2 || (argc > 1 && (!*argv[1] || *end)) || port < 0 ||
@@ -595,10 +731,33 @@ int main(int argc, char **argv) {
   }
   demo_link_init(&o->link, -1);
   o->revision = 1;
-  o->pace_ms = 100;
+  o->delay_us = 20000;
+  o->gate_fd = -1;
+  o->input_empty = 1;
+  if (gate) {
+    long fd = strtol(gate, &end, 10);
+    if (!*gate || *end || fd < 3 || fd > 9) {
+      fprintf(stderr, "SOFTLINE_CHAT_GATE_FD must be an inherited FD 3..9\n");
+      free(o);
+      return 1;
+    }
+    o->gate_fd = (int)fd;
+  }
   signal(SIGPIPE, SIG_IGN);
   signal(SIGTERM, stop_server);
   signal(SIGINT, stop_server);
+  if (getenv("SOFTLINE_CHAT_TEST_SIGNALS")) {
+    struct sigaction action;
+    memset(&action, 0, sizeof(action));
+    action.sa_handler = pause_producer;
+    sigemptyset(&action.sa_mask);
+    if (sigaction(SIGUSR1, &action, NULL) ||
+        sigaction(SIGUSR2, &action, NULL)) {
+      perror("fixture signal setup");
+      free(o);
+      return 1;
+    }
+  }
   listener = socket(AF_INET, SOCK_STREAM, 0);
   if (listener < 0) {
     perror("socket");
@@ -620,14 +779,13 @@ int main(int argc, char **argv) {
   (void)getsockname(listener, (struct sockaddr *)&address, &address_length);
   printf("LISTEN 127.0.0.1 %u\n", (unsigned)ntohs(address.sin_port));
   fflush(stdout);
-  o->next_injection = milliseconds() + 12000;
   while (!quitting) {
-    struct pollfd fds[2];
+    struct pollfd fds[3];
     double now = milliseconds(), due = now + 60000;
     int ready;
-    if (o->active)
+    if (o->active && !o->waiting_gate && !producer_paused)
       due = o->next_piece;
-    if ((!approval || strcmp(approval, "0")) && o->next_injection < due)
+    if (o->demo_enabled && o->next_injection < due)
       due = o->next_injection;
     fds[0].fd = listener;
     fds[0].events = POLLIN;
@@ -635,7 +793,10 @@ int main(int argc, char **argv) {
     fds[1].fd = o->link.fd;
     fds[1].events = POLLIN | (o->link.count ? POLLOUT : 0);
     fds[1].revents = 0;
-    ready = poll(fds, 2, due <= now ? 0 : (int)(due - now));
+    fds[2].fd = o->waiting_gate ? o->gate_fd : -1;
+    fds[2].events = POLLIN;
+    fds[2].revents = 0;
+    ready = poll(fds, 3, due <= now ? 0 : (int)(due - now) + 1);
     if (ready < 0 && errno != EINTR)
       break;
     if (fds[0].revents & POLLIN) {
@@ -644,19 +805,34 @@ int main(int argc, char **argv) {
         disconnect(o);
         if (demo_nonblock(fd))
           close(fd);
-        else
+        else {
+          int enabled = 1;
+          (void)setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &enabled,
+                           sizeof(enabled));
           demo_link_init(&o->link, fd);
+        }
       }
     } else if (fds[1].revents & (POLLIN | POLLHUP | POLLERR))
       input(o);
     if ((fds[1].revents & POLLOUT) && o->link.fd >= 0 &&
         demo_link_flush(&o->link))
       disconnect(o);
+    if (fds[2].revents & (POLLIN | POLLHUP)) {
+      char token;
+      ssize_t got = read(o->gate_fd, &token, 1);
+      if (got == 1 && token == '\n')
+        o->waiting_gate = 0;
+      else if (got == 0) {
+        o->waiting_gate = o->active = 0;
+        text_event(o, DEMO_OUTPUT_END, NULL);
+      }
+    }
     now = milliseconds();
     pump(o, now);
-    if ((!approval || strcmp(approval, "0")) && now >= o->next_injection) {
-      inject(o);
-      o->next_injection = now + 12000;
+    if (o->demo_enabled && now >= o->next_injection) {
+      schedule_injection(o, now);
+      if (o->count < 4)
+        inject(o);
     }
   }
   disconnect(o);

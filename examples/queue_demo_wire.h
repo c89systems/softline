@@ -14,7 +14,15 @@ enum demo_message {
   DEMO_PROMPT,
   DEMO_OUTPUT,
   DEMO_OUTPUT_END,
-  DEMO_CANCEL
+  DEMO_CANCEL,
+  DEMO_RESPONSE_BEGIN,
+  DEMO_SEGMENT_END,
+  DEMO_MESSAGE,
+  DEMO_NOTE,
+  DEMO_SHELL,
+  DEMO_QUIT,
+  DEMO_IDLE,
+  DEMO_SHELL_BEGIN
 };
 typedef struct demo_packet {
   unsigned char *data;

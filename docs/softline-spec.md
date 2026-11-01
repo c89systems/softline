@@ -427,8 +427,14 @@ session, then begins a fresh session and resumes editing. Shell clear/resize
 changes the physical layout only: owned UI wraps at the current geometry, with
 no producer transcript storage or replay. Exact `!sh` and `/shell` submissions
 still return to an empty prompt. Suspension does not pause background producers;
-the caller must arrange exclusive terminal ownership. The examples reject Alt-S
-while an operation is running. The generic action and status extend existing
+the caller must arrange exclusive terminal ownership. The local examples reject
+Alt-S while an operation is running. Remote chat instead requests handoff at a
+response seam, detaches output delivery while the shell runs and resubscribes
+to future output on return. The backend continues executing without transcript
+buffering or replay. An owner-thread idle/watch callback can request the same
+suspension with `sl_suspend()` (Lua `sl:suspend()`); the child still runs after
+readline returns. This method is part of the unreleased ABI 4 layout.
+The generic action and status extend existing
 enums without changing the public receiver/configuration layouts or ABI.
 
 Host buffer replacements and insertions during suspension are journaled like

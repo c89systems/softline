@@ -15,40 +15,9 @@
 #include <time.h>
 #include <unistd.h>
 
-static const char *const response_templates[] = {
-    "# A short answer\n\nHere is *italic* context, **bold** emphasis, and "
-    "`code` in one paragraph.\n\n## Next step\n\nTry another prompt.\n",
-    "## A longer answer\n\nFirst, inspect the input.\n\nThen use `code` "
-    "for the operation; **bold** marks the result and *italic* marks a "
-    "caveat.\n\n# Summary\n\nThe stream is still live.\n",
-    "# Notes\n\nA single line can be *italic*, **bold**, or `code`.\n"};
-
-static const char *const approval_details[] = {
-    NULL,
-    "Review the proposed changes before continuing.\n"
-    "Check the public API and the tests.\n"
-    "Report any remaining risks.",
-    "Check the complete behavior before proceeding: confirm that ordinary "
-    "user input stays responsive while output is streaming, that queued and "
-    "steering messages keep their original destination, and that approval "
-    "decisions remain in arrival order through editing and requeueing. "
-    "Include the evidence from focused tests, describe any remaining "
-    "uncertainty, and keep the explanation clear enough to review without "
-    "opening the implementation. Paragraph complete.",
-    "Verification plan:\n"
-    "01. Check intent and constraints.\n"
-    "02. Keep ordinary input responsive.\n"
-    "03. Preserve FIFO approval order.\n"
-    "04. Retain steering intent.\n"
-    "05. Keep normal queue previews visible.\n"
-    "06. Preserve the reasoning row.\n"
-    "07. Wrap text to the terminal width.\n"
-    "08. Limit previews to three lines.\n"
-    "09. Mark omitted text with an ellipsis.\n"
-    "10. Keep full messages editable.\n"
-    "11. Retain holds after editing.\n"
-    "12. Report verification evidence.\n"
-    "End of verification plan."};
+#include "chat_demo_data.h"
+#include "queue_demo_client.h"
+#include "queue_demo_wire.h"
 
 struct chat_state {
   sl_t *sl;
@@ -72,6 +41,9 @@ struct chat_state {
   unsigned int injected;
   double next_injection;
   int demo_failed;
+  demo_client_t *remote;
+  unsigned int approval_seed;
+  int remote_shell, shell_requested;
 };
 
 static int start_operation(struct chat_state *state);
@@ -85,21 +57,6 @@ static int handle_command(struct chat_state *state, const char *line,
 static int set_chat_message(sl_t *sl, const char *message) {
   int rc = sl_set_status_message_prefix(sl, message ? NULL : "");
   return rc == SL_OK ? sl_set_status_message(sl, message ? message : " ") : rc;
-}
-
-static int is_shell_command(const char *line) {
-  return strcmp(line, "!sh") == 0 || strcmp(line, "/shell") == 0;
-}
-
-static int command_named(const char *line, const char *name) {
-  size_t length = strlen(name);
-  return !strncmp(line, name, length) &&
-         (line[length] == '\0' || line[length] == ' ');
-}
-
-static int is_local_command(const char *line) {
-  return !strcmp(line, "/status") || !strcmp(line, "/resume") ||
-         command_named(line, "/approve");
 }
 
 static int command_ready(const struct chat_state *state, const char *line,
@@ -125,6 +82,8 @@ static int classify_prompt(sl_t *sl, const char *text,
 static int sync_queue_readiness(struct chat_state *state, int at_seam) {
   size_t index;
   sl_prompt_queue_entry_info_t draft;
+  if (state->remote)
+    return 0;
   if (sl_prompt_queue_draft_info(state->sl, &draft) != SL_OK)
     return -1;
   if (draft.id && sl_prompt_queue_set_executable(
@@ -185,6 +144,16 @@ static int shell_editor_key(sl_t *sl, sl_key_t key, void *userdata,
                             sl_key_action_t *action) {
   struct chat_state *state = (struct chat_state *)userdata;
   (void)key;
+  if (state->remote) {
+    int result;
+    *action = SL_KEY_ACTION_HANDLED;
+    if (state->shell_requested)
+      return SL_OK;
+    result = demo_client_shell_begin(state->remote);
+    if (result == SL_OK)
+      state->shell_requested = 1;
+    return result;
+  }
   *action = state->busy ? SL_KEY_ACTION_HANDLED : SL_KEY_ACTION_SUSPEND;
   return state->busy
              ? set_chat_message(sl, "Shell is available only between turns.")
@@ -640,6 +609,11 @@ static void approval_demo_idle(sl_t *sl, void *userdata) {
   sl_prompt_queue_entry_info_t draft;
   double now = monotonic_seconds();
   int result = SL_OK;
+  if (state->remote) {
+    if (demo_client_idle(state->remote) != SL_OK)
+      state->demo_failed = 1;
+    return;
+  }
   if (now < 0)
     result = SL_ERROR_IO;
   else if (now >= state->next_injection) {
@@ -716,7 +690,10 @@ static int setup_approval_demo(struct chat_state *state) {
     seed = (unsigned int)value;
   }
   srand(seed);
+  state->approval_seed = seed;
   schedule_injection(state, now);
+  if (state->remote)
+    return 0;
   return sl_set_prompt_queue_delivery(state->sl,
                                       SL_PROMPT_QUEUE_DELIVERY_AUTO) == SL_OK &&
                  sl_set_idle_callback(state->sl, approval_demo_idle, state) ==
@@ -795,7 +772,91 @@ static void report_failure(struct chat_state *state, const char *operation) {
           mdf_error ? "; libmdf: " : "", mdf_error ? mdf_error : "");
 }
 
-int main(void) {
+static int remote_event(void *context, int kind, const char *text) {
+  struct chat_state *state = context;
+  size_t i;
+  switch (kind) {
+  case DEMO_PROMPT:
+    return render_user_prompt(state, text) == 0 ? SL_OK : SL_ERROR_IO;
+  case DEMO_RESPONSE_BEGIN:
+    if (finish_response_document(state))
+      return SL_ERROR_IO;
+    if (state->response_documents && state->response_renderer->begin_document(
+                                         state->response_renderer) != MDF_OK)
+      return SL_ERROR_IO;
+    state->response_open = 1;
+    state->response_bytes = 0;
+    state->previous_response_char = 0;
+    return set_busy(state, 1) == 0 ? SL_OK : SL_ERROR_IO;
+  case DEMO_OUTPUT:
+    if (sync_geometry(state))
+      return SL_ERROR_IO;
+    for (i = 0; text[i]; ++i) {
+      if (!state->response_open) {
+        if (state->response_renderer->begin_document(
+                state->response_renderer) != MDF_OK)
+          return SL_ERROR_IO;
+        state->response_open = 1;
+      }
+      if (state->response_renderer->feed(state->response_renderer, text + i,
+                                         1) != MDF_OK)
+        return SL_ERROR_IO;
+      if (++state->response_bytes == 15 &&
+          set_chat_message(state->sl, "Reasoning...") != SL_OK)
+        return SL_ERROR_IO;
+    }
+    return SL_OK;
+  case DEMO_SEGMENT_END:
+    return finish_response_document(state) == 0 ? SL_OK : SL_ERROR_IO;
+  case DEMO_OUTPUT_END:
+    return finish_response_document(state) == 0 && set_busy(state, 0) == 0
+               ? SL_OK
+               : SL_ERROR_IO;
+  case DEMO_MESSAGE:
+    return command_message(state, text) == 0 ? SL_OK : SL_ERROR_IO;
+  case DEMO_NOTE:
+    return render_note(state, text) == 0 ? SL_OK : SL_ERROR_IO;
+  case DEMO_SHELL:
+    if (finish_response_document(state))
+      return SL_ERROR_IO;
+    state->shell_requested = 0;
+    state->remote_shell = 1;
+    if (text && render_user_prompt(state, text))
+      return SL_ERROR_IO;
+    return sl_last_readline_status(state->sl) == SL_READLINE_SUSPENDED
+               ? SL_OK
+               : sl_suspend(state->sl);
+  case DEMO_QUIT:
+    state->exit_requested = 1;
+    return show_goodbye(state) == 0 ? sl_suspend(state->sl) : SL_ERROR_IO;
+  default:
+    return SL_ERROR_INVALID;
+  }
+}
+
+static int reconnect_editor(sl_t *sl, sl_key_t key, void *context,
+                            sl_key_action_t *action) {
+  struct chat_state *state = context;
+  (void)sl;
+  (void)key;
+  *action = SL_KEY_ACTION_HANDLED;
+  state->shell_requested = 0;
+  return demo_client_reconnect(state->remote);
+}
+
+static int wait_remote_ready(struct chat_state *state) {
+  sl_queue_backend_info_t ready;
+  double deadline = monotonic_seconds() + 3;
+  do {
+    if (demo_client_service(state->remote, 100) != SL_OK)
+      break;
+    if (sl_queue_backend_info(state->sl, &ready) == SL_OK && ready.synchronized)
+      return 0;
+  } while (monotonic_seconds() < deadline);
+  return -1;
+}
+
+int main(int argc, char **argv) {
   static const char *const status_elements[] = {"streaming demo", "ctx 36%",
                                                 "demo/project", "queue demo"};
   struct chat_state state;
@@ -812,9 +873,33 @@ int main(void) {
   interactive = isatty(STDIN_FILENO) && isatty(STDOUT_FILENO);
   state.interactive = interactive;
   exit_code = 0;
-  state.sl = sl_create();
+  if (argc == 3) {
+    sl_config_t config;
+    char *end;
+    long port = strtol(argv[2], &end, 10);
+    if (!*argv[2] || *end || port < 1 || port > 65535 || !interactive) {
+      fprintf(stderr,
+              "Remote chat requires an interactive terminal and HOST PORT.\n");
+      return 1;
+    }
+    state.remote = demo_client_create(argv[1], (unsigned short)port);
+    if (!state.remote)
+      return 1;
+    sl_config_init(&config);
+    config.prompt_queue = 1;
+    config.prompt_queue_max_entries = 64;
+    config.queue_backend = demo_client_backend(state.remote);
+    config.queue_backend_context = state.remote;
+    state.sl = sl_create_with_config(&config);
+  } else if (argc == 1)
+    state.sl = sl_create();
+  else {
+    fprintf(stderr, "usage: %s [127.0.0.1 PORT]\n", argv[0]);
+    return 1;
+  }
   if (!state.sl) {
     fprintf(stderr, "failed to create softline\n");
+    demo_client_destroy(state.remote);
     return 1;
   }
   if (sl_history_open(state.sl, "softline.examples.chat",
@@ -822,17 +907,19 @@ int main(void) {
       sl_history_set_auto_add(state.sl, 1) != SL_OK) {
     report_failure(&state, "history setup");
     sl_destroy(state.sl);
+    demo_client_destroy(state.remote);
     return 1;
   }
   state.columns = mdf_terminal_width(STDOUT_FILENO, 80);
   if ((interactive &&
-       (sl_set_prompt_queue(state.sl, 1, 64, 3) != SL_OK ||
+       ((!state.remote && sl_set_prompt_queue(state.sl, 1, 64, 3) != SL_OK) ||
         sl_set_prompt_queue_profile(
             state.sl, SL_PROMPT_QUEUE_PROFILE_QUEUED_TURNS) != SL_OK ||
-        sl_set_prompt_queue_delivery(state.sl, SL_PROMPT_QUEUE_DELIVERY_AUTO) !=
-            SL_OK ||
-        sl_set_prompt_queue_policy(state.sl, classify_prompt, &state) !=
-            SL_OK ||
+        (!state.remote &&
+         sl_set_prompt_queue_delivery(
+             state.sl, SL_PROMPT_QUEUE_DELIVERY_AUTO) != SL_OK) ||
+        (!state.remote && sl_set_prompt_queue_policy(state.sl, classify_prompt,
+                                                     &state) != SL_OK) ||
         sl_set_statusline(state.sl, 1, 0) != SL_OK ||
         sl_set_status_elements(state.sl, status_elements,
                                sizeof(status_elements) /
@@ -853,8 +940,29 @@ int main(void) {
   }
   if (interactive) {
     (void)signal(SIGINT, keep_chat_on_interrupt);
-    if (set_busy(&state, 0) != 0 || setup_approval_demo(&state) != 0 ||
-        render_note(
+    if (set_busy(&state, 0) != 0 || setup_approval_demo(&state) != 0) {
+      exit_code = 1;
+      goto cleanup;
+    }
+    if (state.remote) {
+      demo_client_events(state.remote, remote_event, &state);
+      demo_client_options(state.remote, character_delay_us(),
+                          state.approval_demo, state.approval_interval_ms,
+                          state.approval_seed);
+      if (demo_client_attach(state.remote, state.sl) != SL_OK ||
+          sl_set_idle_callback(state.sl, approval_demo_idle, &state) != SL_OK ||
+          sl_bind_key(state.sl, SL_KEY_ALT_BASE + 'r', reconnect_editor,
+                      &state) != SL_OK) {
+        exit_code = 1;
+        goto cleanup;
+      }
+      if (wait_remote_ready(&state)) {
+        fprintf(stderr, "Queue owner connection failed.\n");
+        exit_code = 1;
+        goto cleanup;
+      }
+    }
+    if (render_note(
             &state,
             "Enter sends or queues; Alt-Enter steers or promotes; "
             "Alt-E edits queue. Esc/Ctrl-C cancels; `/quit` leaves. "
@@ -894,17 +1002,41 @@ int main(void) {
     if (!line) {
       status = sl_last_readline_status(state.sl);
       if (status == SL_READLINE_SUSPENDED) {
+        if (state.remote) {
+          if (!state.remote_shell) {
+            exit_code = 1;
+            break;
+          }
+          demo_client_pause(state.remote);
+        }
         if (run_shell(&state, 1) != 0) {
           report_failure(&state, "shell handoff");
           exit_code = 1;
           break;
+        }
+        if (state.remote) {
+          state.remote_shell = 0;
+          (void)demo_client_reconnect(state.remote);
+          if (wait_remote_ready(&state))
+            (void)set_chat_message(
+                state.sl, "Queue owner disconnected; Alt-R reconnects.");
         }
         continue;
       }
       if (status == SL_READLINE_CANCELLED ||
           status == SL_READLINE_INTERRUPTED) {
         cancelled_busy = interactive && state.busy;
-        if ((cancelled_busy && cancel_operation(&state) != 0) ||
+        if (state.remote) {
+          state.shell_requested = 0;
+          if (demo_client_cancel(state.remote) != SL_OK) {
+            (void)set_chat_message(state.sl, "Queue owner disconnected.");
+            continue;
+          }
+          (void)finish_response_document(&state);
+          (void)set_busy(&state, 0);
+        }
+        if ((cancelled_busy && !state.remote &&
+             cancel_operation(&state) != 0) ||
             (interactive &&
              render_note(&state, cancelled_busy ? "*Operation cancelled.*"
                                                 : "*Cancelled.*") != 0)) {
@@ -982,7 +1114,7 @@ int main(void) {
   }
 
 cleanup:
-  if (state.busy)
+  if (state.busy && !state.remote)
     (void)cancel_operation(&state);
   if (state.note_renderer)
     state.note_renderer->destroy(state.note_renderer);
@@ -993,5 +1125,6 @@ cleanup:
       (void)state.sl->output_stream_end(state.sl);
     sl_destroy(state.sl);
   }
+  demo_client_destroy(state.remote);
   return exit_code;
 }

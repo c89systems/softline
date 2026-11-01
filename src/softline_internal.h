@@ -211,6 +211,7 @@ typedef struct sl_impl {
   sl_history_search_t suspended_search;
   int request_submit;
   int request_cancel;
+  int request_suspend;
   int request_queue_dispatch;
   int plain_pending;
   char plain_pending_ch;
@@ -240,9 +241,17 @@ int sl_backend_callback_active(const sl_impl_t *impl);
 void sl_backend_pump(sl_t *self);
 int sl_backend_submit(sl_t *self, sl_prompt_queue_mode_t mode);
 int sl_backend_edit(sl_t *self, int index);
+int sl_backend_promote_newest(sl_t *self);
+int sl_backend_wait_edit(const sl_impl_t *impl);
+int sl_backend_wait_keys(const sl_impl_t *impl);
+int sl_backend_wait_key(const sl_impl_t *impl, int key);
+int sl_backend_reading_paste(const sl_impl_t *impl);
+int sl_backend_push_key(sl_t *self, int key, const char *bytes, size_t len);
+int sl_backend_pop_key(sl_impl_t *impl, int *key, char *bytes, size_t *len);
 int sl_backend_action(sl_t *self, sl_prompt_id_t id,
                       sl_queue_operation_t operation);
 int sl_backend_cancel_edit(sl_t *self);
+void sl_backend_cancel_waiting(sl_impl_t *impl);
 int sl_backend_unsupported(sl_t *self);
 int sl_backend_recover_newest(sl_t *self);
 int sl_backend_notice(const sl_impl_t *impl, char *text, size_t size);

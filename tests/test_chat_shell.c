@@ -153,6 +153,8 @@ static int exercise(const char *shell) {
   const char *position;
   if (setenv("SHELL", shell, 1))
     return 1;
+  if (remote_owner)
+    setenv("SOFTLINE_CHAT_CHAR_MS", "2", 1);
   REQUIRE(start(&e, "examples/chat.lua", NULL, NULL) == 0);
   REQUIRE(prompt(&e, 0) == 0);
   mark = e.length;
@@ -220,9 +222,27 @@ static int exercise(const char *shell) {
   REQUIRE(wait_for(&e, c_chat ? "Thinking..." : "[operation] processing input.",
                    mark) == 0);
   mark = e.length;
-  REQUIRE(send_bytes(&e, "\033s") == 0);
-  REQUIRE(wait_for(&e, "Shell is available only between turns.", mark) == 0);
-  REQUIRE(!contains(&e, "SHELL_READY", mark));
+  if (remote_owner) {
+    REQUIRE(send_bytes(&e, "\033[200~preserved draft\nsecond tail\033[201~"
+                           "\002\002\002\002\033s") == 0);
+    REQUIRE(wait_for(&e, "SHELL_READY", mark) == 0);
+    REQUIRE(e.top == 0 && e.bottom == e.rows - 1);
+    mark = e.length;
+    REQUIRE(send_bytes(&e, "exit\n") == 0);
+    REQUIRE(prompt(&e, mark) == 0);
+    REQUIRE(wait_for(&e, "> preserved draft", mark) == 0);
+    mark = e.length;
+    REQUIRE(send_bytes(&e, "X") == 0);
+    REQUIRE(wait_cursor(&e, "Xtail", mark, e.rows - 1, 10) == 0);
+    mark = e.length;
+    REQUIRE(send_bytes(&e, "\037") == 0);
+    REQUIRE(wait_cursor(&e, "tail", mark, e.rows - 1, 9) == 0);
+    REQUIRE(send_bytes(&e, "\033n") == 0);
+  } else {
+    REQUIRE(send_bytes(&e, "\033s") == 0);
+    REQUIRE(wait_for(&e, "Shell is available only between turns.", mark) == 0);
+    REQUIRE(!contains(&e, "SHELL_READY", mark));
+  }
   mark = e.length;
   REQUIRE(send_bytes(&e, "\025queued\r") == 0);
   REQUIRE(wait_for(&e, "Q 1. queued", mark) == 0);
@@ -368,9 +388,13 @@ int main(int argc, char **argv) {
   int failed = 1, count = 0;
   if (argc == 2 && !strcmp(argv[1], "-i"))
     return fixture_shell(argc, argv);
-  if (argc != 7 || (strcmp(argv[1], "c") && strcmp(argv[1], "lua")))
+  if ((argc != 7 && argc != 8) ||
+      (strcmp(argv[1], "c") && strcmp(argv[1], "lua") &&
+       strcmp(argv[1], "remote")))
     return 2;
-  c_chat = !strcmp(argv[1], "c");
+  c_chat = strcmp(argv[1], "lua") != 0;
+  if (argc == 8)
+    remote_owner = argv[7];
   executable = argv[2];
   root = argv[3];
   test_rows = 24;

@@ -675,7 +675,176 @@ static int native_edit(int host_discard) {
   return 0;
 }
 
+struct delayed {
+  struct bridge bridge;
+  int kind, phase, ticks, version;
+  sl_queue_request_id_t original;
+};
+
+static int delayed_result(struct delayed *d, sl_queue_request_id_t id,
+                          int hold) {
+  sl_queue_entry_t entry;
+  sl_queue_result_t result;
+  sl_queue_change_t change;
+  char previous[32], revision[32], item_revision[32];
+  snprintf(previous, sizeof(previous), "q%d", d->version);
+  snprintf(revision, sizeof(revision), "q%d", ++d->version);
+  snprintf(item_revision, sizeof(item_revision), "v%d", d->version);
+  memset(&entry, 0, sizeof(entry));
+  entry.id = "delayed";
+  entry.text = "original";
+  entry.revision = item_revision;
+  entry.held = 1;
+  entry.edit_held = hold;
+  entry.edit_token = hold ? "owned" : NULL;
+  memset(&change, 0, sizeof(change));
+  change.kind = SL_QUEUE_UPSERT;
+  change.previous_revision = previous;
+  change.revision = revision;
+  change.entries = &entry;
+  change.count = change.total_count = 1;
+  change.request_id = id;
+  CHECK(sl_queue_backend_update(d->bridge.sl, &change) == SL_OK);
+  memset(&result, 0, sizeof(result));
+  result.request_id = id;
+  result.item_id = entry.id;
+  result.item_revision = entry.revision;
+  result.edit_token = entry.edit_token;
+  CHECK(sl_queue_backend_result(d->bridge.sl, &result) == SL_OK);
+  return 0;
+}
+
+static int delayed_step(sl_t *sl, struct delayed *d) {
+  struct bridge *b = &d->bridge;
+  char drain[2048];
+  sl_prompt_queue_entry_info_t draft;
+  const char *expected = d->kind == 1 ? "x\303\251\nz" : "x\303\251";
+  while (read(b->master, drain, sizeof(drain)) > 0) {
+  }
+  CHECK(sl_prompt_queue_draft_info(sl, &draft) == SL_OK);
+  if (!d->phase) {
+    const char *keys = d->kind == 1
+                           ? "original\r\033e\025\033[200~x\303\251\nz\033[201~"
+                           : "original\r\033e\025x\303\251";
+    CHECK(write(b->master, keys, strlen(keys)) == (ssize_t)strlen(keys));
+    d->phase = 1;
+  } else if (d->phase == 1 && b->calls == 1 && ++d->ticks >= 4) {
+    CHECK(b->request.operation == SL_QUEUE_OFFER && !*sl_buffer(sl) &&
+          !draft.id);
+    d->original = b->request.request_id;
+    d->ticks = 0;
+    if (d->kind == 2) {
+      CHECK(sl_cancel(sl) == SL_OK);
+      d->phase = 6;
+    } else {
+      CHECK(delayed_result(d, d->original, 0) == 0);
+      d->phase = 2;
+    }
+  } else if (d->phase == 2 && b->calls == 2 && ++d->ticks >= 4) {
+    CHECK(b->request.operation == SL_QUEUE_BEGIN_EDIT && !*sl_buffer(sl) &&
+          !draft.id);
+    d->original = b->request.request_id;
+    if (d->kind >= 3) {
+      if (d->kind == 4)
+        CHECK(write(b->master, "\033", 1) == 1);
+      else
+        CHECK(sl_cancel(sl) == SL_OK);
+      d->phase = 6;
+    } else {
+      CHECK(delayed_result(d, d->original, 1) == 0);
+      d->phase = 3;
+    }
+  } else if (d->phase == 3 && !strcmp(sl_buffer(sl), expected)) {
+    CHECK(draft.id && draft.held && b->calls == 2);
+    CHECK(sl_suspend(sl) == SL_OK);
+    d->phase = 7;
+  } else if (d->phase == 4) {
+    CHECK(!draft.id && !*sl_buffer(sl));
+    if (d->kind >= 3) {
+      sl_queue_result_t result;
+      if (b->request.operation != SL_QUEUE_ABORT_EDIT)
+        return 0;
+      CHECK(b->calls == 3 && !strcmp(b->token, "owned"));
+      memset(&result, 0, sizeof(result));
+      result.request_id = b->request.request_id;
+      CHECK(delayed_result(d, result.request_id, 0) == 0);
+    } else
+      CHECK(b->calls == 2);
+    CHECK(write(b->master, "\004", 1) == 1);
+    d->phase = 5;
+  }
+  return 0;
+}
+static void delayed_idle(sl_t *sl, void *context) {
+  struct delayed *d = context;
+  if (delayed_step(sl, d)) {
+    d->bridge.failed = 1;
+    (void)sl_cancel(sl);
+  }
+}
+static int cancel_key(sl_t *sl, sl_key_t key, void *context,
+                      sl_key_action_t *action) {
+  (void)sl;
+  (void)key;
+  (void)context;
+  *action = SL_KEY_ACTION_CANCEL;
+  return SL_OK;
+}
+static int delayed_edit(int kind) {
+  struct delayed *d = calloc(1, sizeof(*d));
+  sl_prompt_source_t source;
+  struct winsize size;
+  int slave;
+  CHECK(d);
+  d->kind = kind;
+  memset(&size, 0, sizeof(size));
+  size.ws_col = 80;
+  size.ws_row = 24;
+  CHECK(!openpty(&d->bridge.master, &slave, NULL, NULL, &size));
+  CHECK(fcntl(d->bridge.master, F_SETFL, O_NONBLOCK) == 0);
+  CHECK(create(&d->bridge, slave, slave, kind >= 3 ? 1 : 8));
+  CHECK(sl_bind_key(d->bridge.sl, SL_KEY_ESCAPE, cancel_key, NULL) == SL_OK);
+  CHECK(sl_suspend(d->bridge.sl) == SL_ERROR_INVALID);
+  CHECK(snapshot(d->bridge.sl, "q0", NULL, 0) == SL_OK);
+  CHECK(sl_set_idle_callback(d->bridge.sl, delayed_idle, d) == SL_OK);
+  CHECK(!sl_next_prompt(d->bridge.sl, "> ", &source) && !d->bridge.failed);
+  CHECK(source == SL_PROMPT_SOURCE_NONE);
+  if (kind < 2) {
+    CHECK(d->phase == 7 &&
+          sl_last_readline_status(d->bridge.sl) == SL_READLINE_SUSPENDED);
+    CHECK(!strcmp(sl_buffer(d->bridge.sl),
+                  kind == 1 ? "x\303\251\nz" : "x\303\251"));
+    CHECK(d->bridge.calls ==
+          2); /* suspension never stops or aborts owner work */
+  } else {
+    sl_queue_result_t stopped;
+    CHECK(d->phase == 6 &&
+          sl_last_readline_status(d->bridge.sl) == SL_READLINE_CANCELLED);
+    if (kind >= 3) {
+      /* The single ordinary slot still holds BEGIN_EDIT. Cleanup must reuse
+       * that slot after its late acknowledgement, without opening a draft. */
+      CHECK(d->bridge.request.operation == SL_QUEUE_BEGIN_EDIT);
+    } else {
+      CHECK(d->bridge.request.operation == SL_QUEUE_STOP);
+      memset(&stopped, 0, sizeof(stopped));
+      stopped.request_id = d->bridge.request.request_id;
+      CHECK(sl_queue_backend_result(d->bridge.sl, &stopped) == SL_OK);
+    }
+    CHECK(delayed_result(d, d->original, kind >= 3) == 0);
+    d->phase = 4;
+    CHECK(!sl_next_prompt(d->bridge.sl, "> ", &source) && !d->bridge.failed);
+    CHECK(d->phase == 5 &&
+          sl_last_readline_status(d->bridge.sl) == SL_READLINE_EOF);
+  }
+  sl_destroy(d->bridge.sl);
+  close(d->bridge.master);
+  close(slave);
+  free(d);
+  return 0;
+}
+
 int main(void) {
   return api() || failures() || fifo() || native() || native_edit(0) ||
-         native_edit(1);
+         native_edit(1) || delayed_edit(0) || delayed_edit(1) ||
+         delayed_edit(2) || delayed_edit(3) || delayed_edit(4);
 }

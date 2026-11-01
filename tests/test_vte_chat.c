@@ -1,3 +1,4 @@
+#include "remote_chat_owner.h"
 #include "terminal_pause.h"
 #include "vte_test.h"
 
@@ -73,16 +74,28 @@ static int drain(void *context) {
   }
   return event < 0;
 }
+static int pause_producer(struct chat *c) {
+  if (!remote_owner)
+    return pause_worker(c->child, drain, c, &c->worker);
+  if (kill(remote_owner_pid, SIGUSR1))
+    return 1;
+  c->worker = remote_owner_pid;
+  return drain(c);
+}
+static int resume_producer(struct chat *c) {
+  return kill(c->worker, remote_owner ? SIGUSR2 : SIGCONT);
+}
 static void close_chat(struct chat *c) {
   int status;
   if (c->worker > 0)
-    kill(c->worker, SIGCONT);
+    resume_producer(c);
   if (c->child > 0) {
     kill(-c->child, SIGTERM);
     kill(c->child, SIGCONT);
     waitpid(c->child, &status, 0);
   }
   v.destroy(c->screen.window);
+  stop_remote_owner();
   pump();
 }
 static int start_chat(struct chat *c, const char *example, const char *theme,
@@ -93,6 +106,8 @@ static int start_chat(struct chat *c, const char *example, const char *theme,
   char prior[4096], milliseconds[32];
   size_t used = 0;
   c->child = c->worker = -1;
+  if (start_remote_owner())
+    return 1;
   c->screen = create();
   resize(&c->screen, 97, height);
   for (index = 0; index < 100; ++index)
@@ -127,7 +142,10 @@ static int start_chat(struct chat *c, const char *example, const char *theme,
     setenv("TERM", "xterm-256color", 1);
     setenv("SOFTLINE_CHAT_CHAR_MS", milliseconds, 1);
     setenv("SOFTLINE_PROMPT_THEME", theme, 1);
-    execl(example, example, (char *)NULL);
+    if (remote_owner)
+      execl(example, example, "127.0.0.1", remote_owner_port, (char *)NULL);
+    else
+      execl(example, example, (char *)NULL);
     _exit(127);
   }
   close(slave);
@@ -162,18 +180,18 @@ static int window_resize(struct chat *c, int columns, int rows) {
 static int coordinated_resize(struct chat *c, int columns, int rows,
                               int worker_already_paused) {
   int failed;
-  if (!worker_already_paused && pause_worker(c->child, drain, c, &c->worker))
+  if (!worker_already_paused && pause_producer(c))
     return 1;
   if (pause_editor(c->child, drain, c)) {
     if (c->worker > 0)
-      kill(c->worker, SIGCONT);
+      resume_producer(c);
     c->worker = -1;
     return 1;
   }
   failed = window_resize(c, columns, rows);
   kill(c->child, SIGCONT);
   if (!worker_already_paused && c->worker > 0) {
-    kill(c->worker, SIGCONT);
+    resume_producer(c);
     c->worker = -1;
   }
   return failed;
@@ -378,7 +396,7 @@ static int approval_resize_case(const char *example) {
   REQUIRE(start_chat(&c, example, "plain", 24, 10) == 0);
   send_input(&c, "start-response\r");
   REQUIRE(wait_frame(&c, "A 4 awaiting approval", "> \n", -1, 2) == 0);
-  REQUIRE(pause_worker(c.child, drain, &c, &c.worker) == 0 && c.worker > 0);
+  REQUIRE(pause_producer(&c) == 0 && c.worker > 0);
   send_input(&c, "ordinary-first\rordinary-second\r\033a\033n\033a\033n");
   REQUIRE(wait_frame(&c, "Demo queued request #3:", "> \n", -1, 2) == 0);
   s = transcript(&c.screen);
@@ -445,7 +463,7 @@ static int multiline_approval_case(const char *example) {
   REQUIRE(start_chat(&c, example, "plain", 24, 10) == 0);
   send_input(&c, "start-response\r");
   REQUIRE(wait_frame(&c, "A 4 awaiting approval", "> \n", -1, 2) == 0);
-  REQUIRE(pause_worker(c.child, drain, &c, &c.worker) == 0 && c.worker > 0);
+  REQUIRE(pause_producer(&c) == 0 && c.worker > 0);
   send_input(&c, "ordinary-first\rordinary-second\r");
   REQUIRE(wait_frame(&c, "Q 6. ordinary-second", "> \n", -1, 2) == 0);
   send_input(&c, "\033a\033n");
@@ -567,14 +585,14 @@ static int tiny_case(const char *example, int feed_small, int small_columns) {
   REQUIRE(start_chat(&c, example, "default", 80, 5) == 0);
   send_input(&c, "one\r");
   REQUIRE(wait_frame(&c, "Here is", "> \n", 0, 8) == 0);
-  REQUIRE(pause_worker(c.child, drain, &c, &c.worker) == 0 && c.worker > 0);
+  REQUIRE(pause_producer(&c) == 0 && c.worker > 0);
   REQUIRE(coordinated_resize(&c, small_columns, 3, 1) == 0);
   settle(.2);
   if (feed_small) {
-    REQUIRE(kill(c.worker, SIGCONT) == 0);
+    REQUIRE(resume_producer(&c) == 0);
     c.worker = -1;
     REQUIRE(wait_frame(&c, "italic", "> \n", 0, 8) == 0);
-    REQUIRE(pause_worker(c.child, drain, &c, &c.worker) == 0 && c.worker > 0);
+    REQUIRE(pause_producer(&c) == 0 && c.worker > 0);
   }
   REQUIRE(coordinated_resize(&c, 97, 80, 1) == 0);
   settle(.2);
@@ -585,7 +603,7 @@ static int tiny_case(const char *example, int feed_small, int small_columns) {
   length = anchor + strlen(feed_small ? "italic" : "Here is");
   memcpy(prefix, before.text, length);
   prefix[length] = 0;
-  REQUIRE(kill(c.worker, SIGCONT) == 0);
+  REQUIRE(resume_producer(&c) == 0);
   c.worker = -1;
   REQUIRE(wait_frame(&c, "Try another prompt.", "> \n", 0, 8) == 0);
   after = frame(&c);
@@ -696,7 +714,7 @@ static int width_case(const char *example, const char *theme) {
     } else {
       send_input(&c, "draft");
       REQUIRE(wait_frame(&c, NULL, "> draft\n", 0, .1) == 0);
-      REQUIRE(pause_worker(c.child, drain, &c, &c.worker) == 0);
+      REQUIRE(pause_producer(&c) == 0);
       count = turn == 1 ? 161 : turn == 2 ? 14 : 12;
       for (stage = 0; stage < count; ++stage) {
         width = turn == 1   ? (stage < 80 ? 110 - stage : 30 + stage - 80)
@@ -706,7 +724,7 @@ static int width_case(const char *example, const char *theme) {
         settle(turn == 1 ? .005 : turn == 2 ? .06 : .12);
       }
       if (c.worker > 0) {
-        kill(c.worker, SIGCONT);
+        resume_producer(&c);
         c.worker = -1;
       }
     }
@@ -842,6 +860,7 @@ cleanup:
 int main(int argc, char **argv) {
   const char *themes[] = {"plain", "default", "gruvbox"};
   int theme, height, busy;
+  remote_owner = getenv("SOFTLINE_CHAT_TEST_OWNER");
   if (argc < 3 || load())
     return 2;
   if (!strcmp(argv[1], "line-keys")) {

@@ -1,5 +1,7 @@
 local softline = require('softline')
 local sl = softline.new()
+local inactive, inactive_status = sl:suspend()
+assert(inactive == nil and inactive_status ~= nil)
 assert(sl:set_prompt_theme(softline.PROMPT_THEME_PLAIN))
 assert(sl:readline('word> ') == 'one! two')
 assert(sl:readline('kill> ') == 'café—中文')
@@ -7,7 +9,8 @@ assert(sl:readline('again> ') == 'café')
 assert(sl:readline('undo> ') == '')
 assert(sl:readline('transpose> ') == 'éa')
 assert(sl:bind_key(softline.KEY_ALT_BASE + string.byte('s'), function()
-  return softline.KEY_ACTION_SUSPEND
+  assert(sl:suspend())
+  return softline.KEY_ACTION_HANDLED
 end))
 local line, status = sl:readline('suspend> ')
 assert(line == nil and status == softline.READLINE_SUSPENDED)
@@ -42,7 +45,8 @@ assert(sl:readline('host-cursor> ') == 'abc')
 assert(moved and sl:set_idle_callback(nil))
 assert(sl:bind_key(softline.KEY_ALT_BASE + string.byte('t'), function()
   assert(sl:insert('*'))
-  return softline.KEY_ACTION_SUSPEND
+  assert(sl:suspend())
+  return softline.KEY_ACTION_HANDLED
 end))
 line, status = sl:readline('group> ')
 assert(line == nil and status == softline.READLINE_SUSPENDED)

@@ -23,11 +23,13 @@ struct editor {
   int rows, columns, row, column, top, bottom;
   char escape[128], printed[65536];
   uint16_t print_rows[65536], print_columns[65536];
+  unsigned char print_output[65536];
   size_t escape_length, printed_length;
 };
 static const char *executable;
 static const char *root;
 static int c_chat;
+#include "remote_chat_owner.h"
 static int test_rows = 8, test_columns = 40, test_echo;
 static double now(void) {
   struct timespec t;
@@ -49,6 +51,7 @@ static void close_editor(struct editor *e) {
     close(e->master);
     e->master = -1;
   }
+  stop_remote_owner();
 }
 static int start(struct editor *e, const char *relative, const char *arg1,
                  const char *arg2) {
@@ -66,6 +69,8 @@ static int start(struct editor *e, const char *relative, const char *arg1,
   e->columns = test_columns;
   e->bottom = test_rows - 1;
   snprintf(script, sizeof(script), "%s/%s", root, relative);
+  if (start_remote_owner())
+    return 1;
   if (openpty(&e->master, &slave, NULL, NULL, &size))
     return 1;
   if (!test_echo && tcgetattr(slave, &attributes) == 0) {
@@ -83,7 +88,10 @@ static int start(struct editor *e, const char *relative, const char *arg1,
     if (slave > 2)
       close(slave);
     chdir(root);
-    if (c_chat)
+    if (c_chat && remote_owner)
+      execl(executable, executable, "127.0.0.1", remote_owner_port,
+            (char *)NULL);
+    else if (c_chat)
       execl(executable, executable, (char *)NULL);
     else if (arg2)
       execl(executable, executable, script, arg1, arg2, (char *)NULL);
@@ -181,6 +189,7 @@ static int consume(struct editor *e, const char *bytes, size_t length) {
       e->printed[at] = (char)byte;
       e->print_rows[at] = (uint16_t)e->row;
       e->print_columns[at] = (uint16_t)e->column;
+      e->print_output[at] = (unsigned char)(e->row <= e->bottom);
       e->printed[++e->printed_length] = 0;
       ++e->column;
     }

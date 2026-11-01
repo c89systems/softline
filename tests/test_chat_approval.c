@@ -27,6 +27,31 @@ static int wait_quote(struct editor *e, const char *text, size_t offset) {
   return 1;
 }
 
+/* Status redraws can occur between producer bytes. Observe producer text
+ * independently of those UI writes, as the real terminal does. */
+static int wait_output(struct editor *e, const char *text, size_t offset) {
+  char *output = malloc(sizeof(e->printed));
+  double deadline = now() + 3;
+  int found = 0;
+  if (!output)
+    return 1;
+  do {
+    size_t i, used = 0;
+    for (i = offset; i < e->printed_length; ++i)
+      if (e->print_output[i])
+        output[used++] = e->printed[i];
+    output[used] = 0;
+    if (strstr(output, text)) {
+      found = 1;
+      break;
+    }
+    if (pump(e, 20))
+      break;
+  } while (now() < deadline);
+  free(output);
+  return !found;
+}
+
 static int at_column(struct editor *e, const char *text, size_t offset,
                      int column) {
   const char *at = e->printed + offset;
@@ -110,7 +135,7 @@ static int exercise(void) {
   REQUIRE(send_bytes(&e, "\033a") == 0);
   REQUIRE(wait_for(&e, "Alt-Y approve / Alt-N reject / Alt-E edit", mark) == 0);
   REQUIRE(focused_input_cursor(&e, printed) == 0);
-  REQUIRE(wait_for(&e, "The stream is still live.", mark) == 0);
+  REQUIRE(wait_output(&e, "The stream is still live.", printed) == 0);
   mark = e.length;
   REQUIRE(send_bytes(&e, "\033") == 0);
   REQUIRE(wait_for(&e, "Alt-A focus", mark) == 0);
@@ -134,6 +159,7 @@ static int automatic(void) {
   printed = e.printed_length;
   REQUIRE(send_bytes(&e, "\025/approve on\r") == 0);
   REQUIRE(wait_for(&e, "Auto-approval ON", mark) == 0);
+  mark = e.length;
   REQUIRE(wait_quote(&e, "> Demo queued request #1", printed) == 0);
   REQUIRE(wait_quote(&e, "> Demo steering request #2", printed) == 0);
   REQUIRE(wait_quote(&e, "> Demo queued request #3", printed) == 0);
@@ -232,9 +258,11 @@ int main(int argc, char **argv) {
   DIR *dir;
   struct dirent *entry;
   int failed;
-  if (argc != 5)
+  if (argc != 5 && argc != 6)
     return 2;
   executable = argv[1];
+  if (argc == 6)
+    remote_owner = argv[5];
   root = argv[2];
   c_chat = 1;
   test_rows = 24;

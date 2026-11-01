@@ -9,10 +9,15 @@ typedef struct {
 
 typedef struct {
   sl_queue_request_t value;
-  int pending, seen;
+  int pending, seen, want_edit, want_steer, abandoned;
   sl_queue_result_status_t status;
   char *reason, *result_id, *result_revision, *result_token;
 } backend_pending_t;
+typedef struct {
+  int key;
+  size_t len;
+  char bytes[8];
+} backend_key_t;
 
 struct sl_backend {
   sl_queue_backend_t callbacks;
@@ -24,6 +29,9 @@ struct sl_backend {
   sl_queue_request_id_t serial;
   char *revision;
   int synchronized, callback_active, needs_sync, sync_pending;
+  backend_key_t *keys;
+  size_t key_count, key_capacity;
+  int reading_paste;
 };
 
 static sl_impl_t *editor(const sl_t *self) {
@@ -176,6 +184,7 @@ void sl_backend_destroy(sl_t *self) {
   for (index = 0; index < backend->pending_count; ++index)
     request_free(backend->pending + index);
   free(backend->pending);
+  free(backend->keys);
   free(backend->revision);
   free(backend);
   impl->backend = NULL;
@@ -391,7 +400,8 @@ int sl_queue_backend_result_impl(sl_t *self, const sl_queue_result_t *result) {
     int history_status = SL_OK;
     if (impl->history_auto_add && pending->value.operation == SL_QUEUE_OFFER)
       history_status = sl_history_add(self, pending->value.text);
-    request_remove(backend, index);
+    if (!pending->want_edit && !pending->want_steer)
+      request_remove(backend, index);
     return history_status;
   }
   if ((result->status == SL_QUEUE_REJECTED ||
@@ -706,14 +716,132 @@ int sl_backend_action(sl_t *self, sl_prompt_id_t id, sl_queue_operation_t op) {
 
 int sl_backend_edit(sl_t *self, int index) {
   sl_impl_t *impl = editor(self);
+  size_t pending_index;
   if (impl->len || impl->prompt_queue.editing.info.id)
     return SL_ERROR_NOT_READY;
+  impl->backend->reading_paste = 0;
   if (sl_backend_recover_newest(self) == SL_OK)
     return SL_OK;
+  if (!(impl->backend->callbacks.capabilities & (1UL << SL_QUEUE_BEGIN_EDIT)))
+    return sl_backend_unsupported(self);
+  for (pending_index = impl->backend->pending_count; pending_index;) {
+    backend_pending_t *pending = impl->backend->pending + --pending_index;
+    if ((pending->value.operation == SL_QUEUE_OFFER ||
+         pending->value.operation == SL_QUEUE_SET_INTENT) &&
+        pending->pending) {
+      pending->want_edit = 1;
+      return SL_OK;
+    }
+  }
   if (index < 0 || index >= impl->prompt_queue.len)
     return SL_ERROR_INVALID;
   return sl_backend_action(self, impl->prompt_queue.items[index].info.id,
                            SL_QUEUE_BEGIN_EDIT);
+}
+
+int sl_backend_promote_newest(sl_t *self) {
+  sl_impl_t *impl = editor(self);
+  size_t index = impl->backend->pending_count;
+  if (!(impl->backend->callbacks.capabilities & (1UL << SL_QUEUE_SET_INTENT)))
+    return sl_backend_unsupported(self);
+  while (index) {
+    backend_pending_t *pending = impl->backend->pending + --index;
+    if (pending->value.operation == SL_QUEUE_OFFER && pending->pending) {
+      pending->want_steer = 1;
+      return SL_OK;
+    }
+  }
+  return impl->prompt_queue.len
+             ? sl_backend_action(
+                   self,
+                   impl->prompt_queue.items[impl->prompt_queue.len - 1].info.id,
+                   SL_QUEUE_SET_INTENT)
+             : SL_OK;
+}
+
+int sl_backend_wait_edit(const sl_impl_t *impl) {
+  size_t i;
+  if (!impl->backend)
+    return 0;
+  for (i = 0; i < impl->backend->pending_count; ++i) {
+    backend_pending_t *p = impl->backend->pending + i;
+    if ((p->pending || p->status == SL_QUEUE_ACCEPTED) && !p->abandoned &&
+        (p->want_edit || p->value.operation == SL_QUEUE_BEGIN_EDIT))
+      return 1;
+  }
+  return 0;
+}
+int sl_backend_reading_paste(const sl_impl_t *impl) {
+  return impl->backend && impl->backend->reading_paste;
+}
+static int pending_item(const sl_impl_t *impl) {
+  size_t i;
+  if (!impl->backend)
+    return 0;
+  for (i = 0; i < impl->backend->pending_count; ++i) {
+    backend_pending_t *p = impl->backend->pending + i;
+    if (p->pending && p->value.operation >= SL_QUEUE_BEGIN_EDIT &&
+        p->value.operation <= SL_QUEUE_SET_INTENT)
+      return 1;
+  }
+  return 0;
+}
+int sl_backend_wait_keys(const sl_impl_t *impl) {
+  return sl_backend_wait_edit(impl) ||
+         (impl->backend && impl->backend->key_count && pending_item(impl));
+}
+int sl_backend_wait_key(const sl_impl_t *impl, int key) {
+  if (!pending_item(impl))
+    return 0;
+  return key == SL_KEY_ALT_A || key == SL_KEY_ALT_Y ||
+         key == SL_KEY_ALT_BASE + 'Y' || key == SL_KEY_ALT_BASE + 'n' ||
+         key == SL_KEY_ALT_BASE + 'N' ||
+         key == (int)impl->prompt_queue.keys.edit_newest ||
+         (!impl->len &&
+          key == (int)impl->prompt_queue.keys.submit_or_promote_newest);
+}
+int sl_backend_push_key(sl_t *self, int key, const char *bytes, size_t len) {
+  sl_impl_t *impl = editor(self);
+  sl_backend_t *b = impl->backend;
+  backend_key_t *keys;
+  if (len > sizeof(b->keys[0].bytes) || b->key_count >= impl->line_max_len)
+    return error(
+        self, SL_ERROR_FULL,
+        "input waiting for the edit hold exceeds the configured limit");
+  if (b->key_count == b->key_capacity) {
+    size_t capacity = b->key_capacity ? b->key_capacity * 2 : 32;
+    if (capacity > impl->line_max_len)
+      capacity = impl->line_max_len;
+    if (capacity > (size_t)-1 / sizeof(*keys))
+      return SL_ERROR_NOMEM;
+    keys = realloc(b->keys, capacity * sizeof(*keys));
+    if (!keys)
+      return SL_ERROR_NOMEM;
+    b->keys = keys;
+    b->key_capacity = capacity;
+  }
+  b->keys[b->key_count].key = key;
+  b->keys[b->key_count].len = len;
+  if (len)
+    memcpy(b->keys[b->key_count].bytes, bytes, len);
+  ++b->key_count;
+  if (key == SL_KEY_PASTE_BEGIN)
+    b->reading_paste = 1;
+  if (key == SL_KEY_PASTE_END)
+    b->reading_paste = 0;
+  return SL_OK;
+}
+int sl_backend_pop_key(sl_impl_t *impl, int *key, char *bytes, size_t *len) {
+  sl_backend_t *b = impl->backend;
+  if (!b || !b->key_count)
+    return 0;
+  *key = b->keys[0].key;
+  *len = b->keys[0].len;
+  if (*len)
+    memcpy(bytes, b->keys[0].bytes, *len);
+  --b->key_count;
+  memmove(b->keys, b->keys + 1, b->key_count * sizeof(*b->keys));
+  return 1;
 }
 
 int sl_backend_submit(sl_t *self, sl_prompt_queue_mode_t mode) {
@@ -775,6 +903,23 @@ int sl_backend_cancel_edit(sl_t *self) {
   return status;
 }
 
+void sl_backend_cancel_waiting(sl_impl_t *impl) {
+  sl_backend_t *backend = impl->backend;
+  size_t i;
+  if (!backend)
+    return;
+  backend->key_count = 0;
+  backend->reading_paste = 0;
+  for (i = 0; i < backend->pending_count; ++i) {
+    backend_pending_t *p = backend->pending + i;
+    p->want_edit = p->want_steer = 0;
+    if (p->value.operation == SL_QUEUE_BEGIN_EDIT)
+      p->abandoned = 1;
+    else if (!p->pending && p->status == SL_QUEUE_ACCEPTED)
+      request_remove(backend, i--);
+  }
+}
+
 void sl_backend_pump(sl_t *self) {
   sl_impl_t *impl = editor(self);
   sl_backend_t *backend = impl ? impl->backend : NULL;
@@ -792,6 +937,27 @@ void sl_backend_pump(sl_t *self) {
     backend_pending_t *pending = backend->pending + index;
     backend_entry_t *entry;
     int queue_index;
+    if (!pending->pending && pending->status == SL_QUEUE_ACCEPTED &&
+        (pending->value.operation == SL_QUEUE_OFFER ||
+         pending->value.operation == SL_QUEUE_SET_INTENT) &&
+        (pending->want_edit || pending->want_steer)) {
+      sl_prompt_id_t local_id;
+      int edit = pending->want_edit, steer;
+      entry = find(backend, pending->result_id);
+      if (!entry && !pending->seen)
+        continue;
+      local_id = entry ? entry->local_id : 0;
+      steer = pending->want_steer && entry &&
+              entry->value.mode != SL_PROMPT_QUEUE_MODE_STEER;
+      request_remove(backend, index--);
+      if (local_id && (steer || edit) &&
+          sl_backend_action(self, local_id,
+                            steer ? SL_QUEUE_SET_INTENT
+                                  : SL_QUEUE_BEGIN_EDIT) == SL_OK &&
+          steer)
+        backend->pending[backend->pending_count - 1].want_edit = edit;
+      continue;
+    }
     if (pending->pending || pending->status != SL_QUEUE_ACCEPTED ||
         pending->value.operation != SL_QUEUE_BEGIN_EDIT)
       continue;
@@ -803,6 +969,31 @@ void sl_backend_pump(sl_t *self) {
         (void)error(self, SL_ERROR_CONFLICT,
                     "backend item changed before editing could open");
         request_remove(backend, index--);
+      }
+      continue;
+    }
+    if (pending->abandoned) {
+      backend_pending_t completed = *pending;
+      int status;
+      memset(&request, 0, sizeof(request));
+      request.operation = SL_QUEUE_ABORT_EDIT;
+      request.item_id = entry->value.id;
+      /* Retain the acknowledged hold until the bridge accepts its release.
+       * No editor draft may open after cancellation, even for a late ACK. */
+      /* Reuse this completed request's retention slot, including when the
+       * configured ordinary budget is one. Restore it if handoff fails. */
+      --backend->pending_count;
+      memmove(pending, pending + 1,
+              (backend->pending_count - index) * sizeof(*pending));
+      status = sl_queue_backend_request_impl(self, &request, NULL);
+      if (status == SL_OK) {
+        request_free(&completed);
+        --index;
+      } else {
+        memmove(pending + 1, pending,
+                (backend->pending_count - index) * sizeof(*pending));
+        *pending = completed;
+        ++backend->pending_count;
       }
       continue;
     }

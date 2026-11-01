@@ -852,6 +852,9 @@ struct sl {
   int (*submit)(sl_t *self);
   /** Cancel the active readline() call from a callback or idle hook. */
   int (*cancel)(sl_t *self);
+  /** Suspend the active editor from an owner-thread callback, preserving the
+   * draft/undo and returning SL_READLINE_SUSPENDED without stopping backlog. */
+  int (*suspend)(sl_t *self);
   /** Stream callback output above the active prompt. Ordinary readline clears
    * and redraws by default, or uses an enabled live scroll region after
    * reaching the terminal bottom. Native chat retains its prompt frame and
@@ -1551,6 +1554,12 @@ int sl_submit(sl_t *self);
 
 /** Cancel the active readline() operation from inside a callback. */
 int sl_cancel(sl_t *self);
+
+/** Request the existing terminal-handoff suspension from an owner-thread idle
+ * or fd callback. Like SL_KEY_ACTION_SUSPEND, preserve the draft, cursor, undo,
+ * search and queue context. Returns SL_ERROR_INVALID outside active readline.
+ * Run child processes after readline returns SL_READLINE_SUSPENDED. */
+int sl_suspend(sl_t *self);
 
 /** Write callback-produced chunks above the active prompt. Ordinary readline
  * clears and redraws by default, or uses an

@@ -38,6 +38,11 @@ typedef struct peer {
   int watched;
   sl_queue_result_status_t watched_status;
   sl_queue_result_status_t status;
+  int active, shells;
+  size_t source_bytes;
+  char last_source[3];
+  char source_tail[64];
+  unsigned long delay_us;
 } peer_t;
 static double now(void) {
   struct timespec ts;
@@ -139,9 +144,33 @@ static int receive(peer_t *p) {
     copy(p->result_revision, sizeof(p->result_revision), r.item_revision);
     copy(p->result_token, sizeof(p->result_token), r.edit_token);
   } else if (kind == DEMO_PROMPT || kind == DEMO_OUTPUT ||
-             kind == DEMO_OUTPUT_END)
-    (void)demo_string(&packet);
-  else
+             kind == DEMO_OUTPUT_END || kind == DEMO_RESPONSE_BEGIN ||
+             kind == DEMO_SEGMENT_END || kind == DEMO_MESSAGE ||
+             kind == DEMO_NOTE || kind == DEMO_SHELL || kind == DEMO_QUIT) {
+    const char *text = demo_string(&packet);
+    if (kind == DEMO_RESPONSE_BEGIN)
+      p->active = 1;
+    if (kind == DEMO_OUTPUT_END)
+      p->active = 0;
+    if (kind == DEMO_SHELL)
+      ++p->shells;
+    if (kind == DEMO_OUTPUT && text) {
+      size_t i;
+      for (i = 0; text[i]; ++i) {
+        p->last_source[0] = p->last_source[1];
+        p->last_source[1] = text[i];
+        {
+          size_t length = strlen(p->source_tail);
+          if (length + 1 == sizeof(p->source_tail)) {
+            memmove(p->source_tail, p->source_tail + 1, --length);
+          }
+          p->source_tail[length] = text[i];
+          p->source_tail[length + 1] = 0;
+        }
+        ++p->source_bytes;
+      }
+    }
+  } else
     goto fail;
   if (packet.failed || packet.offset != packet.length)
     goto fail;
@@ -168,16 +197,20 @@ static int attach(peer_t *p, unsigned short port, const char *name) {
   }
   p->count = 0;
   p->revision[0] = 0;
+  p->active = -1;
   demo_link_init(&p->link, fd);
   demo_put_number(&packet, DEMO_HELLO);
   demo_put_string(&packet, name);
-  demo_put_number(&packet, 100);
+  demo_put_number(&packet, p->delay_us ? p->delay_us : 2000);
   demo_put_number(&packet, p->serial);
+  demo_put_number(&packet, 0);
+  demo_put_number(&packet, 0);
+  demo_put_number(&packet, 1);
   if (demo_link_queue(&p->link, &packet) || flush(p)) {
     demo_packet_free(&packet);
     return -1;
   }
-  while (!*p->revision)
+  while (!*p->revision || p->active < 0)
     if (receive(p))
       return -1;
   return 0;
@@ -228,7 +261,7 @@ static int owner_cases(peer_t *p, unsigned short port) {
   CHECK(!call_id(p, &r, offer_id) && p->count == 1 &&
         !strcmp(first, p->result_id));
   r.text = "second";
-  r.enabled = 0;
+  r.enabled = 1;
   CHECK(!call(p, &r) && p->status == SL_QUEUE_ACCEPTED && p->count == 2);
   copy(second, sizeof(second), p->result_id);
   memset(&r, 0, sizeof(r));
@@ -276,14 +309,15 @@ static int owner_cases(peer_t *p, unsigned short port) {
   r.edit_token = NULL;
   CHECK(!call(p, &r) && p->status == SL_QUEUE_ACCEPTED && p->count == 1 &&
         !strcmp(p->entries[0].id, second));
-  /* Host commands are classified and applied by the owner, even while stopped.
-   */
+  /* Programmatic approval offers use the same owner FIFO as native input. */
   memset(&r, 0, sizeof(r));
   r.operation = SL_QUEUE_OFFER;
-  r.text = "/inject";
+  r.text = "held first";
+  r.enabled = 1;
   CHECK(!call(p, &r) && p->status == SL_QUEUE_ACCEPTED);
   while (p->count != 2 || !p->entries[1].held)
     CHECK(!receive(p));
+  r.text = "held second";
   CHECK(!call(p, &r) && p->status == SL_QUEUE_ACCEPTED);
   while (p->count != 3 || !p->entries[2].held)
     CHECK(!receive(p));
@@ -305,10 +339,16 @@ static int owner_cases(peer_t *p, unsigned short port) {
    */
   r.operation = SL_QUEUE_CLEAR;
   CHECK(!call(p, &r) && p->status == SL_QUEUE_ACCEPTED && !p->count);
+  r.operation = SL_QUEUE_AUTO_APPROVAL;
+  r.enabled = 0;
+  CHECK(!call(p, &r) && p->status == SL_QUEUE_ACCEPTED && !p->approval);
   memset(&r, 0, sizeof(r));
   r.operation = SL_QUEUE_OFFER;
   r.text = "second";
+  r.enabled = 0;
   CHECK(!call(p, &r) && p->status == SL_QUEUE_ACCEPTED && p->count == 1);
+  r.operation = SL_QUEUE_STOP;
+  CHECK(!call(p, &r) && p->status == SL_QUEUE_ACCEPTED && p->stopped);
   demo_link_close(&p->link);
   return 0;
 }
@@ -341,6 +381,13 @@ static void drive(sl_t *sl, void *context) {
     keys = "native\rnew";
     f->stage = 1;
   } else if (f->stage == 1 && info.visible_count == 2 && !info.pending_count) {
+    sl_queue_request_t r;
+    memset(&r, 0, sizeof(r));
+    r.operation = SL_QUEUE_STOP;
+    if (sl_queue_backend_request(sl, &r, NULL) != SL_OK)
+      f->failed = 1;
+    f->stage = 11;
+  } else if (f->stage == 11 && info.visible_count == 2 && !info.pending_count) {
     sl_queue_request_t r;
     if (strcmp(sl_buffer(sl), "new"))
       f->failed = 1;
@@ -417,7 +464,7 @@ static int frontend_case(peer_t *p, unsigned short port) {
   close(f.master);
   close(slave);
   p->serial = 0;
-  CHECK(!attach(p, port, "observer") && p->count == 2 && p->stopped);
+  CHECK(!attach(p, port, "observer") && p->count == 2);
   CHECK(!strcmp(p->revision, f.revision)); /* detach did not STOP or CLEAR */
   CHECK(!strcmp(p->entries[0].text, "second") &&
         !strcmp(p->entries[1].text, "native edited"));
@@ -461,27 +508,33 @@ typedef struct live {
   double deadline;
   char tail[256];
   size_t used;
+  demo_client_t *client;
 } live_t;
+static int live_event(void *context, int kind, const char *text) {
+  live_t *f = context;
+  size_t keep;
+  if (kind != DEMO_OUTPUT)
+    return SL_OK;
+  keep = strlen(text);
+  if (keep >= sizeof(f->tail))
+    return SL_ERROR_FULL;
+  if (f->used + keep >= sizeof(f->tail)) {
+    size_t remove = f->used + keep - sizeof(f->tail) + 1;
+    memmove(f->tail, f->tail + remove, f->used - remove);
+    f->used -= remove;
+  }
+  memcpy(f->tail + f->used, text, keep + 1);
+  f->used += keep;
+  return SL_OK;
+}
 static void live_drive(sl_t *sl, void *context) {
   live_t *f = context;
   sl_queue_backend_info_t info;
   char bytes[1024];
   ssize_t n;
   while ((n = read(f->master, bytes, sizeof(bytes))) > 0) {
-    size_t keep = (size_t)n;
-    if (keep >= sizeof(f->tail)) {
-      keep = sizeof(f->tail) - 1;
-      f->used = 0;
-    }
-    if (f->used + keep >= sizeof(f->tail)) {
-      size_t remove = f->used + keep - sizeof(f->tail) + 1;
-      memmove(f->tail, f->tail + remove, f->used - remove);
-      f->used -= remove;
-    }
-    memcpy(f->tail + f->used, bytes + n - (ssize_t)keep, keep);
-    f->used += keep;
-    f->tail[f->used] = 0;
   }
+  (void)demo_client_idle(f->client);
   if (now() > f->deadline) {
     f->failed = 1;
     (void)write(f->master, "\033n\004", 3);
@@ -492,7 +545,7 @@ static void live_drive(sl_t *sl, void *context) {
   if (!f->stage) {
     (void)write(f->master, "typing", 6);
     f->stage = 1;
-  } else if (f->stage == 1 && strstr(f->tail, "owner process.")) {
+  } else if (f->stage == 1 && strstr(f->tail, "Try another prompt.")) {
     if (strcmp(sl_buffer(sl), "typing")) {
       fprintf(stderr, "live draft: '%s'\n", sl_buffer(sl));
       f->failed = 1;
@@ -525,6 +578,9 @@ static int live_case(peer_t *p, unsigned short port) {
   client = demo_client_create("127.0.0.1", port);
   CHECK(client);
   memset(&f, 0, sizeof(f));
+  f.client = client;
+  demo_client_events(client, live_event, &f);
+  demo_client_options(client, 2000, 0, 0, 1);
   memset(&size, 0, sizeof(size));
   size.ws_col = 80;
   size.ws_row = 24;
@@ -551,6 +607,74 @@ static int live_case(peer_t *p, unsigned short port) {
   close(f.slave);
   return 0;
 }
+static int shell_case(peer_t *p, unsigned short port) {
+  sl_queue_request_t request;
+  demo_packet_t packet = {0};
+  size_t before;
+  p->serial = 0;
+  CHECK(!attach(p, port, "shell-controller"));
+  memset(&request, 0, sizeof(request));
+  request.operation = SL_QUEUE_CLEAR;
+  CHECK(!call(p, &request) && p->status == SL_QUEUE_ACCEPTED);
+  request.operation = SL_QUEUE_RESUME;
+  CHECK(!call(p, &request) && p->status == SL_QUEUE_ACCEPTED);
+  request.operation = SL_QUEUE_OFFER;
+  request.text = "shell-active";
+  CHECK(!call(p, &request) && p->status == SL_QUEUE_ACCEPTED);
+  /* Hand off at a source seam with a second turn already accepted. */
+  request.text = "background turn";
+  CHECK(!call(p, &request) && p->status == SL_QUEUE_ACCEPTED);
+  demo_put_number(&packet, DEMO_IDLE);
+  demo_put_number(&packet, 0);
+  CHECK(!demo_link_queue(&p->link, &packet) && !flush(p));
+  while (!p->active)
+    CHECK(!receive(p));
+  demo_put_number(&packet, DEMO_SHELL_BEGIN);
+  CHECK(!demo_link_queue(&p->link, &packet) && !flush(p));
+  while (!p->shells)
+    CHECK(!receive(p));
+  CHECK(p->active && !strcmp(p->last_source, "\n\n"));
+  before = p->source_bytes;
+  /* Leave this subscription unread for longer than both 2 ms/character
+   * responses. Both turns must finish without output backpressure. */
+  (void)poll(NULL, 0, 1000);
+  demo_link_close(&p->link);
+  CHECK(!attach(p, port, "shell-controller"));
+  CHECK(!p->active && !p->count && before == p->source_bytes);
+  demo_link_close(&p->link);
+  return 0;
+}
+
+static int completion_shell_case(peer_t *p, unsigned short port) {
+  sl_queue_request_t request;
+  demo_packet_t packet = {0};
+  p->serial = 0;
+  p->delay_us = 20000;
+  CHECK(!attach(p, port, "completion-shell"));
+  memset(&request, 0, sizeof(request));
+  request.operation = SL_QUEUE_OFFER;
+  request.text = "completion seam";
+  CHECK(!call(p, &request) && p->status == SL_QUEUE_ACCEPTED);
+  request.text = "following turn";
+  CHECK(!call(p, &request) && p->status == SL_QUEUE_ACCEPTED);
+  p->source_tail[0] = 0;
+  p->shells = 0;
+  demo_put_number(&packet, DEMO_IDLE);
+  demo_put_number(&packet, 0);
+  CHECK(!demo_link_queue(&p->link, &packet) && !flush(p));
+  /* Request after the final paragraph begins. Completion is the next seam;
+   * the already accepted following turn must not delay the terminal grant. */
+  while (!strstr(p->source_tail, "Try another"))
+    CHECK(!receive(p));
+  demo_put_number(&packet, DEMO_SHELL_BEGIN);
+  CHECK(!demo_link_queue(&p->link, &packet) && !flush(p));
+  while (!p->shells)
+    CHECK(!receive(p));
+  CHECK(!p->active && strstr(p->source_tail, "Try another prompt.\n"));
+  demo_link_close(&p->link);
+  return 0;
+}
+
 int main(int argc, char **argv) {
   int startup[2], status, result, port;
   FILE *output;
@@ -590,6 +714,10 @@ int main(int argc, char **argv) {
     result = frontend_case(p, (unsigned short)port);
   if (!result)
     result = live_case(p, (unsigned short)port);
+  if (!result)
+    result = shell_case(p, (unsigned short)port);
+  if (!result)
+    result = completion_shell_case(p, (unsigned short)port);
   demo_link_close(&p->link);
   free(p);
   kill(child, SIGTERM);

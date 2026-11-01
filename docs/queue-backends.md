@@ -76,6 +76,14 @@ replaces that identity; empty submission or Alt-N withdraws it. The backend
 preserves position, intent and approval hold, compares revisions and enforces
 FIFO approval decisions. Results never recreate removed mirror entries.
 
+Immediate Enter → Alt-E and Alt-Enter promotion preserve that intent while
+admission is pending. Input typed while the edit hold is being acquired stays
+in a bounded frontend key queue, including whole UTF-8 characters and bracketed
+paste. Subsequent edit/approval keys wait for the preceding item operation's
+outcome. Producer output continues directly to the terminal. Cancelling clears
+the deferred edit intent and releases a hold acknowledged after cancellation;
+it cannot reopen the cancelled editor.
+
 Explicit cancellation requests ABORT. EOF, terminal failure and destruction
 preserve the backend edit hold. A failed abort handoff retains the local edit;
 rejected text proposals remain recoverable. Another controlling attachment can
@@ -137,20 +145,33 @@ An attachment supplies its prior request watermark when establishing a new
 namespace, keeping outcomes lost in an owner restart unknown and preventing
 readmission under an old identity. This does not provide durable queue storage.
 
-Try `/stop`, offer messages, then Ctrl-D on an empty editor to detach. Restart
-the frontend: the same queue remains, and `/resume` releases it. `/inject` adds
-held Q/S work. Alt-A focuses, Alt-Y approves, Alt-N rejects and Alt-E edits under
-a hold. `/approve [on|off]` also applies to already held entries. Periodic
-injections arrive every 12 seconds; set `CHAT_APPROVAL_DEMO=0` on the **owner**
-to disable them. `/status` reports owner state. Alt-R explicitly reconnects and
-resolves original IDs without reoffering. Ctrl-C stops backlog then cancels the
-simulated turn. Unsupported remote commands are rejected, never model input;
-shell-out remains available in the local C/Lua demos. Remote output is plain
-text, fed incrementally. A new frontend observes future output without replay.
+Both C executables use the released v0.15.1 chat frontend: Softline renders the
+editor, quotes, queue, approvals, reasoning and status rows. Frontend libmdf
+renders response Markdown with the same themes, margins and resize handling.
+The owner emits raw source chunks and lifecycle events; it has no terminal
+renderer or transcript store. `/status`, `/approve [on|off]`, `/steer`, `/resume`,
+`/quit`, `!sh` and `/shell` retain their local policy. Other text remains model
+input. Alt-E edits under a hold, Alt-N discards, and Alt-A then Alt-Y/Alt-N
+approves/rejects in FIFO order. Ctrl-C stops backlog and cancels the current
+turn; `/resume` releases stopped work. A new ordinary user turn can resume the
+backlog, as in the released local demo.
+
+Injections use the same random messages and 10–20 second schedule as local chat.
+Set `CHAT_APPROVAL_DEMO=0` on the **frontend** to disable them.
+Alt-R explicitly reconnects and resolves original IDs without reoffering.
+Alt-S preserves the draft and requests shell handoff at the next response seam
+(immediately when idle). The frontend closes its subscription before running
+the shell, so the owner continues producing and executing accepted work without
+socket backpressure from an unread frontend. On return it resynchronizes queue
+state and joins future output at a response seam. Missed output is discarded,
+never buffered or replayed. Local C/Lua Alt-S remains between operations.
+Ctrl-D on an empty editor detaches; accepted work and holds belong to the owner.
 The `run-chat-without-delay` variants also work in remote mode: the frontend
 requests zero producer delay when it attaches to the owner.
 
 `softline_queue_backend` tests deferred outcomes and native PTY keys.
 `softline_queue_tcp` starts the actual owner and fd adapter, proving admission
 deduplication, hold handoff, approval FIFO and frontend teardown/reconstruction.
-Both complete in about a second on the development host.
+The released chat policy, shell and approval interactions also run against the
+remote frontend and actual owner. VTE tests assert physical rows, wrapped and
+truncated previews, focus, edit/discard, multiline input, themes and resize.

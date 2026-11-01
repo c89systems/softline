@@ -172,6 +172,9 @@ another. All C chat themes accept `CHAT_QUEUE=local|remote`, for example
 `make run-chat-riced CHAT_QUEUE=remote`. Accepted work and edit holds survive
 frontend detach; the example owner is volatile across its own restart. See
 [queue backends](docs/queue-backends.md) for the C/Lua contract and demos.
+Local and remote C chat share the same frontend and Markdown renderer. Remote
+Alt-S can hand the terminal to a shell at the next response seam while retaining
+the draft; the backend continues running and missed output is not replayed.
 
 `example_simple` is the normal terminal prompt. Output is printed after each
 submitted line and the next prompt proceeds below it like an ordinary REPL.

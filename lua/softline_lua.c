@@ -1564,6 +1564,9 @@ static int softline_lua_cancel(lua_State *L) {
   handle = softline_lua_check(L, 1);
   return softline_lua_status(L, sl_cancel(handle->sl));
 }
+static int softline_lua_suspend(lua_State *L) {
+  return softline_lua_status(L, sl_suspend(softline_lua_check(L, 1)->sl));
+}
 
 /** Lua editor:bind_key(key, callback) overrides built-in handling. An Enter
  * callback returning KEY_ACTION_SUBMIT submits a reverse-search match
@@ -1980,6 +1983,7 @@ static const luaL_Reg softline_lua_methods[] = {
     {"set_cursor", softline_lua_set_cursor},
     {"submit", softline_lua_submit},
     {"cancel", softline_lua_cancel},
+    {"suspend", softline_lua_suspend},
     {"bind_key", softline_lua_bind_key},
     {"set_idle_callback", softline_lua_set_idle_callback},
     {"watch_add", softline_lua_watch_add},

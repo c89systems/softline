@@ -3,6 +3,8 @@
 #include "queue_demo_wire.h"
 #include <arpa/inet.h>
 #include <errno.h>
+#include <netinet/tcp.h>
+#include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -19,6 +21,10 @@ struct demo_client {
   int wake[2], connected, connecting, reconnect, resolve;
   sl_queue_request_id_t resolved_through;
   sl_queue_request_id_t request_high;
+  demo_event_fn handler;
+  void *handler_context;
+  unsigned int delay_us, interval_ms, seed;
+  int approvals, idle_announced, input_empty;
   char name[64];
   sl_queue_entry_t entries[DEMO_ITEM_MAX];
 };
@@ -59,6 +65,7 @@ static int request(void *context, const sl_queue_request_t *r) {
     c->request_high = r->request_id;
   if (!c->connected)
     return SL_ERROR_NOT_READY;
+  c->idle_announced = 0;
   demo_put_request(&p, r);
   if (demo_link_queue(&c->link, &p)) {
     demo_packet_free(&p);
@@ -124,15 +131,16 @@ static int receive(demo_client_t *c, demo_packet_t *p) {
     if (change.kind == SL_QUEUE_SNAPSHOT && status == SL_OK)
       resolve(c);
   } else if (kind == DEMO_PROMPT || kind == DEMO_OUTPUT ||
-             kind == DEMO_OUTPUT_END) {
+             kind == DEMO_OUTPUT_END || kind == DEMO_RESPONSE_BEGIN ||
+             kind == DEMO_SEGMENT_END || kind == DEMO_MESSAGE ||
+             kind == DEMO_NOTE || kind == DEMO_SHELL || kind == DEMO_QUIT) {
     const char *text = demo_string(p);
     if (p->failed || p->offset != p->length ||
-        (!text && kind != DEMO_OUTPUT_END))
+        (!text &&
+         (kind == DEMO_PROMPT || kind == DEMO_OUTPUT || kind == DEMO_NOTE)))
       return -1;
-    if (kind == DEMO_PROMPT)
-      status = sl_output_stream_write_quoted_prompt(c->editor, text);
-    else if (text)
-      status = sl_output_stream_write(c->editor, text, strlen(text));
+    if (c->handler)
+      status = c->handler(c->handler_context, (int)kind, text);
   } else
     return -1;
   return status == SL_OK ? 0 : -1;
@@ -155,11 +163,12 @@ static int socket_ready(sl_t *sl, const sl_watch_event_t *event,
     c->connected = 1;
     demo_put_number(&p, DEMO_HELLO);
     demo_put_string(&p, c->name);
-    demo_put_number(&p, getenv("SOFTLINE_CHAT_CHAR_MS") &&
-                                !strcmp(getenv("SOFTLINE_CHAT_CHAR_MS"), "0")
-                            ? 0
-                            : 100);
+    demo_put_number(&p, c->delay_us);
     demo_put_number(&p, c->request_high);
+    demo_put_number(&p, (unsigned long)c->approvals);
+    demo_put_number(&p, c->interval_ms);
+    demo_put_number(&p, c->seed);
+    c->idle_announced = 0;
     if (demo_link_queue(&c->link, &p)) {
       demo_packet_free(&p);
       lost(c);
@@ -193,6 +202,10 @@ static int connect_owner(demo_client_t *c) {
   fd = socket(AF_INET, SOCK_STREAM, 0);
   if (fd < 0)
     return SL_ERROR_IO;
+  {
+    int enabled = 1;
+    (void)setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &enabled, sizeof(enabled));
+  }
   if (demo_nonblock(fd)) {
     close(fd);
     return SL_ERROR_IO;
@@ -256,7 +269,104 @@ demo_client_t *demo_client_create(const char *host, unsigned short port) {
   c->backend.detach = detach;
   c->backend.capabilities = (1UL << (SL_QUEUE_RESOLVE + 1)) - 1;
   c->backend.max_pending_requests = 16;
+  c->delay_us = 20000;
   return c;
+}
+void demo_client_events(demo_client_t *c, demo_event_fn fn, void *context) {
+  c->handler = fn;
+  c->handler_context = context;
+}
+void demo_client_options(demo_client_t *c, unsigned int delay_us, int approvals,
+                         unsigned int interval_ms, unsigned int seed) {
+  c->delay_us = delay_us;
+  c->approvals = approvals;
+  c->interval_ms = interval_ms;
+  c->seed = seed;
+}
+int demo_client_idle(demo_client_t *c) {
+  sl_queue_backend_info_t info;
+  demo_packet_t p = {0};
+  size_t i;
+  int empty;
+  if (!c->connected)
+    return SL_OK;
+  if (sl_queue_backend_info(c->editor, &info) != SL_OK || !info.synchronized)
+    return SL_OK;
+  for (i = 0; i < info.pending_count; ++i) {
+    sl_queue_pending_info_t pending;
+    if (sl_queue_backend_pending(c->editor, i, &pending) != SL_OK)
+      return SL_ERROR;
+    if (pending.pending || pending.status == SL_QUEUE_ACCEPTED)
+      return SL_OK;
+  }
+  empty = !*sl_buffer(c->editor) && !sl_history_search_active(c->editor);
+  {
+    sl_prompt_queue_entry_info_t draft;
+    if (sl_prompt_queue_draft_info(c->editor, &draft) == SL_OK && draft.id)
+      empty = 0;
+  }
+  if (c->idle_announced && c->input_empty == empty)
+    return SL_OK;
+  demo_put_number(&p, DEMO_IDLE);
+  demo_put_number(&p, (unsigned long)empty);
+  if (demo_link_queue(&c->link, &p)) {
+    demo_packet_free(&p);
+    return SL_ERROR_FULL;
+  }
+  c->idle_announced = 1;
+  c->input_empty = empty;
+  return wake(c);
+}
+void demo_client_pause(demo_client_t *c) {
+  c->reconnect = 0;
+  lost(c);
+}
+int demo_client_shell_begin(demo_client_t *c) {
+  demo_packet_t p = {0};
+  if (!c->connected)
+    return SL_ERROR_NOT_READY;
+  demo_put_number(&p, DEMO_SHELL_BEGIN);
+  if (demo_link_queue(&c->link, &p)) {
+    demo_packet_free(&p);
+    return SL_ERROR_FULL;
+  }
+  return wake(c);
+}
+int demo_client_service(demo_client_t *c, int timeout_ms) {
+  struct pollfd fd;
+  sl_watch_event_t event;
+  int status;
+  if (c->reconnect) {
+    c->reconnect = 0;
+    if (connect_owner(c) != SL_OK)
+      return SL_ERROR_IO;
+  }
+  if (!c->connected && !c->connecting)
+    return SL_ERROR_NOT_READY;
+  if (c->connected && demo_link_flush(&c->link)) {
+    lost(c);
+    return SL_ERROR_IO;
+  }
+  fd.fd = c->link.fd;
+  fd.events = POLLIN | ((c->connecting || c->link.count) ? POLLOUT : 0);
+  fd.revents = 0;
+  do {
+    status = poll(&fd, 1, timeout_ms);
+  } while (status < 0 && errno == EINTR);
+  if (status < 0)
+    return SL_ERROR_IO;
+  if (status) {
+    memset(&event, 0, sizeof(event));
+    event.fd = fd.fd;
+    if (fd.revents & POLLIN)
+      event.events |= SL_WATCH_READ;
+    if (fd.revents & POLLOUT)
+      event.events |= SL_WATCH_WRITE;
+    if (fd.revents & (POLLHUP | POLLERR))
+      event.events |= SL_WATCH_HANGUP;
+    (void)socket_ready(c->editor, &event, c);
+  }
+  return c->connected || c->connecting ? SL_OK : SL_ERROR_NOT_READY;
 }
 const sl_queue_backend_t *demo_client_backend(demo_client_t *c) {
   return c ? &c->backend : NULL;

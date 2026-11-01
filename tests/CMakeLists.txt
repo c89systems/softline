@@ -324,6 +324,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND TARGET example_chat)
     "$<TARGET_FILE:example_chat>" "${PROJECT_SOURCE_DIR}" "${PROJECT_BINARY_DIR}"
     "${chat_history_key}.history" "$<TARGET_FILE:test_chat_shell>")
   set_tests_properties(softline_chat_shell PROPERTIES LABELS "integration" TIMEOUT 60)
+  add_test(NAME softline_chat_remote_shell COMMAND test_chat_shell remote
+    "$<TARGET_FILE:example_chat_remote>" "${PROJECT_SOURCE_DIR}" "${PROJECT_BINARY_DIR}"
+    "${chat_history_key}.history" "$<TARGET_FILE:test_chat_shell>" "$<TARGET_FILE:example_queue_owner>")
+  set_tests_properties(softline_chat_remote_shell PROPERTIES LABELS "integration;queue;remote" TIMEOUT 60)
   add_executable(test_chat_policies test_chat_policies.c)
   target_link_libraries(test_chat_policies PRIVATE util)
   softline_apply_warnings(test_chat_policies)
@@ -333,6 +337,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND TARGET example_chat)
     "$<TARGET_FILE:test_chat_shell>" "${chat_history_key}.history")
   set_tests_properties(softline_chat_policies PROPERTIES
     LABELS "integration;queue;example-smoke" TIMEOUT 15)
+  add_test(NAME softline_chat_remote_policies COMMAND test_chat_policies remote
+    "$<TARGET_FILE:example_chat_remote>" "${PROJECT_SOURCE_DIR}" "${PROJECT_BINARY_DIR}"
+    "$<TARGET_FILE:test_chat_shell>" "${chat_history_key}.history" "$<TARGET_FILE:example_queue_owner>")
+  set_tests_properties(softline_chat_remote_policies PROPERTIES LABELS "integration;queue;remote" TIMEOUT 30)
   add_executable(test_chat_approval test_chat_approval.c)
   target_link_libraries(test_chat_approval PRIVATE util)
   softline_apply_warnings(test_chat_approval)
@@ -342,6 +350,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND TARGET example_chat)
     "${chat_history_key}.history")
   set_tests_properties(softline_chat_approval PROPERTIES
     LABELS "integration;queue;example-smoke" TIMEOUT 20)
+  add_test(NAME softline_chat_remote_approval COMMAND test_chat_approval
+    "$<TARGET_FILE:example_chat_remote>" "${PROJECT_SOURCE_DIR}" "${PROJECT_BINARY_DIR}"
+    "${chat_history_key}.history" "$<TARGET_FILE:example_queue_owner>")
+  set_tests_properties(softline_chat_remote_approval PROPERTIES LABELS "integration;queue;remote" TIMEOUT 30)
   # A second real terminal engine catches erased blank-cell extent that tmux's
   # grid drops. Keep these host-only test dependencies out of the library.
   find_program(SOFTLINE_TEST_XVFB_RUN xvfb-run)
@@ -481,6 +493,18 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND TARGET example_chat)
       set_tests_properties(softline_chat_approval_${approval_case} PROPERTIES
         ENVIRONMENT "${terminal_test_environment}"
         LABELS "integration;queue;example-smoke" TIMEOUT 15)
+      add_test(NAME softline_chat_remote_approval_${approval_case} COMMAND "${SOFTLINE_TEST_XVFB_RUN}" -a
+        "$<TARGET_FILE:test_vte_chat>" approval "$<TARGET_FILE:example_chat_remote>" "${approval_case}")
+      set_tests_properties(softline_chat_remote_approval_${approval_case} PROPERTIES
+        ENVIRONMENT "${terminal_test_environment};SOFTLINE_CHAT_TEST_OWNER=$<TARGET_FILE:example_queue_owner>"
+        LABELS "integration;queue;remote" TIMEOUT 15)
+    endforeach()
+    foreach(mode blank line-keys tiny streaming)
+      add_test(NAME softline_chat_remote_${mode} COMMAND "${SOFTLINE_TEST_XVFB_RUN}" -a
+        "$<TARGET_FILE:test_vte_chat>" "${mode}" "$<TARGET_FILE:example_chat_remote>")
+      set_tests_properties(softline_chat_remote_${mode} PROPERTIES
+        ENVIRONMENT "${terminal_test_environment};SOFTLINE_CHAT_TEST_OWNER=$<TARGET_FILE:example_queue_owner>"
+        LABELS "integration;streaming;remote" TIMEOUT 60)
     endforeach()
     foreach(_softline_chat_theme plain riced)
       add_test(NAME softline_chat_width_${_softline_chat_theme} COMMAND "${SOFTLINE_TEST_XVFB_RUN}" -a
@@ -488,6 +512,11 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND TARGET example_chat)
       set_tests_properties(softline_chat_width_${_softline_chat_theme} PROPERTIES ENVIRONMENT "${terminal_test_environment}")
       set_tests_properties(softline_chat_width_${_softline_chat_theme} PROPERTIES
         LABELS "integration;streaming;libmdf" TIMEOUT 40)
+      add_test(NAME softline_chat_remote_width_${_softline_chat_theme} COMMAND "${SOFTLINE_TEST_XVFB_RUN}" -a
+        "$<TARGET_FILE:test_vte_chat>" width "$<TARGET_FILE:example_chat_remote>" "${_softline_chat_theme}")
+      set_tests_properties(softline_chat_remote_width_${_softline_chat_theme} PROPERTIES
+        ENVIRONMENT "${terminal_test_environment};SOFTLINE_CHAT_TEST_OWNER=$<TARGET_FILE:example_queue_owner>"
+        LABELS "integration;streaming;libmdf;remote" TIMEOUT 40)
     endforeach()
     add_test(NAME softline_terminal_vte_tiny COMMAND "${SOFTLINE_TEST_XVFB_RUN}" -a
       "$<TARGET_FILE:test_vte_chat>" tiny "$<TARGET_FILE:example_chat>")
