@@ -35,6 +35,9 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   add_test(NAME softline_queue_backend_large_edit COMMAND test_queue_backend large-edit)
   set_tests_properties(softline_queue_backend_large_edit PROPERTIES
     LABELS "integration;queue;editing;memcheck" TIMEOUT 15)
+  add_test(NAME softline_queue_backend_controls COMMAND test_queue_backend controls)
+  set_tests_properties(softline_queue_backend_controls PROPERTIES
+    LABELS "unit;queue;editing;memcheck" TIMEOUT 5)
   add_executable(test_edit test_edit.c "${PROJECT_SOURCE_DIR}/src/softline_edit.c")
   softline_apply_warnings(test_edit)
   softline_local_runtime(test_edit)
@@ -333,6 +336,13 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND TARGET example_chat)
     "$<TARGET_FILE:example_chat_remote>" "${PROJECT_SOURCE_DIR}" "${PROJECT_BINARY_DIR}"
     "${chat_history_key}.history" "$<TARGET_FILE:test_chat_shell>" "$<TARGET_FILE:example_queue_owner>")
   set_tests_properties(softline_chat_remote_shell PROPERTIES LABELS "integration;queue;remote" TIMEOUT 60)
+  foreach(control quiet controls)
+    add_test(NAME softline_chat_remote_${control} COMMAND test_chat_shell ${control}
+      "$<TARGET_FILE:example_chat_remote>" "${PROJECT_SOURCE_DIR}" "${PROJECT_BINARY_DIR}"
+      "${chat_history_key}.history" "$<TARGET_FILE:test_chat_shell>" "$<TARGET_FILE:example_queue_owner>")
+    set_tests_properties(softline_chat_remote_${control} PROPERTIES
+      LABELS "integration;queue;remote" TIMEOUT 20)
+  endforeach()
   add_executable(test_chat_policies test_chat_policies.c)
   target_link_libraries(test_chat_policies PRIVATE util)
   softline_apply_warnings(test_chat_policies)

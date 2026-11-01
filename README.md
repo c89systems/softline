@@ -178,6 +178,12 @@ the draft; the backend continues running and missed output is not replayed.
 The remote chat host shows disconnect state in its thinking row and retries
 every two seconds (`CHAT_RECONNECT_MS` changes the interval), preserving the
 draft and reconciling queue state without resubmitting uncertain work.
+Connection attempts run asynchronously: repeated unsuccessful retries keep the
+same status frame without repainting an unchanged editor. In C chat, `/quit`
+is handled by the remote frontend and needs no queue-owner acknowledgement.
+Alt-Q exits both C and Lua chat immediately, including with a draft; Ctrl-D
+exits an empty editor. These controls remain usable while disconnected or
+waiting for a connection handshake.
 
 `example_simple` is the normal terminal prompt. Output is printed after each
 submitted line and the next prompt proceeds below it like an ordinary REPL.
@@ -652,7 +658,7 @@ entry immediately. Explicit
 `sl_bind_key()` bindings always take precedence over these built-ins.
 Cancelling a queued-turns editor keeps queued drafts visible but stops automatic
 FIFO release; a subsequent direct submission or manual promotion resumes it.
-The chat examples recognize `/quit` when they receive it. An ordinary queued
+The local chat examples recognize `/quit` when they receive it. An ordinary queued
 `/quit` runs after earlier FIFO entries; a steered `/quit` runs when the example
 takes steers at its next response boundary. An idle Alt-Enter promotion delivers
 it directly. Entries behind `/quit` are not processed.

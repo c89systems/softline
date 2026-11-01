@@ -15,6 +15,7 @@ typedef struct {
 } backend_pending_t;
 typedef struct {
   int key;
+  int binding_done;
   size_t len;
   char bytes[8];
 } backend_key_t;
@@ -800,7 +801,8 @@ int sl_backend_wait_key(const sl_impl_t *impl, int key) {
          (!impl->len &&
           key == (int)impl->prompt_queue.keys.submit_or_promote_newest);
 }
-int sl_backend_push_key(sl_t *self, int key, const char *bytes, size_t len) {
+int sl_backend_push_key(sl_t *self, int key, const char *bytes, size_t len,
+                        int binding_done) {
   sl_impl_t *impl = editor(self);
   sl_backend_t *b = impl->backend;
   backend_key_t *keys;
@@ -830,6 +832,7 @@ int sl_backend_push_key(sl_t *self, int key, const char *bytes, size_t len) {
   }
   index = (b->key_head + b->key_count) % b->key_capacity;
   b->keys[index].key = key;
+  b->keys[index].binding_done = binding_done;
   b->keys[index].len = len;
   if (len)
     memcpy(b->keys[index].bytes, bytes, len);
@@ -840,11 +843,13 @@ int sl_backend_push_key(sl_t *self, int key, const char *bytes, size_t len) {
     b->reading_paste = 0;
   return SL_OK;
 }
-int sl_backend_pop_key(sl_impl_t *impl, int *key, char *bytes, size_t *len) {
+int sl_backend_pop_key(sl_impl_t *impl, int *key, char *bytes, size_t *len,
+                       int *binding_done) {
   sl_backend_t *b = impl->backend;
   if (!b || !b->key_count)
     return 0;
   *key = b->keys[b->key_head].key;
+  *binding_done = b->keys[b->key_head].binding_done;
   *len = b->keys[b->key_head].len;
   if (*len)
     memcpy(bytes, b->keys[b->key_head].bytes, *len);

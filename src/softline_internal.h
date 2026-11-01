@@ -249,8 +249,10 @@ int sl_backend_wait_edit(const sl_impl_t *impl);
 int sl_backend_wait_keys(const sl_impl_t *impl);
 int sl_backend_wait_key(const sl_impl_t *impl, int key);
 int sl_backend_reading_paste(const sl_impl_t *impl);
-int sl_backend_push_key(sl_t *self, int key, const char *bytes, size_t len);
-int sl_backend_pop_key(sl_impl_t *impl, int *key, char *bytes, size_t *len);
+int sl_backend_push_key(sl_t *self, int key, const char *bytes, size_t len,
+                        int binding_done);
+int sl_backend_pop_key(sl_impl_t *impl, int *key, char *bytes, size_t *len,
+                       int *binding_done);
 int sl_backend_action(sl_t *self, sl_prompt_id_t id,
                       sl_queue_operation_t operation);
 int sl_backend_cancel_edit(sl_t *self);

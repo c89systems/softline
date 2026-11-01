@@ -36,6 +36,9 @@ add_test(NAME lua_chat_policies COMMAND "${lua_build}/test_chat_policies" lua
   "${chat_history_key}.history")
 add_test(NAME lua_chat_history COMMAND "${pty_test}" store lua "${SOFTLINE_LUA_EXECUTABLE}"
   "${root}" "${root}/build" "${chat_history_key}.history")
+add_test(NAME lua_chat_exit_controls COMMAND "${lua_build}/test_chat_shell" lua-controls
+  "${SOFTLINE_LUA_EXECUTABLE}" "${root}" "${root}/build"
+  "${chat_history_key}.history" "${lua_build}/test_chat_shell")
 if(NOT SOFTLINE_LUA_DEBUG)
   foreach(mode mixed_tty watch)
     add_test(NAME "lua_chat_${mode}" COMMAND "${pty_test}" "${mode}" "${SOFTLINE_LUA_EXECUTABLE}" "${root}")

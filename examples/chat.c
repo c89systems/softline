@@ -720,17 +720,38 @@ static int cancel_editor_key(sl_t *sl, sl_key_t key, void *userdata,
   return SL_OK;
 }
 
-/* EOF still paints its farewell before leaving the active editor. Commands
- * use native admission, so Enter/Alt-Enter need no interception. */
+/* Frontend exit controls never depend on remote queue admission. A queued
+ * entry being edited keeps its normal submission/approval semantics. */
 static int exit_editor_key(sl_t *sl, sl_key_t key, void *userdata,
                            sl_key_action_t *action) {
   struct chat_state *state = (struct chat_state *)userdata;
   const char *text = sl_buffer(sl);
+  sl_prompt_queue_entry_info_t draft;
+  int immediate = key == SL_KEY_ALT_BASE + 'q';
   int leaving = key == SL_KEY_CTRL_D && text[0] == '\0';
   *action = SL_KEY_ACTION_PASS;
+  if (immediate) {
+    state->exit_requested = 1;
+    *action = SL_KEY_ACTION_SUSPEND;
+    return show_goodbye(state) == 0 ? SL_OK : SL_ERROR_IO;
+  }
   if (sl->history_search_active(sl))
     return SL_OK;
-  return leaving && show_goodbye(state) != 0 ? SL_ERROR_IO : SL_OK;
+  if (leaving) {
+    state->exit_requested = 1;
+    *action = SL_KEY_ACTION_SUSPEND;
+    return show_goodbye(state) == 0 ? SL_OK : SL_ERROR_IO;
+  }
+  if (state->remote && key != SL_KEY_CTRL_D && !strcmp(text, "/quit")) {
+    if (sl_prompt_queue_draft_info(sl, &draft) != SL_OK)
+      return SL_ERROR_IO;
+    if (!draft.id) {
+      state->exit_requested = 1;
+      *action = SL_KEY_ACTION_SUSPEND;
+      return show_goodbye(state) == 0 ? SL_OK : SL_ERROR_IO;
+    }
+  }
+  return SL_OK;
 }
 
 static int set_prompt_theme_from_environment(sl_t *sl) {
@@ -780,14 +801,23 @@ static void report_failure(struct chat_state *state, const char *operation) {
 static int remote_event(void *context, int kind, const char *text) {
   struct chat_state *state = context;
   size_t i;
+  int unavailable;
   switch (kind) {
   case DEMO_DISCONNECTED:
   case DEMO_CONNECTING:
+  case DEMO_SYNCHRONIZING:
+    unavailable = state->remote_state == DEMO_DISCONNECTED ||
+                  state->remote_state == DEMO_CONNECTING ||
+                  state->remote_state == DEMO_SYNCHRONIZING;
     state->remote_state = kind;
     if (kind == DEMO_CONNECTING)
       state->connecting_since = monotonic_seconds();
-    else
+    else if (kind == DEMO_DISCONNECTED)
       state->shell_requested = 0;
+    /* Transport retries are observable to the host, but availability has
+     * not changed until a synchronized snapshot arrives. Keep its frame. */
+    if (unavailable)
+      return SL_OK;
     /* Keep the previous availability message visible while changing activity
      * indicators; a connection attempt must not briefly look ready. */
     if (finish_response_document(state) ||
@@ -796,13 +826,7 @@ static int remote_event(void *context, int kind, const char *text) {
       return SL_ERROR_IO;
     state->busy = 0;
     return set_chat_message(
-        state->sl,
-        kind == DEMO_CONNECTING
-            ? "Reconnecting to queue owner..."
-            : "Disconnected; retrying automatically. Alt-R reconnects.");
-  case DEMO_SYNCHRONIZING:
-    state->remote_state = kind;
-    return set_chat_message(state->sl, "Reconnecting; synchronizing queue...");
+        state->sl, "Disconnected; retrying automatically. Alt-R reconnects.");
   case DEMO_READY:
     state->remote_state = kind;
     return set_busy(state, 0) == 0 ? SL_OK : SL_ERROR_IO;
@@ -918,18 +942,6 @@ static int reconnect_editor(sl_t *sl, sl_key_t key, void *context,
   return demo_client_reconnect(state->remote);
 }
 
-static int wait_remote_ready(struct chat_state *state) {
-  sl_queue_backend_info_t ready;
-  double deadline = monotonic_seconds() + 3;
-  do {
-    if (demo_client_service(state->remote, 100) != SL_OK)
-      break;
-    if (sl_queue_backend_info(state->sl, &ready) == SL_OK && ready.synchronized)
-      return 0;
-  } while (monotonic_seconds() < deadline);
-  return -1;
-}
-
 int main(int argc, char **argv) {
   static const char *const status_elements[] = {"streaming demo", "ctx 36%",
                                                 "demo/project", "queue demo"};
@@ -1005,6 +1017,8 @@ int main(int argc, char **argv) {
         sl_bind_key(state.sl, SL_KEY_ALT_BASE + 's', shell_editor_key,
                     &state) != SL_OK ||
         sl_bind_key(state.sl, SL_KEY_CTRL_D, exit_editor_key, &state) !=
+            SL_OK ||
+        sl_bind_key(state.sl, SL_KEY_ALT_BASE + 'q', exit_editor_key, &state) !=
             SL_OK)) ||
       state.sl->output_stream_begin(state.sl) != SL_OK ||
       new_renderer(&state, &state.note_renderer) != 0 ||
@@ -1028,16 +1042,21 @@ int main(int argc, char **argv) {
           setup_reconnect(&state) != 0 ||
           sl_set_idle_callback(state.sl, approval_demo_idle, &state) != SL_OK ||
           sl_bind_key(state.sl, SL_KEY_ALT_BASE + 'r', reconnect_editor,
-                      &state) != SL_OK) {
+                      &state) != SL_OK ||
+          sl_bind_key(state.sl, SL_KEY_ENTER, exit_editor_key, &state) !=
+              SL_OK ||
+          sl_bind_key(state.sl, SL_KEY_ALT_ENTER, exit_editor_key, &state) !=
+              SL_OK ||
+          sl_bind_key(state.sl, SL_KEY_CTRL_ENTER, exit_editor_key, &state) !=
+              SL_OK) {
         exit_code = 1;
         goto cleanup;
       }
-      (void)wait_remote_ready(&state);
     }
     if (render_note(
             &state,
             "Enter sends or queues; Alt-Enter steers or promotes; "
-            "Alt-E edits queue. Esc/Ctrl-C cancels; `/quit` leaves. "
+            "Alt-E edits queue. Esc/Ctrl-C cancels; `/quit` or Alt-Q leaves. "
             "`!sh` or `/shell` opens your shell between turns; "
             "Policy demo: `/status` / `/approve` / `/steer` / `/resume`. "
             "Alt-S opens it while preserving your draft.") != 0) {
@@ -1089,10 +1108,6 @@ int main(int argc, char **argv) {
         if (state.remote) {
           state.remote_shell = 0;
           (void)demo_client_reconnect(state.remote);
-          if (wait_remote_ready(&state))
-            (void)set_chat_message(
-                state.sl,
-                "Disconnected; retrying automatically. Alt-R reconnects.");
         }
         continue;
       }

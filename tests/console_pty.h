@@ -31,6 +31,7 @@ static const char *root;
 static int c_chat;
 #include "remote_chat_owner.h"
 static int test_rows = 8, test_columns = 40, test_echo;
+static int pump(struct editor *e, int timeout);
 static double now(void) {
   struct timespec t;
   clock_gettime(CLOCK_MONOTONIC, &t);
@@ -71,6 +72,8 @@ static int start(struct editor *e, const char *relative, const char *arg1,
   snprintf(script, sizeof(script), "%s/%s", root, relative);
   if (start_remote_owner())
     return 1;
+  if (remote_owner && getenv("SOFTLINE_CHAT_TEST_OFFLINE"))
+    stop_remote_owner();
   if (openpty(&e->master, &slave, NULL, NULL, &size))
     return 1;
   if (!test_echo && tcgetattr(slave, &attributes) == 0) {
@@ -102,6 +105,28 @@ static int start(struct editor *e, const char *relative, const char *arg1,
     _exit(127);
   }
   close(slave);
+  if (e->child > 0 && c_chat && remote_owner &&
+      !getenv("SOFTLINE_CHAT_TEST_OFFLINE") &&
+      !getenv("SOFTLINE_CHAT_TEST_STALL_HELLO")) {
+    double deadline = now() + 2;
+    /* Initial queue operations require a synchronized subscription. The
+     * unavailable panel adds a row; wait for its removal after it was painted,
+     * without hiding startup/handshake waits in the product's input loop. */
+    do {
+      if (strstr(e->bytes, "P 0 pending") && !e->escape_length &&
+          e->bottom == e->rows - 4)
+        return 0;
+      {
+        int status = pump(e, 10);
+        /* start() reports a successful fork; negative startup fixtures
+         * inspect the child's exit status themselves. */
+        if (status)
+          return status < 0;
+      }
+    } while (now() < deadline);
+    fprintf(stderr, "Remote console did not synchronize\n");
+    return 1;
+  }
   return e->child < 0;
 }
 /* Only cursor/margin controls used by these ASCII shell interactions are

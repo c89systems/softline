@@ -384,6 +384,130 @@ static void remove_files(const char *directory) {
   }
   closedir(dir);
 }
+static int control_exit(struct editor *e) {
+  double deadline = now() + 1;
+  int status;
+  struct termios attributes;
+  do {
+    if (waitpid(e->child, &status, WNOHANG) == e->child) {
+      e->child = -1;
+      settle(e, .03);
+      return !WIFEXITED(status) || WEXITSTATUS(status) ||
+             (c_chat && !contains(e, "Goodbye.", 0)) ||
+             tcgetattr(e->master, &attributes) ||
+             !(attributes.c_lflag & ICANON) || !(attributes.c_lflag & ECHO) ||
+             e->top || e->bottom != e->rows - 1;
+    }
+    if (pump(e, 10) < 0)
+      return 1;
+  } while (now() < deadline);
+  return 1;
+}
+
+static int connection_controls(int quiet) {
+  static const int states[] = {2, 4, 3, 1, 5, 0};
+  static const char *keys[] = {"/quit\r", "/quit\033\r", "/quit\033[13;5u",
+                               "draft to discard\033q", "\004"};
+  const char *owner = remote_owner;
+  struct editor *probe = calloc(1, sizeof(*probe));
+  size_t state, key, mark;
+  double deadline;
+  int failed = 1, row, column;
+  if (!probe)
+    return 1;
+  probe->child = probe->master = -1;
+  setenv("SOFTLINE_CHAT_RECONNECT_MS", "50", 1);
+  setenv("SOFTLINE_CHAT_APPROVAL_DEMO", "0", 1);
+  for (state = c_chat ? 0 : 5; state < (quiet ? 1 : 6); ++state) {
+    for (key = 0; key < (quiet ? 1 : 5); ++key) {
+      /* Ctrl-Enter is a remote frontend command binding; local queue
+       * profiles expose Enter and Alt-Enter as their submission keys. */
+      if (!states[state] && key == 2)
+        continue;
+      if (states[state] == 5 && key < 3)
+        continue; /* Pending edit input belongs to the edited entry. */
+      remote_owner = states[state] ? owner : NULL;
+      if (states[state] == 4)
+        setenv("SOFTLINE_CHAT_TEST_STALL_HELLO", "1", 1);
+      else
+        unsetenv("SOFTLINE_CHAT_TEST_STALL_HELLO");
+      if (states[state] == 2)
+        setenv("SOFTLINE_CHAT_TEST_OFFLINE", "1", 1);
+      else
+        unsetenv("SOFTLINE_CHAT_TEST_OFFLINE");
+      if (start_remote_owner())
+        goto cleanup;
+      if (start(probe, "examples/chat.lua", NULL, NULL))
+        goto cleanup;
+      deadline = now() + 1;
+      do {
+        if (contains(probe, "\033[?2004h", 0))
+          break;
+        if (pump(probe, 10))
+          goto cleanup;
+      } while (now() < deadline);
+      if (!contains(probe, "\033[?2004h", 0))
+        goto cleanup;
+      settle(probe, .12);
+      if (states[state] == 1 || states[state] == 3 || states[state] == 5 ||
+          (!states[state] && key >= 3)) {
+        if (send_bytes(probe, "work\r") ||
+            wait_for(probe,
+                     c_chat ? "Thinking..." : "[operation] processing input.",
+                     0))
+          goto cleanup;
+      }
+      if (states[state] == 3) {
+        stop_remote_owner();
+        if (wait_for(probe, "Disconnected;", 0))
+          goto cleanup;
+        settle(probe, .06);
+      }
+      if (states[state] == 5) {
+        if (send_bytes(probe, "queued prompt\r") ||
+            wait_for(probe, "Q 1. queued prompt", 0) ||
+            kill(remote_owner_pid, SIGSTOP) || send_bytes(probe, "\033e") ||
+            wait_for(probe, "P 1 pending", 0))
+          goto cleanup;
+      }
+      if (quiet) {
+        if (send_bytes(probe, "first\012second\001\033[C"))
+          goto cleanup;
+        settle(probe, .12);
+        mark = probe->length;
+        row = probe->row;
+        column = probe->column;
+        settle(probe, .35);
+        if (probe->length != mark || probe->row != row ||
+            probe->column != column) {
+          fprintf(stderr, "Unchanged offline frame wrote %lu terminal bytes\n",
+                  (unsigned long)(probe->length - mark));
+          goto cleanup;
+        }
+        if (send_bytes(probe, "\033q") || control_exit(probe))
+          goto cleanup;
+      } else if (send_bytes(probe, keys[key]) || control_exit(probe))
+        goto cleanup;
+      if (remote_owner_pid > 0 && kill(remote_owner_pid, 0))
+        goto cleanup;
+      close_editor(probe);
+    }
+  }
+  failed = 0;
+cleanup:
+  if (failed)
+    fprintf(stderr,
+            "Chat connection control failed: state=%d key=%lu\n%.2000s\n",
+            state < 6 ? states[state] : -1, (unsigned long)key, probe->bytes);
+  close_editor(probe);
+  remote_owner = owner;
+  unsetenv("SOFTLINE_CHAT_TEST_STALL_HELLO");
+  unsetenv("SOFTLINE_CHAT_RECONNECT_MS");
+  unsetenv("SOFTLINE_CHAT_TEST_OFFLINE");
+  free(probe);
+  return failed;
+}
+
 int main(int argc, char **argv) {
   char directory[4096] = {0}, shell[4096] = {0}, history_dir[4096] = {0},
        history_path[4096] = {0}, file[4096];
@@ -394,9 +518,10 @@ int main(int argc, char **argv) {
     return fixture_shell(argc, argv);
   if ((argc != 7 && argc != 8) ||
       (strcmp(argv[1], "c") && strcmp(argv[1], "lua") &&
-       strcmp(argv[1], "remote")))
+       strcmp(argv[1], "remote") && strcmp(argv[1], "quiet") &&
+       strcmp(argv[1], "controls") && strcmp(argv[1], "lua-controls")))
     return 2;
-  c_chat = strcmp(argv[1], "lua") != 0;
+  c_chat = strcmp(argv[1], "lua") != 0 && strcmp(argv[1], "lua-controls") != 0;
   if (argc == 8)
     remote_owner = argv[7];
   executable = argv[2];
@@ -427,6 +552,11 @@ int main(int argc, char **argv) {
   setenv("SHELL", shell, 1);
   setenv("SOFTLINE_PROMPT_THEME", "plain", 1);
   setenv("SOFTLINE_CHAT_CHAR_MS", "50", 1);
+  if (!strcmp(argv[1], "quiet") || !strcmp(argv[1], "controls") ||
+      !strcmp(argv[1], "lua-controls")) {
+    failed = connection_controls(!strcmp(argv[1], "quiet"));
+    goto cleanup;
+  }
   if (busy_history(history_path))
     goto cleanup;
   remove_files(history_dir);

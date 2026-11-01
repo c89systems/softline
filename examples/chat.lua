@@ -287,6 +287,10 @@ local function run()
     assert(sl:bind_key(softline.KEY_ESCAPE, function()
       return softline.KEY_ACTION_CANCEL
     end))
+    assert(sl:bind_key(softline.KEY_ALT_BASE + string.byte("q"), function()
+      exit_requested = true
+      return softline.KEY_ACTION_SUSPEND
+    end))
     assert(sl:bind_key(softline.KEY_ALT_BASE + string.byte("s"), function()
       if busy then
         assert(sl:set_status_message("Shell is available only between turns."))
@@ -297,7 +301,7 @@ local function run()
     set_chat_busy(false)
     assert(sl:output_stream_begin())
     stream_open = true
-    print_message({ "softline Lua turn processor. A staged operation streams for about four seconds. Enter sends while available and queues while an operation is running; Alt-Enter queues a steer for the next stage boundary; empty Alt-Enter marks the newest queued turn as steer; Alt-E edits it. Escape or Ctrl-C stops the operation; /quit leaves. !sh or /shell opens your shell between turns; Alt-S opens it while preserving your draft.\n" })
+    print_message({ "softline Lua turn processor. A staged operation streams for about four seconds. Enter sends while available and queues while an operation is running; Alt-Enter queues a steer for the next stage boundary; empty Alt-Enter marks the newest queued turn as steer; Alt-E edits it. Escape or Ctrl-C stops the operation; /quit or Alt-Q leaves. !sh or /shell opens your shell between turns; Alt-S opens it while preserving your draft.\n" })
     print_message({ "Policy demo: /status / /approve / /steer / /resume. Shell commands queue until the turn completes.\n" })
   else
     assert(sl:output_stream_begin())

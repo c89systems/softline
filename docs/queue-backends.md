@@ -84,6 +84,12 @@ outcome. Producer output continues directly to the terminal. Cancelling clears
 the deferred edit intent and releases a hold acknowledged after cancellation;
 it cannot reopen the cancelled editor.
 
+Custom control bindings still run while a hold is pending, so a host can
+suspend or leave the frontend without waiting for an acknowledgement. A
+binding returning PASS runs once: only its native editing action is deferred
+and replayed. Queue submission bindings wait with the draft they submit, and
+bracketed paste remains literal input.
+
 Explicit cancellation requests ABORT. EOF, terminal failure and destruction
 preserve the backend edit hold. A failed abort handoff retains the local edit;
 rejected text proposals remain recoverable. Another controlling attachment can

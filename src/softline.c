@@ -6752,6 +6752,7 @@ static char *sl_readline_impl(sl_t *self, const char *prompt,
     int queue_key_checked = 0;
     int replayed = 0, waiting_edit;
     int deferred_input = 0;
+    int binding_done = 0;
     sl_key_action_t action;
     sl_backend_pump(self);
     sl_edit_end(&impl->edit);
@@ -6770,7 +6771,7 @@ static char *sl_readline_impl(sl_t *self, const char *prompt,
     paste_len = 0;
     waiting_edit = sl_backend_wait_keys(impl);
     if (!waiting_edit &&
-        sl_backend_pop_key(impl, &key, paste_bytes, &paste_len))
+        sl_backend_pop_key(impl, &key, paste_bytes, &paste_len, &binding_done))
       replayed = 1;
     else if (impl->bracketed_paste ||
              (waiting_edit && sl_backend_reading_paste(impl)))
@@ -6779,10 +6780,15 @@ static char *sl_readline_impl(sl_t *self, const char *prompt,
       key = sl_read_key(self);
     if ((waiting_edit || sl_backend_wait_key(impl, key)) &&
         key != SL_KEY_NONE && key != SL_KEY_CTRL_C && key != SL_KEY_CTRL_L &&
-        key != SL_KEY_ESCAPE) {
+        key != SL_KEY_ESCAPE &&
+        (impl->bracketed_paste || sl_backend_reading_paste(impl) ||
+         !sl_find_key_binding(impl, (sl_key_t)key) || key == SL_KEY_ENTER ||
+         key == (int)impl->prompt_queue.keys.enqueue_draft ||
+         key == (int)impl->prompt_queue.keys.submit_or_promote_newest)) {
       if (!paste_len && key >= 128 && key < 256)
         (void)sl_read_utf8_input(self, (char)key, paste_bytes, &paste_len);
-      if (sl_backend_push_key(self, key, paste_bytes, paste_len) != SL_OK) {
+      if (sl_backend_push_key(self, key, paste_bytes, paste_len,
+                              binding_done) != SL_OK) {
         failed = done = 1;
         break;
       }
@@ -6956,7 +6962,8 @@ static char *sl_readline_impl(sl_t *self, const char *prompt,
           break;
         }
       }
-      if (sl_dispatch_key_binding(self, key, &action) != SL_OK) {
+      if (!binding_done &&
+          sl_dispatch_key_binding(self, key, &action) != SL_OK) {
         sl_set_error(self, "key callback failed");
         failed = 1;
         done = 1;
@@ -7011,6 +7018,23 @@ static char *sl_readline_impl(sl_t *self, const char *prompt,
           failed = 1;
           done = 1;
         }
+        break;
+      }
+      /* Owner control bindings remain responsive while an edit hold is
+       * pending. PASS defers only the native action; replay must not invoke
+       * the callback twice. Submission keys retain their draft context above.
+       */
+      if (!replayed && key != SL_KEY_CTRL_C && key != SL_KEY_ESCAPE &&
+          (sl_backend_wait_keys(impl) || sl_backend_wait_key(impl, key))) {
+        if (!paste_len && key >= 128 && key < 256)
+          (void)sl_read_utf8_input(self, (char)key, paste_bytes, &paste_len);
+        if (sl_backend_push_key(self, key, paste_bytes, paste_len, 1) !=
+            SL_OK) {
+          failed = done = 1;
+          break;
+        }
+        deferred_input = 1;
+        ++deferred_since_render;
         break;
       }
       if (key == SL_KEY_CTRL_X && !impl->history_search_active) {

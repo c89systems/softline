@@ -13,6 +13,22 @@ static int idle_after(struct editor *e, size_t offset, const char *completed) {
   return 1;
 }
 
+static int reattached(struct editor *e, size_t offset) {
+  double deadline = now() + 2;
+  if (!remote_owner)
+    return 0;
+  do {
+    /* A resumed empty editor first paints the unsynchronized panel. Its
+     * removal leaves the reasoning row, status line and single input row. */
+    if (strstr(e->bytes + offset, "P 0 pending") && !e->escape_length &&
+        e->bottom == e->rows - 4)
+      return 0;
+    if (pump(e, 10))
+      return 1;
+  } while (now() < deadline);
+  return 1;
+}
+
 static int exercise(const char *build, const char *shell,
                     const char *filename) {
   struct editor e;
@@ -82,6 +98,7 @@ static int exercise(const char *build, const char *shell,
   mark = e.length;
   REQUIRE(send_bytes(&e, "exit\n") == 0);
   REQUIRE(wait_for(&e, "\033[?2004h", mark) == 0);
+  REQUIRE(reattached(&e, mark) == 0);
   mark = e.length;
   printed = e.printed_length;
   REQUIRE(send_bytes(&e, "edit-boundary\r") == 0);
@@ -106,6 +123,7 @@ static int exercise(const char *build, const char *shell,
   mark = e.length;
   REQUIRE(send_bytes(&e, "exit\n") == 0);
   REQUIRE(wait_for(&e, "\033[?2004h", mark) == 0);
+  REQUIRE(reattached(&e, mark) == 0);
   /* The next worker is also gated, so cancellation and backlog retention are
    * observed independently of its duration. */
   REQUIRE(send_bytes(&e, "second\r") == 0);

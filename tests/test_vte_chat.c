@@ -1005,7 +1005,7 @@ static int stalled_case(const char *example) {
   setenv("SOFTLINE_CHAT_RECONNECT_MS", "100", 1);
   setenv("SOFTLINE_CHAT_TEST_STALL_HELLO", "1", 1);
   REQUIRE(start_chat(&c, example, "plain", 24, 1) == 0);
-  deadline = now() + 3;
+  deadline = now() + 4;
   do {
     s = frame(&c);
     if (!strstr(s.text, "P ") && !strstr(s.text, "Reconnecting") &&

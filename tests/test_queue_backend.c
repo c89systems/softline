@@ -688,6 +688,7 @@ struct delayed {
   int slave;
   size_t written;
   char *paste;
+  int control_calls;
 };
 
 static int delayed_result(struct delayed *d, sl_queue_request_id_t id,
@@ -757,7 +758,10 @@ static int delayed_step(sl_t *sl, struct delayed *d) {
     CHECK(b->request.operation == SL_QUEUE_BEGIN_EDIT && !*sl_buffer(sl) &&
           !draft.id);
     d->original = b->request.request_id;
-    if (d->kind == 5) {
+    if (d->kind == 6) {
+      CHECK(write(b->master, "\033q", 2) == 2);
+      d->phase = 8;
+    } else if (d->kind == 5) {
       int pending;
       size_t length = LARGE_PASTE_LEN + 12;
       if (d->written < length) {
@@ -783,6 +787,7 @@ static int delayed_step(sl_t *sl, struct delayed *d) {
         CHECK(sl_cancel(sl) == SL_OK);
       d->phase = 6;
     } else {
+      CHECK(d->control_calls == 1);
       CHECK(delayed_result(d, d->original, 1) == 0);
       d->phase = 3;
     }
@@ -820,6 +825,15 @@ static int cancel_key(sl_t *sl, sl_key_t key, void *context,
   (void)key;
   (void)context;
   *action = SL_KEY_ACTION_CANCEL;
+  return SL_OK;
+}
+static int deferred_control(sl_t *sl, sl_key_t key, void *context,
+                            sl_key_action_t *action) {
+  struct delayed *d = context;
+  (void)sl;
+  ++d->control_calls;
+  *action =
+      key == SL_KEY_ALT_BASE + 'q' ? SL_KEY_ACTION_SUSPEND : SL_KEY_ACTION_PASS;
   return SL_OK;
 }
 static int delayed_edit(int kind) {
@@ -864,12 +878,19 @@ static int delayed_edit(int kind) {
   }
   CHECK(create(&d->bridge, slave, slave, kind >= 3 && kind != 5 ? 1 : 8));
   CHECK(sl_bind_key(d->bridge.sl, SL_KEY_ESCAPE, cancel_key, NULL) == SL_OK);
+  if (kind < 2 || kind == 6)
+    CHECK(sl_bind_key(d->bridge.sl,
+                      kind == 6 ? SL_KEY_ALT_BASE + 'q' : SL_KEY_CTRL_U,
+                      deferred_control, d) == SL_OK);
   CHECK(sl_suspend(d->bridge.sl) == SL_ERROR_INVALID);
   CHECK(snapshot(d->bridge.sl, "q0", NULL, 0) == SL_OK);
   CHECK(sl_set_idle_callback(d->bridge.sl, delayed_idle, d) == SL_OK);
   CHECK(!sl_next_prompt(d->bridge.sl, "> ", &source) && !d->bridge.failed);
   CHECK(source == SL_PROMPT_SOURCE_NONE);
-  if (kind < 2 || kind == 5) {
+  if (kind == 6) {
+    CHECK(d->phase == 8 && d->control_calls == 1 && d->bridge.calls == 2 &&
+          sl_last_readline_status(d->bridge.sl) == SL_READLINE_SUSPENDED);
+  } else if (kind < 2 || kind == 5) {
     CHECK(d->phase == 7 &&
           sl_last_readline_status(d->bridge.sl) == SL_READLINE_SUSPENDED);
     CHECK(!strcmp(sl_buffer(d->bridge.sl), kind == 5   ? d->paste + 6
@@ -877,6 +898,8 @@ static int delayed_edit(int kind) {
                                                        : "x\303\251"));
     CHECK(d->bridge.calls ==
           2); /* suspension never stops or aborts owner work */
+    if (kind < 2)
+      CHECK(d->control_calls == 1);
   } else {
     sl_queue_result_t stopped;
     CHECK(d->phase == 6 &&
@@ -912,6 +935,8 @@ static int delayed_edit(int kind) {
 int main(int argc, char **argv) {
   if (argc == 2 && !strcmp(argv[1], "large-edit"))
     return delayed_edit(5);
+  if (argc == 2 && !strcmp(argv[1], "controls"))
+    return delayed_edit(6);
   return api() || failures() || fifo() || native() || native_edit(0) ||
          native_edit(1) || delayed_edit(0) || delayed_edit(1) ||
          delayed_edit(2) || delayed_edit(3) || delayed_edit(4);
