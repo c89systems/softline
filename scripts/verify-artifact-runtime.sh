@@ -74,7 +74,7 @@ inspect_elf() {
   done < <(sed -n 's/.*Requesting program interpreter: \([^]]*\)\].*/\1/p' <<< "$output")
   if [[ "${file##*/}" == libsoftline.so* ]]; then
     soname=$(sed -n '/(SONAME)/s/.*\[\([^]]*\)\].*/\1/p' <<< "$output")
-    [[ "$soname" == "libsoftline.so.${SOFTLINE_ABI_VERSION:-3}" ]] || fail "$label: missing or incorrect softline SONAME"
+    [[ "$soname" == "libsoftline.so.${SOFTLINE_ABI_VERSION:-4}" ]] || fail "$label: missing or incorrect softline SONAME"
   fi
 }
 scan() {

@@ -17,6 +17,13 @@ sl_history_save
 sl_history_set_max_len
 sl_insert
 sl_last_error
+sl_queue_backend_request
+sl_queue_backend_result
+sl_queue_backend_update
+sl_queue_backend_info
+sl_queue_backend_entry
+sl_queue_backend_pending
+sl_queue_backend_recover
 sl_last_readline_status
 sl_next_prompt
 sl_output_stream_begin

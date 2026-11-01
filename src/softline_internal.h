@@ -51,6 +51,7 @@ typedef struct sl_prompt_queue {
   int max_entries;
   int preview_entries;
   int enabled;
+  int remote;
   sl_prompt_id_t serial;
   sl_prompt_id_t last_id;
   sl_prompt_queue_mode_t last_mode;
@@ -73,6 +74,8 @@ typedef struct sl_prompt_queue {
   sl_prompt_queue_policy_callback_t policy_callback;
   void *policy_userdata;
 } sl_prompt_queue_t;
+
+typedef struct sl_backend sl_backend_t;
 
 typedef struct sl_statusline {
   char *elements[SL_STATUS_MAX_ELEMENTS];
@@ -167,6 +170,7 @@ typedef struct sl_impl {
   int history_busy;
   int history_auto_add;
   sl_prompt_queue_t prompt_queue;
+  sl_backend_t *backend;
   sl_prompt_theme_t prompt_theme;
   char *quoted_prompt_prefix;
   sl_quote_style_t quoted_prompt_style;
@@ -225,5 +229,31 @@ typedef struct sl_impl {
   sl_key_binding_t key_bindings[SL_MAX_KEY_BINDINGS];
   char error[SL_ERROR_LEN];
 } sl_impl_t;
+
+/* Internal editor/cache operations shared with the transport-independent queue
+ * adapter. These are not application queue admission or consumption seams. */
+int sl_queue_cached_edit_begin(sl_t *self, int index);
+void sl_queue_cached_edit_restore(sl_t *self);
+int sl_backend_create(sl_t *self, const sl_config_t *config);
+void sl_backend_destroy(sl_t *self);
+int sl_backend_callback_active(const sl_impl_t *impl);
+void sl_backend_pump(sl_t *self);
+int sl_backend_submit(sl_t *self, sl_prompt_queue_mode_t mode);
+int sl_backend_edit(sl_t *self, int index);
+int sl_backend_action(sl_t *self, sl_prompt_id_t id,
+                      sl_queue_operation_t operation);
+int sl_backend_cancel_edit(sl_t *self);
+int sl_backend_unsupported(sl_t *self);
+int sl_backend_recover_newest(sl_t *self);
+int sl_backend_notice(const sl_impl_t *impl, char *text, size_t size);
+int sl_queue_backend_request_impl(sl_t *, const sl_queue_request_t *,
+                                  sl_queue_request_id_t *);
+int sl_queue_backend_result_impl(sl_t *, const sl_queue_result_t *);
+int sl_queue_backend_update_impl(sl_t *, const sl_queue_change_t *);
+int sl_queue_backend_info_impl(const sl_t *, sl_queue_backend_info_t *);
+int sl_queue_backend_entry_impl(const sl_t *, size_t, sl_queue_entry_t *);
+int sl_queue_backend_pending_impl(const sl_t *, size_t,
+                                  sl_queue_pending_info_t *);
+int sl_queue_backend_recover_impl(sl_t *, sl_queue_request_id_t);
 
 #endif

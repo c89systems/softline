@@ -20,6 +20,7 @@ cp "${ROOT_DIR}/README.md" "${STAGE_ROOT}/"
 cp "${ROOT_DIR}/softline.rockspec.in" "${STAGE_ROOT}/"
 cp "${ROOT_DIR}/lua/README.md" "${STAGE_ROOT}/lua/"
 cp "${ROOT_DIR}/lua/softline_lua.c" "${STAGE_ROOT}/lua/"
+cp "${ROOT_DIR}/lua/softline_queue_backend_lua.h" "${STAGE_ROOT}/lua/"
 cp "${ROOT_DIR}/scripts/build_lua_rock.sh" "${STAGE_ROOT}/scripts/"
 cp "${ROOT_DIR}/scripts/require-host-bash.sh" "${STAGE_ROOT}/scripts/"
 cp "${ROOT_DIR}/scripts/release_version.sh" "${STAGE_ROOT}/scripts/"
@@ -37,6 +38,7 @@ README.md
 softline.rockspec.in
 lua/README.md
 lua/softline_lua.c
+lua/softline_queue_backend_lua.h
 scripts/build_lua_rock.sh
 scripts/require-host-bash.sh
 scripts/release_version.sh

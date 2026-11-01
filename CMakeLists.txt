@@ -30,7 +30,7 @@ set(SL_TARGET_ID "" CACHE STRING "Release target identifier")
 # The shared-library ABI belongs to the source, not to build configuration.
 # Discard cache entries left by older configurations before selecting it.
 unset(SOFTLINE_ABI_VERSION CACHE)
-set(SOFTLINE_ABI_VERSION "3")
+set(SOFTLINE_ABI_VERSION "4")
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
@@ -128,7 +128,8 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND
 endif()
 
 add_library(sl_lib_obj OBJECT src/softline.c src/softline_surface.c
-  src/softline_clipboard.c src/softline_history.c src/softline_edit.c)
+  src/softline_clipboard.c src/softline_history.c src/softline_edit.c
+  src/softline_queue_backend.c)
 set_target_properties(sl_lib_obj PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(sl_lib_obj
   PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
@@ -223,6 +224,10 @@ endif()
 
 include(cmake/softline_local_runtime.cmake)
 include(cmake/softline_test_libmdf.cmake)
+
+if(UNIX AND (SL_BUILD_EXAMPLES OR SL_BUILD_TESTS))
+  include(cmake/softline_queue_demo.cmake)
+endif()
 
 if(SL_BUILD_EXAMPLES)
   add_subdirectory(examples)

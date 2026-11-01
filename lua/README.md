@@ -677,3 +677,98 @@ compaction and should not rewrite an active shared native file.
 The C and Lua chat examples attach `softline.examples.chat` at startup and enable
 auto-add for accepted prompts/commands, including queued and steered drafts.
 All themes use the same key. `SOFTLINE_HISTORY_DIR` overrides their directory.
+
+## Constructor-selected queue backend
+
+Ordinary constructors retain the native local queue. `queue_backend` instead
+selects an application-owned asynchronous queue for the entire handle lifetime;
+`prompt_queue` must be enabled. `queue_backend_context` is any Lua value retained
+until teardown and passed to the copied request/detach callbacks.
+
+```lua
+local outgoing = {}
+local sl = softline.new {
+  prompt_queue = true,
+  queue_backend_context = outgoing,
+  queue_backend = {
+    capabilities = (1 << (softline.QUEUE_RESOLVE + 1)) - 1,
+    max_pending_requests = 16,
+    request = function(request, context)
+      if #context == 16 then return false end
+      context[#context + 1] = request
+      -- Signal the adapter's watched descriptor here; never wait for a reply.
+      return true
+    end,
+    detach = function(context)
+      -- Cancel/unsubscribe observations before releasing the context.
+      -- Accepted backend work remains owned by the backend.
+    end,
+  },
+}
+assert(sl:queue_backend_update {
+  kind = softline.QUEUE_SNAPSHOT, revision = "initial", entries = {},
+  total_count = 0,
+})
+```
+
+The adapter drains its pollable descriptor through `watch_add()` and applies
+results/updates on the editor-owner thread. Request callbacks return `true` only
+for handoff; backend acceptance arrives later. They cannot reenter Softline.
+All copied text is bounded by `line_max_len`, backend IDs/revisions/tokens by
+127 bytes, and snapshots by `prompt_queue_max_entries`. No network or storage
+implementation is imposed by Softline. The C constructor uses equivalent
+callbacks and a borrowed context; rebuild C/Lua consumers for shared ABI 4.
+
+- `sl:queue_backend_request(request)` returns a per-handle request ID, or
+  `nil, status`. Request fields are `operation`, `item_id`, `item_revision`,
+  `queue_revision`, `edit_token`, `text`, `mode`, `enabled` and
+  `target_request_id`. Omitted expected revisions use the current mirror.
+  Capability bits are `1 << operation`.
+- `sl:queue_backend_result(result)` accepts `request_id`, `status`, optional
+  `item_id`, `item_revision`, `edit_token` and `reason`. Successful item operations
+  report item identity/revision. A successful begin-edit also reports its token.
+  Responses retire requests and never recreate accepted mirror entries.
+- `sl:queue_backend_update(change)` applies `kind`, `previous_revision`,
+  `revision`, `entries`, one-based `index`, `item_id`, causing `request_id`,
+  authoritative `total_count`, `stopped` and `auto_approval`. Entry fields are
+  `id`, `revision`, `text`, `mode`, `held`, `edit_held`, holder-only `edit_token`,
+  `ready`, `stopped` and `action`. Updates must follow one ordered subscription.
+  A gap requires an explicit snapshot; inbound calls never invoke the outbound
+  request callback synchronously. The next native dispatch requests resync.
+- `sl:queue_backend_info()` returns backend enablement, synchronization,
+  queue revision, visible/total counts and retained request count.
+- `sl:queue_backend_entry(index)` returns a borrowed native view copied into a
+  Lua table, including opaque backend identity and revision.
+- `sl:queue_backend_pending(index)` returns the retained request fields plus
+  `pending`, last `status` and optional `reason`, oldest first.
+- `sl:queue_backend_recover(request_id)` restores definitely rejected proposal
+  text into an empty ordinary draft. Alt-E also recovers such proposals. Unknown
+  outcomes require resolution using their original ID; they never auto-flush.
+
+Operations are `softline.QUEUE_OFFER`, `softline.QUEUE_BEGIN_EDIT`,
+`softline.QUEUE_END_EDIT`, `softline.QUEUE_ABORT_EDIT`, `softline.QUEUE_APPROVE`,
+`softline.QUEUE_WITHDRAW`, `softline.QUEUE_SET_INTENT`, `softline.QUEUE_STOP`,
+`softline.QUEUE_RESUME`, `softline.QUEUE_CLEAR`, `softline.QUEUE_AUTO_APPROVAL`,
+`softline.QUEUE_SYNCHRONIZE` and `softline.QUEUE_RESOLVE`.
+Response statuses are `softline.QUEUE_ACCEPTED`, `softline.QUEUE_REJECTED` and
+`softline.QUEUE_UNKNOWN`. Changes are `softline.QUEUE_SNAPSHOT`,
+`softline.QUEUE_UPSERT`, `softline.QUEUE_REMOVE`, `softline.QUEUE_STATE` and
+`softline.QUEUE_DISCONNECTED`. Recoverable API errors include
+`softline.ERROR_UNSUPPORTED`, `softline.ERROR_CONFLICT` and
+`softline.ERROR_NOT_READY`.
+
+Enter/queue keys hand off offers and keep the native editor/watch loop active.
+Alt-E opens a queued edit only after its hold is acknowledged. Enter requeues
+under that same identity; empty submission/Alt-N requests withdrawal. Approval
+markers change only with backend observations. Backend entries cannot be taken
+as local model input. Legacy synchronous mutation methods report unsupported in
+backend mode; use typed requests for clear, auto-approval, policy and intent.
+Profile/key selection remains local presentation. Backend input editing requires
+a TTY; noninteractive hosts can use the typed request API directly.
+
+`max_pending_requests` bounds ordinary retained requests; two additional slots
+reserve one synchronization and one resolution request. Callbacks run on the
+calling coroutine, including when the constructor's coroutine has been
+collected. Callback/context references are owned by the receiver and ordinary
+reference cycles remain collectible. Accepted offers enter auto-add history
+once, in the coroutine applying the result, without replacing a newer draft.

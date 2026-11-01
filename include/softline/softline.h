@@ -257,7 +257,13 @@ typedef enum sl_status {
   /** Terminal, file, or descriptor I/O failed. */
   SL_ERROR_IO = -4,
   /** A bounded prompt queue has no room for another entry. */
-  SL_ERROR_FULL = -5
+  SL_ERROR_FULL = -5,
+  /** The selected backend does not support this operation. */
+  SL_ERROR_UNSUPPORTED = -6,
+  /** An expected queue/item revision no longer matches. */
+  SL_ERROR_CONFLICT = -7,
+  /** The backend is disconnected, unsynchronized or awaiting a result. */
+  SL_ERROR_NOT_READY = -8
 } sl_status_t;
 
 /** Classification of the most recent sl_readline() result. */
@@ -375,6 +381,214 @@ typedef struct sl_prompt_queue_keys {
   /** Submit a nonempty draft, or promote the newest queue entry when empty. */
   sl_key_t submit_or_promote_newest;
 } sl_prompt_queue_keys_t;
+
+/** Per-handle outbound request identity. A bridge supplies its durable
+ * namespace when mapping this identity onto a backend transport or journal. */
+typedef unsigned long sl_queue_request_id_t;
+
+/** Operations sent to an application-owned queue. No operation grants the
+ * frontend authority to consume model input. */
+typedef enum sl_queue_operation {
+  /** Accept text with Q/S intent. */
+  SL_QUEUE_OFFER = 0,
+  /** Acquire a revision-checked edit hold. */
+  SL_QUEUE_BEGIN_EDIT = 1,
+  /** Replace text/intent and release the acquired edit hold. */
+  SL_QUEUE_END_EDIT = 2,
+  /** Release an edit hold without replacing accepted text. */
+  SL_QUEUE_ABORT_EDIT = 3,
+  /** Release the item's human approval hold. */
+  SL_QUEUE_APPROVE = 4,
+  /** Withdraw an unclaimed item. */
+  SL_QUEUE_WITHDRAW = 5,
+  /** Change Q/S intent, preserving identity and position. */
+  SL_QUEUE_SET_INTENT = 6,
+  /** Stop automatic backlog delivery. */
+  SL_QUEUE_STOP = 7,
+  /** Explicitly resume the stopped backlog. */
+  SL_QUEUE_RESUME = 8,
+  /** Clear accepted pending items atomically. */
+  SL_QUEUE_CLEAR = 9,
+  /** Change backend auto-approval policy, including already held items. */
+  SL_QUEUE_AUTO_APPROVAL = 10,
+  /** Obtain an ordered bounded snapshot. */
+  SL_QUEUE_SYNCHRONIZE = 11,
+  /** Resolve an earlier request whose outcome is unknown. */
+  SL_QUEUE_RESOLVE = 12
+} sl_queue_operation_t;
+
+/** One borrowed outbound request; pointers remain valid for the callback only.
+ * IDs and revisions are opaque nonempty strings, limited to 127 bytes. Text is
+ * bounded by line_max_len. A successful callback return acknowledges handoff,
+ * not backend admission. Expected revisions are filled from the current mirror
+ * when the corresponding caller field is NULL. */
+typedef struct sl_queue_request {
+  /** Identity assigned by Softline before handoff. */
+  sl_queue_request_id_t request_id;
+  /** Requested backend mutation or inspection. */
+  sl_queue_operation_t operation;
+  /** Target backend item, or NULL for queue-wide operations and offers. */
+  const char *item_id;
+  /** Expected item revision, or NULL when there is no target. */
+  const char *item_revision;
+  /** Expected queue revision, or NULL for initial synchronization. */
+  const char *queue_revision;
+  /** Acquired edit token for END_EDIT/ABORT_EDIT, otherwise NULL. */
+  const char *edit_token;
+  /** Offered/replacement text, otherwise NULL. */
+  const char *text;
+  /** Requested delivery intent; backend classification remains authoritative.
+   */
+  sl_prompt_queue_mode_t mode;
+  /** Offer requires approval, or AUTO_APPROVAL's requested boolean value. */
+  int enabled;
+  /** Earlier per-handle identity for RESOLVE, otherwise zero. */
+  sl_queue_request_id_t target_request_id;
+} sl_queue_request_t;
+
+/** Explicit result of an outbound request. */
+typedef enum sl_queue_result_status {
+  /** Backend durably accepted/applied the operation, or explicitly volatile. */
+  SL_QUEUE_ACCEPTED = 0,
+  /** Backend definitely rejected the operation. */
+  SL_QUEUE_REJECTED = 1,
+  /** Outcome unknown; resolve/retry the original identity, never a new offer.
+   */
+  SL_QUEUE_UNKNOWN = 2
+} sl_queue_result_status_t;
+
+/** Borrowed response. Results retire provisional requests; only ordered updates
+ * change the accepted mirror, so a late result cannot recreate a consumed item.
+ */
+typedef struct sl_queue_result {
+  /** Original request identity. */
+  sl_queue_request_id_t request_id;
+  /** Backend outcome. */
+  sl_queue_result_status_t status;
+  /** Affected backend item, if any. */
+  const char *item_id;
+  /** Accepted item revision, if any. */
+  const char *item_revision;
+  /** Edit token returned by BEGIN_EDIT, otherwise NULL. */
+  const char *edit_token;
+  /** Optional human-readable diagnostic, bounded by line_max_len. */
+  const char *reason;
+} sl_queue_result_t;
+
+/** Borrowed accepted backend entry. The backend owns text, ordering, approval,
+ * edit holds and readiness. Softline copies a bounded presentation mirror. */
+typedef struct sl_queue_entry {
+  /** Stable opaque backend identity. */
+  const char *id;
+  /** Current opaque item revision. */
+  const char *revision;
+  /** Accepted text, limited to line_max_len. */
+  const char *text;
+  /** Accepted Q/S intent. */
+  sl_prompt_queue_mode_t mode;
+  /** Human approval hold. */
+  int held;
+  /** Edit hold; only the holder's attachment receives its token. */
+  int edit_held;
+  /** Holder's opaque edit token, or NULL for another attachment's hold. */
+  const char *edit_token;
+  /** Backend-reported readiness, never a frontend execution grant. */
+  int ready;
+  /** Backend-reported stopped state for this item. */
+  int stopped;
+  /** Nonzero for an opaque host action, zero for model input. */
+  int action;
+} sl_queue_entry_t;
+
+/** Ordered changes in one backend subscription. */
+typedef enum sl_queue_change_kind {
+  /** Replace the bounded view, including the first subscription snapshot. */
+  SL_QUEUE_SNAPSHOT = 0,
+  /** Insert/update one entry at index in the bounded ordered view. */
+  SL_QUEUE_UPSERT = 1,
+  /** Remove one entry by backend identity, including claim/consumption. */
+  SL_QUEUE_REMOVE = 2,
+  /** Update queue-wide state without changing entries. */
+  SL_QUEUE_STATE = 3,
+  /** Lose transport authority; preserve mirror, draft and outstanding outcomes.
+   */
+  SL_QUEUE_DISCONNECTED = 4
+} sl_queue_change_kind_t;
+
+/** Borrowed owner-thread update. Non-snapshot updates must chain their previous
+ * revision to the current mirror. A gap preserves the view and schedules one
+ * explicit resynchronization request at the next native dispatch boundary.
+ * Snapshots belong to the same ordered subscription, not the response stream.
+ */
+typedef struct sl_queue_change {
+  /** Snapshot, delta, state transition or disconnect. */
+  sl_queue_change_kind_t kind;
+  /** Previous queue revision for deltas, otherwise NULL. */
+  const char *previous_revision;
+  /** New queue revision, except for disconnect. */
+  const char *revision;
+  /** Bounded entries for a snapshot, or the single UPSERT entry. */
+  const sl_queue_entry_t *entries;
+  /** Snapshot entry count, one for UPSERT, zero otherwise. */
+  size_t count;
+  /** Ordered UPSERT position; existing entries cannot move. */
+  size_t index;
+  /** Removed backend identity for REMOVE. */
+  const char *item_id;
+  /** Causing request from this attachment, or zero for another origin. */
+  sl_queue_request_id_t request_id;
+  /** Backend's total accepted pending count, possibly larger than the view. */
+  size_t total_count;
+  /** Authoritative backlog stopped state. */
+  int stopped;
+  /** Authoritative auto-approval policy. */
+  int auto_approval;
+} sl_queue_change_t;
+
+/** Constructor-selected backend callbacks. Copy at construction; context stays
+ * borrowed until detach returns during editor destruction. Callbacks run only
+ * on the editor owner thread, never block, reenter Softline or synchronously
+ * apply a result/update. A bridge uses fd watches for deferred inbound work. */
+typedef struct sl_queue_backend {
+  /** Handoff callback; SL_OK means copied/enqueued, not admitted. */
+  int (*request)(void *context, const sl_queue_request_t *request);
+  /** Cancel/unsubscribe frontend observations; never clear/stop the backend. */
+  void (*detach)(void *context);
+  /** Supported operations: bit (1UL << sl_queue_operation_t). */
+  unsigned long capabilities;
+  /** Bound on ordinary retained requests; zero selects 16. Two additional
+   * control slots reserve one SYNCHRONIZE and one RESOLVE, so a full request
+   * table cannot prevent reconciliation after connection loss. */
+  size_t max_pending_requests;
+} sl_queue_backend_t;
+
+/** Borrowed backend-mode state, valid until the next result/update/request. */
+typedef struct sl_queue_backend_info {
+  /** Nonzero when the constructor selected a backend. */
+  int enabled;
+  /** Nonzero after a valid snapshot and until disconnect/gap. */
+  int synchronized;
+  /** Current opaque queue revision, or NULL before the initial snapshot. */
+  const char *revision;
+  /** Accepted entries currently mirrored, excluding provisional requests. */
+  size_t visible_count;
+  /** Authoritative total accepted pending count. */
+  size_t total_count;
+  /** Retained requests, including rejected text and unknown outcomes. */
+  size_t pending_count;
+} sl_queue_backend_info_t;
+
+/** Borrowed retained request, valid until the next backend operation. */
+typedef struct sl_queue_pending_info {
+  /** Original request. Strings are owned by the handle. */
+  sl_queue_request_t request;
+  /** Nonzero while waiting for an explicit response. */
+  int pending;
+  /** Last response status when pending is zero. */
+  sl_queue_result_status_t status;
+  /** Optional backend/transport diagnostic. */
+  const char *reason;
+} sl_queue_pending_info_t;
 
 /**
  * Renderer-owned visual treatment for the complete interactive prompt UI.
@@ -550,6 +764,11 @@ typedef struct sl_config {
    * `/tmp/softline/` + `*` + `/image` produces
    * `/tmp/softline/{xid}/image.png`. */
   const char *image_paste_path_template;
+  /** NULL keeps the native local queue. A backend requires prompt_queue=1 and
+   * selects external authority for this handle's entire lifetime. */
+  const sl_queue_backend_t *queue_backend;
+  /** Borrowed backend callback context, released only after editor teardown. */
+  void *queue_backend_context;
 } sl_config_t;
 
 /**
@@ -927,6 +1146,25 @@ struct sl {
    * search to let Enter select an editable match before submission guards run.
    * Read-only; call on the editor-owner thread. */
   int (*history_search_active)(const sl_t *self);
+  /** Hand off a typed backend request; see sl_queue_backend_request(). */
+  int (*queue_backend_request)(sl_t *self, const sl_queue_request_t *request,
+                               sl_queue_request_id_t *out_request_id);
+  /** Apply an asynchronous response on the owner thread. */
+  int (*queue_backend_result)(sl_t *self, const sl_queue_result_t *result);
+  /** Apply a bounded ordered backend observation on the owner thread. */
+  int (*queue_backend_update)(sl_t *self, const sl_queue_change_t *change);
+  /** Inspect backend mode, synchronization and bounded pending counts. */
+  int (*queue_backend_info)(const sl_t *self, sl_queue_backend_info_t *out);
+  /** Inspect one borrowed accepted backend entry in view order. */
+  int (*queue_backend_entry)(const sl_t *self, size_t index,
+                             sl_queue_entry_t *out);
+  /** Inspect retained requests, oldest first. */
+  int (*queue_backend_pending)(const sl_t *self, size_t index,
+                               sl_queue_pending_info_t *out);
+  /** Recover definitely rejected proposal text into an empty draft, without
+   * backend mutation or automatic retry. Unknown outcomes cannot be recovered.
+   */
+  int (*queue_backend_recover)(sl_t *self, sl_queue_request_id_t request_id);
 };
 
 /**
@@ -1435,6 +1673,40 @@ sl_readline_status_t sl_last_readline_status(const sl_t *self);
 
 /** Return the most recent diagnostic string owned by the handle, or NULL. */
 const char *sl_last_error(const sl_t *self);
+
+/** Hand off one backend operation on the owner thread. Softline assigns the
+ * request identity and copies bounded fields before calling the bridge. SL_OK
+ * means handoff only. Synchronous reentry from the bridge is rejected. */
+int sl_queue_backend_request(sl_t *self, const sl_queue_request_t *request,
+                             sl_queue_request_id_t *out_request_id);
+
+/** Apply one deferred response without delivering/echoing model text. Duplicate
+ * completed responses are harmless. Results never mutate the accepted mirror.
+ */
+int sl_queue_backend_result(sl_t *self, const sl_queue_result_t *result);
+
+/** Copy one ordered snapshot/delta. Validation/allocation failure preserves the
+ * previous view. Revision gaps return SL_ERROR_CONFLICT and require a snapshot.
+ * This method never invokes the outbound callback. */
+int sl_queue_backend_update(sl_t *self, const sl_queue_change_t *change);
+
+/** Inspect a borrowed backend-mode view; local handles report enabled=0. */
+int sl_queue_backend_info(const sl_t *self, sl_queue_backend_info_t *out);
+
+/** Inspect one borrowed accepted backend entry, including its opaque ID and
+ * revision. The view stays valid until the next backend operation. */
+int sl_queue_backend_entry(const sl_t *self, size_t index,
+                           sl_queue_entry_t *out);
+
+/** Inspect retained requests oldest first. Rejected offers retain their text;
+ * unknown outcomes must be resolved through their original request identity. */
+int sl_queue_backend_pending(const sl_t *self, size_t index,
+                             sl_queue_pending_info_t *out);
+
+/** Recover a rejected text proposal into an empty ordinary draft without
+ * resubmitting. The corresponding retained rejection is removed only after the
+ * copy succeeds. */
+int sl_queue_backend_recover(sl_t *self, sl_queue_request_id_t request_id);
 
 #ifdef __cplusplus
 }

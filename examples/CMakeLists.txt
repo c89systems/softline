@@ -3,6 +3,13 @@ target_link_libraries(example_simple PRIVATE softline)
 softline_apply_warnings(example_simple)
 softline_local_runtime(example_simple)
 
+if(UNIX)
+  add_executable(example_chat_remote chat_remote.c)
+  target_link_libraries(example_chat_remote PRIVATE queue_demo_client)
+  softline_apply_warnings(example_chat_remote)
+  softline_local_runtime(example_chat_remote)
+endif()
+
 softline_test_libmdf_supported(_softline_example_libmdf_supported)
 if(_softline_example_libmdf_supported)
   add_executable(example_chat chat.c)

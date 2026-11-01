@@ -647,7 +647,7 @@ Current build surfaces include:
 - CMake presets
 - static and shared library builds
 - shared-library ABI/SOVERSION policy through the source-owned
-  `SOFTLINE_ABI_VERSION`, currently `3`, decoupled from the project release
+  `SOFTLINE_ABI_VERSION`, currently `4`, decoupled from the project release
   version and not a CMake cache option. Queue policy methods and entry-state
   fields change exposed C layouts, advancing exactly once from released
   v0.13.0's ABI 2. Consumers must rebuild.

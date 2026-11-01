@@ -8,6 +8,7 @@ fixture="$work/source"
 mkdir -p "$fixture"
 # An extracted-source context supplies its own manifest, even below a checkout.
 files=(LICENSE README.md softline.rockspec.in lua/README.md lua/softline_lua.c
+  lua/softline_queue_backend_lua.h
   cmake/softline_workspace.cmake scripts/require-workspace.sh
   scripts/package-source.sh scripts/extract-release-source.sh scripts/release_lua_artifacts.sh scripts/stage_lua_rock_sources.sh
   scripts/build_lua_rock.sh scripts/require-host-bash.sh scripts/release_version.sh

@@ -387,7 +387,7 @@ static void sl_prompt_queue_schedule(sl_impl_t *impl);
 
 /* Alt-E reserves its removed slot, so restoring the original cannot allocate.
  * In-progress edits are discarded on cancellation, EOF or read failure. */
-static void sl_prompt_queue_restore_edit(sl_t *self) {
+void sl_queue_cached_edit_restore(sl_t *self) {
   sl_impl_t *impl = sl_impl(self);
   sl_prompt_queue_t *queue = &impl->prompt_queue;
   queue->last_id = 0;
@@ -399,6 +399,14 @@ static void sl_prompt_queue_restore_edit(sl_t *self) {
   queue->editing_index = 0;
   (void)sl_buf_set(self, "");
   sl_prompt_queue_schedule(impl);
+}
+
+static void sl_prompt_queue_restore_edit(sl_t *self) {
+  sl_impl_t *impl = sl_impl(self);
+  /* EOF or terminal failure detaches presentation; it must not release a
+   * backend hold. Deliberate cancellation sends ABORT explicitly below. */
+  if (!impl->backend)
+    sl_queue_cached_edit_restore(self);
 }
 
 static int sl_prompt_queue_replace_raw(sl_impl_t *impl, int index,
@@ -466,6 +474,8 @@ sl_prompt_queue_blocked_before(const sl_prompt_queue_t *queue,
 
 static int sl_prompt_queue_eligible(const sl_prompt_queue_t *queue, int index) {
   const sl_prompt_queue_entry_info_t *info = &queue->items[index].info;
+  if (queue->remote)
+    return 0;
   if (info->held || !info->policy.executable || info->stopped)
     return 0;
   if (info->policy.independent)
@@ -478,7 +488,7 @@ static int sl_prompt_queue_eligible(const sl_prompt_queue_t *queue, int index) {
 
 static int sl_prompt_queue_first_queued(const sl_prompt_queue_t *queue) {
   int i;
-  if (!queue || queue->host_controls_delivery)
+  if (!queue || queue->remote || queue->host_controls_delivery)
     return -1;
   for (i = 0; i < queue->len; i++) {
     const sl_prompt_queue_entry_info_t *info = &queue->items[i].info;
@@ -503,6 +513,15 @@ static sl_prompt_id_t
 sl_prompt_queue_approval_head(const sl_prompt_queue_t *queue) {
   sl_prompt_id_t id = queue->editing.info.held ? queue->editing.info.id : 0;
   int i;
+  if (queue->remote) {
+    for (i = 0; i < queue->len; ++i) {
+      if (id && i >= queue->editing_index)
+        return id;
+      if (queue->items[i].info.held)
+        return queue->items[i].info.id;
+    }
+    return id;
+  }
   for (i = 0; i < queue->len; ++i)
     if (queue->items[i].info.held && (!id || queue->items[i].info.id < id))
       id = queue->items[i].info.id;
@@ -563,7 +582,7 @@ static int sl_prompt_queue_enabled(const sl_impl_t *impl) {
  * Keeping this policy here makes an owner-thread completion callback a single
  * state transition rather than an application-managed dequeue protocol. */
 static void sl_prompt_queue_sync_queued_turns_delivery(sl_impl_t *impl) {
-  if (!impl || !impl->prompt_queue.enabled ||
+  if (!impl || impl->backend || !impl->prompt_queue.enabled ||
       impl->prompt_queue.profile != SL_PROMPT_QUEUE_PROFILE_QUEUED_TURNS)
     return;
   impl->prompt_queue.delivery =
@@ -574,10 +593,18 @@ static void sl_prompt_queue_sync_queued_turns_delivery(sl_impl_t *impl) {
   sl_prompt_queue_schedule(impl);
 }
 
-static void sl_prompt_queue_stop_queued_turns(sl_impl_t *impl) {
+static void sl_prompt_queue_stop_queued_turns(sl_t *self) {
+  sl_impl_t *impl = sl_impl(self);
   int i;
   if (!impl || !impl->prompt_queue.enabled)
     return;
+  if (impl->backend) {
+    sl_queue_request_t request;
+    memset(&request, 0, sizeof(request));
+    request.operation = SL_QUEUE_STOP;
+    (void)sl_queue_backend_request(self, &request, NULL);
+    return;
+  }
   if (impl->prompt_queue.profile != SL_PROMPT_QUEUE_PROFILE_QUEUED_TURNS &&
       !impl->prompt_queue.policy_callback &&
       !impl->prompt_queue.editing.info.policy.enqueue) {
@@ -3081,10 +3108,24 @@ static int sl_render_append_queue_panel(sl_t *self, sl_render_t *render,
   int approval;
   int focused;
   char summary[64];
+  char backend_notice[192];
   impl = sl_impl(self);
   if (!sl_prompt_queue_enabled(impl) || !render)
     return 0;
   queue = &impl->prompt_queue;
+  style = "";
+  if (impl->prompt_theme != SL_PROMPT_THEME_PLAIN) {
+    if (sl_theme_color_style(impl->prompt_theme, SL_THEME_COLOR_QUEUE, 0,
+                             queue_style, sizeof(queue_style)) != 0)
+      return -1;
+    style = queue_style;
+  }
+  if (sl_backend_notice(impl, backend_notice, sizeof(backend_notice))) {
+    if (sl_render_new_row_at(render, 0, 0) != 0 ||
+        sl_queue_row_append_preview(&render->rows[render->count - 1],
+                                    backend_notice, width, style) != 0)
+      return -1;
+  }
   if (queue->len == 0 && !queue->editing.info.id)
     return 0;
   held = 0;
@@ -3096,13 +3137,6 @@ static int sl_render_append_queue_panel(sl_t *self, sl_render_t *render,
       queue->approval_id ? sl_prompt_held_index(impl, queue->approval_id) : -1;
   focused = queue->approval_focused &&
             sl_prompt_approval_index(impl, queue->approval_id) >= 0;
-  style = "";
-  if (impl->prompt_theme != SL_PROMPT_THEME_PLAIN) {
-    if (sl_theme_color_style(impl->prompt_theme, SL_THEME_COLOR_QUEUE, 0,
-                             queue_style, sizeof(queue_style)) != 0)
-      return -1;
-    style = queue_style;
-  }
   if (queue->editing.info.id) {
     const char *editing =
         queue->editing.info.held
@@ -6155,7 +6189,7 @@ static void sl_prompt_queue_bell(sl_impl_t *impl) {
     (void)write(impl->output_fd, "\a", 1);
 }
 
-static int sl_prompt_queue_edit_at(sl_t *self, int index) {
+int sl_queue_cached_edit_begin(sl_t *self, int index) {
   sl_impl_t *impl = sl_impl(self);
   if (sl_prompt_queue_require_fifo(
           self, impl, &impl->prompt_queue.items[index].info) != SL_OK) {
@@ -6174,6 +6208,11 @@ static int sl_prompt_queue_edit_at(sl_t *self, int index) {
   return SL_OK;
 }
 
+static int sl_prompt_queue_edit_at(sl_t *self, int index) {
+  return sl_impl(self)->backend ? sl_backend_edit(self, index)
+                                : sl_queue_cached_edit_begin(self, index);
+}
+
 static int sl_handle_prompt_queue_key(sl_t *self, int key, int *handled,
                                       int *submit, char **promoted) {
   sl_impl_t *impl;
@@ -6189,6 +6228,32 @@ static int sl_handle_prompt_queue_key(sl_t *self, int key, int *handled,
   if (!sl_prompt_queue_enabled(impl))
     return SL_OK;
   keys = &impl->prompt_queue.keys;
+  if (impl->backend) {
+    if (key == SL_KEY_ENTER ||
+        (keys->enqueue_draft != SL_KEY_NONE &&
+         key == (int)keys->enqueue_draft) ||
+        (keys->submit_or_promote_newest != SL_KEY_NONE &&
+         key == (int)keys->submit_or_promote_newest)) {
+      *handled = 1;
+      if (!impl->len && !impl->prompt_queue.editing.info.id &&
+          key == (int)keys->submit_or_promote_newest && impl->prompt_queue.len)
+        rc = sl_backend_action(
+            self, impl->prompt_queue.items[impl->prompt_queue.len - 1].info.id,
+            SL_QUEUE_SET_INTENT);
+      else
+        rc = sl_backend_submit(self, key == (int)keys->submit_or_promote_newest
+                                         ? SL_PROMPT_QUEUE_MODE_STEER
+                                         : SL_PROMPT_QUEUE_MODE_QUEUED);
+      if (rc != SL_OK)
+        sl_prompt_queue_bell(impl);
+    } else if (keys->edit_newest != SL_KEY_NONE &&
+               key == (int)keys->edit_newest) {
+      *handled = 1;
+      if (sl_backend_edit(self, impl->prompt_queue.len - 1) != SL_OK)
+        sl_prompt_queue_bell(impl);
+    }
+    return SL_OK;
+  }
   /* Empty edits still own a queue entry. Route every keyboard submission
    * or requeue through the same deletion gate as sl_submit().
    */
@@ -6504,6 +6569,12 @@ static char *sl_readline_impl(sl_t *self, const char *prompt,
   if (!prompt)
     prompt = SL_DEFAULT_PROMPT;
   if (!isatty(impl->input_fd) || !isatty(impl->output_fd)) {
+    if (impl->backend) {
+      sl_set_error(self, "backend queue editing requires a TTY; use "
+                         "queue_backend_request for plain input");
+      sl_set_readline_status(self, SL_READLINE_ERROR);
+      return NULL;
+    }
     result = sl_readline_plain(self, prompt);
     if (result && source)
       *source = SL_PROMPT_SOURCE_DIRECT;
@@ -6513,7 +6584,9 @@ static char *sl_readline_impl(sl_t *self, const char *prompt,
     sl_set_readline_status(self, SL_READLINE_ERROR);
     return NULL;
   }
-  if (!impl->readline_suspended && sl_buf_set(self, "") != 0) {
+  if (!impl->readline_suspended &&
+      !(impl->backend && impl->prompt_queue.editing.info.id) &&
+      sl_buf_set(self, "") != 0) {
     sl_disable_raw(self);
     sl_set_readline_status(self, SL_READLINE_ERROR);
     return NULL;
@@ -6576,6 +6649,7 @@ static char *sl_readline_impl(sl_t *self, const char *prompt,
     int key;
     int queue_key_checked = 0;
     sl_key_action_t action;
+    sl_backend_pump(self);
     sl_edit_end(&impl->edit);
     if (!queue_dispatch)
       impl->request_queue_dispatch = 0;
@@ -6742,8 +6816,12 @@ static char *sl_readline_impl(sl_t *self, const char *prompt,
                    ? sl_prompt_queue_approve(self, id)
                    : sl_prompt_queue_reject(self, id);
           if (rc != SL_OK) {
-            failed = 1;
-            done = 1;
+            if (impl->backend)
+              sl_prompt_queue_bell(impl);
+            else {
+              failed = 1;
+              done = 1;
+            }
           }
           break;
         }
@@ -7120,6 +7198,15 @@ static char *sl_readline_impl(sl_t *self, const char *prompt,
       }
       break;
     }
+    /* Backend admission stays asynchronous for callback submits as well as
+     * native keys. Accepted remote text is never returned as local delivery. */
+    if (impl->backend && done && !failed && !cancelled && !interrupted &&
+        !suspended && !eof && !promoted && !queued) {
+      if (sl_backend_submit(self, SL_PROMPT_QUEUE_MODE_QUEUED) != SL_OK)
+        sl_prompt_queue_bell(impl);
+      impl->request_submit = 0;
+      done = 0;
+    }
     /* Custom submit actions obey the same admission policy as Enter. */
     if (done && !failed && !cancelled && !interrupted && !suspended && !eof &&
         !promoted && !queued && impl->len && !impl->history_search_active &&
@@ -7198,8 +7285,10 @@ static char *sl_readline_impl(sl_t *self, const char *prompt,
   }
   impl->active_prompt = prompt;
   if (interrupted) {
+    if (impl->backend && impl->prompt_queue.editing.info.id)
+      (void)sl_backend_cancel_edit(self);
     sl_prompt_queue_restore_edit(self);
-    sl_prompt_queue_stop_queued_turns(impl);
+    sl_prompt_queue_stop_queued_turns(self);
     free(promoted);
     free(queued);
     sl_history_search_cleanup(self, &search);
@@ -7241,14 +7330,15 @@ static char *sl_readline_impl(sl_t *self, const char *prompt,
     free(impl->history_edit);
     impl->history_edit = NULL;
     impl->history_index = -1;
-    sl_buf_set(self, "");
+    if (!(impl->backend && impl->prompt_queue.editing.info.id))
+      sl_buf_set(self, "");
     sl_set_readline_status(self, SL_READLINE_ERROR);
     return NULL;
   }
   impl->cursor = impl->len;
   if (eof || cancelled) {
     if (cancelled)
-      sl_prompt_queue_stop_queued_turns(impl);
+      sl_prompt_queue_stop_queued_turns(self);
     if (sl_history_search_cancel(self, &search) != 0)
       failed = 1;
   } else {
@@ -7275,11 +7365,14 @@ static char *sl_readline_impl(sl_t *self, const char *prompt,
     free(impl->history_edit);
     impl->history_edit = NULL;
     impl->history_index = -1;
-    sl_buf_set(self, "");
+    if (!(impl->backend && impl->prompt_queue.editing.info.id))
+      sl_buf_set(self, "");
     sl_set_readline_status(self, SL_READLINE_ERROR);
     return NULL;
   }
   if (eof || cancelled) {
+    if (cancelled && impl->backend && impl->prompt_queue.editing.info.id)
+      (void)sl_backend_cancel_edit(self);
     sl_prompt_queue_restore_edit(self);
     free(promoted);
     free(queued);
@@ -7287,7 +7380,8 @@ static char *sl_readline_impl(sl_t *self, const char *prompt,
     free(impl->history_edit);
     impl->history_edit = NULL;
     impl->history_index = -1;
-    sl_buf_set(self, "");
+    if (!(impl->backend && impl->prompt_queue.editing.info.id))
+      sl_buf_set(self, "");
     sl_set_readline_status(self,
                            cancelled ? SL_READLINE_CANCELLED : SL_READLINE_EOF);
     return NULL;
@@ -7380,6 +7474,11 @@ static void sl_destroy_method(sl_t *self) {
   impl = sl_impl(self);
   if (!self)
     return;
+  if (sl_backend_callback_active(impl)) {
+    sl_set_error(self,
+                 "cannot destroy softline handle from a backend callback");
+    return;
+  }
   if (impl && (impl->watch_callback_depth != 0 || impl->history_busy)) {
     sl_set_error(self,
                  impl->history_busy
@@ -7388,6 +7487,7 @@ static void sl_destroy_method(sl_t *self) {
     return;
   }
   if (impl) {
+    sl_backend_destroy(self);
     if (sl_surface_is_native(impl->output_surface))
       (void)sl_native_session_close(self);
     sl_release_auto_scroll_region(impl);
@@ -7504,6 +7604,8 @@ static int sl_set_prompt_queue_method(sl_t *self, int enabled, int max_entries,
                                       int preview_entries) {
   sl_impl_t *impl;
   impl = sl_impl(self);
+  if (impl && impl->backend)
+    return sl_backend_unsupported(self);
   if (!impl || enabled < 0 || max_entries < 1 || preview_entries < 1) {
     sl_set_error(self, "invalid prompt queue configuration");
     return SL_ERROR_INVALID;
@@ -7588,6 +7690,8 @@ static int sl_prompt_queue_insert_mode(sl_t *self, size_t index,
   if (out_id)
     *out_id = 0;
   impl = sl_impl(self);
+  if (impl && impl->backend)
+    return sl_backend_unsupported(self);
   if (sl_prompt_queue_require_enabled(self, impl) != SL_OK)
     return SL_ERROR_INVALID;
   if (!text || text[0] == '\0' || (held != 0 && held != 1) ||
@@ -7638,6 +7742,8 @@ static int sl_inject_steer_prompt_method(sl_t *self, const char *text,
 static int sl_set_auto_approval_method(sl_t *self, int enabled) {
   sl_impl_t *impl = sl_impl(self);
   int i;
+  if (impl && impl->backend)
+    return sl_backend_unsupported(self);
   if (!impl || (enabled != 0 && enabled != 1)) {
     sl_set_error(self, "auto_approval must be 0 or 1");
     return SL_ERROR_INVALID;
@@ -7673,6 +7779,8 @@ static int sl_prompt_queue_replace_method(sl_t *self, size_t index,
   sl_impl_t *impl;
   int rc;
   impl = sl_impl(self);
+  if (impl && impl->backend)
+    return sl_backend_unsupported(self);
   if (sl_prompt_queue_require_enabled(self, impl) != SL_OK)
     return SL_ERROR_INVALID;
   if (!text || text[0] == '\0' ||
@@ -7695,6 +7803,8 @@ static int sl_prompt_queue_take_method(sl_t *self, size_t index, char **out) {
   if (out)
     *out = NULL;
   impl = sl_impl(self);
+  if (impl && impl->backend)
+    return sl_backend_unsupported(self);
   if (impl)
     impl->prompt_queue.last_id = 0;
   if (sl_prompt_queue_require_enabled(self, impl) != SL_OK)
@@ -7732,6 +7842,8 @@ static int sl_prompt_queue_get_mode_method(const sl_t *self, size_t index,
 static int sl_prompt_queue_set_mode_method(sl_t *self, size_t index,
                                            sl_prompt_queue_mode_t mode) {
   sl_impl_t *impl = sl_impl(self);
+  if (impl && impl->backend)
+    return sl_backend_unsupported(self);
   if (!impl || !sl_prompt_queue_enabled(impl) ||
       !sl_prompt_queue_index_valid(index, impl->prompt_queue.len, 0) ||
       (mode != SL_PROMPT_QUEUE_MODE_QUEUED &&
@@ -7775,6 +7887,8 @@ sl_prompt_queue_draft_info_method(const sl_t *self,
 static int sl_prompt_queue_approve_method(sl_t *self, sl_prompt_id_t id) {
   sl_impl_t *impl = sl_impl(self);
   int i;
+  if (impl && impl->backend)
+    return sl_backend_action(self, id, SL_QUEUE_APPROVE);
   if (sl_prompt_queue_require_enabled(self, impl) != SL_OK || !id)
     return SL_ERROR_INVALID;
   if (impl->prompt_queue.editing.info.id == id) {
@@ -7805,6 +7919,16 @@ static int sl_prompt_queue_approve_method(sl_t *self, sl_prompt_id_t id) {
 static int sl_prompt_queue_reject_method(sl_t *self, sl_prompt_id_t id) {
   sl_impl_t *impl = sl_impl(self);
   int i;
+  if (impl && impl->backend) {
+    int status = sl_backend_action(self, id, SL_QUEUE_WITHDRAW);
+    if (status == SL_OK && impl->prompt_queue.editing.info.id == id) {
+      impl->history_search_active = 0;
+      sl_queue_cached_edit_restore(self);
+      impl->request_submit = 0;
+      sl_history_nav_reset(impl);
+    }
+    return status;
+  }
   if (sl_prompt_queue_require_enabled(self, impl) != SL_OK || !id)
     return SL_ERROR_INVALID;
   if (impl->prompt_queue.editing.info.id == id) {
@@ -7850,6 +7974,8 @@ static sl_prompt_id_t sl_last_prompt_id_method(const sl_t *self) {
 static int sl_prompt_queue_clear_method(sl_t *self) {
   sl_impl_t *impl;
   impl = sl_impl(self);
+  if (impl && impl->backend)
+    return sl_backend_unsupported(self);
   if (!impl) {
     sl_set_error(self, "invalid prompt queue handle");
     return SL_ERROR_INVALID;
@@ -7862,6 +7988,8 @@ static int sl_prompt_queue_enqueue_draft_method(sl_t *self) {
   sl_impl_t *impl;
   int rc, managed_edit;
   impl = sl_impl(self);
+  if (impl && impl->backend)
+    return sl_backend_submit(self, SL_PROMPT_QUEUE_MODE_QUEUED);
   if (sl_prompt_queue_require_enabled(self, impl) != SL_OK)
     return SL_ERROR_INVALID;
   if (impl->active_readline && impl->len == 0 &&
@@ -7912,6 +8040,8 @@ static int sl_prompt_queue_enqueue_draft_method(sl_t *self) {
 static int sl_set_prompt_queue_policy_method(
     sl_t *self, sl_prompt_queue_policy_callback_t callback, void *userdata) {
   sl_impl_t *impl = sl_impl(self);
+  if (impl && impl->backend)
+    return sl_backend_unsupported(self);
   if (sl_prompt_queue_require_enabled(self, impl) != SL_OK)
     return SL_ERROR_INVALID;
   impl->prompt_queue.policy_callback = callback;
@@ -7925,6 +8055,8 @@ static int sl_prompt_queue_set_executable_method(sl_t *self, sl_prompt_id_t id,
   sl_impl_t *impl = sl_impl(self);
   sl_prompt_queue_entry_info_t *info = NULL;
   int i;
+  if (impl && impl->backend)
+    return sl_backend_unsupported(self);
   if (sl_prompt_queue_require_enabled(self, impl) != SL_OK || !id ||
       (executable != 0 && executable != 1))
     return SL_ERROR_INVALID;
@@ -7952,6 +8084,12 @@ static int sl_get_prompt_queue_stopped_method(const sl_t *self, int *out) {
 
 static int sl_prompt_queue_resume_method(sl_t *self) {
   sl_impl_t *impl = sl_impl(self);
+  if (impl && impl->backend) {
+    sl_queue_request_t request;
+    memset(&request, 0, sizeof(request));
+    request.operation = SL_QUEUE_RESUME;
+    return sl_queue_backend_request(self, &request, NULL);
+  }
   if (sl_prompt_queue_require_enabled(self, impl) != SL_OK)
     return SL_ERROR_INVALID;
   sl_prompt_queue_resume_backlog(impl);
@@ -7963,6 +8101,8 @@ sl_set_prompt_queue_delivery_method(sl_t *self,
                                     sl_prompt_queue_delivery_t delivery) {
   sl_impl_t *impl;
   impl = sl_impl(self);
+  if (impl && impl->backend)
+    return sl_backend_unsupported(self);
   if (!impl || (delivery != SL_PROMPT_QUEUE_DELIVERY_AUTO &&
                 delivery != SL_PROMPT_QUEUE_DELIVERY_MANUAL)) {
     sl_set_error(self, "invalid prompt queue delivery mode");
@@ -8002,6 +8142,10 @@ sl_set_prompt_queue_profile_method(sl_t *self,
     return SL_ERROR_INVALID;
   }
   impl->prompt_queue.profile = profile;
+  if (impl->backend) {
+    sl_prompt_queue_profile_keys(profile, &impl->prompt_queue.keys);
+    return SL_OK;
+  }
   impl->prompt_queue.host_controls_delivery = 0;
   if (profile != SL_PROMPT_QUEUE_PROFILE_QUEUED_TURNS) {
     impl->prompt_queue.delivery = SL_PROMPT_QUEUE_DELIVERY_AUTO;
@@ -8439,6 +8583,8 @@ void sl_config_init(sl_config_t *config) {
   config->clear_prompt_on_exit = 0;
   config->disable_image_paste = 0;
   config->image_paste_path_template = NULL;
+  config->queue_backend = NULL;
+  config->queue_backend_context = NULL;
 }
 
 static sl_t *sl_create_with_config_impl(const sl_config_t *config) {
@@ -8450,6 +8596,7 @@ static sl_t *sl_create_with_config_impl(const sl_config_t *config) {
     config = &local;
   }
   if (config->history_max_len < 0 || config->screen_width < 0 ||
+      (!config->queue_backend && config->queue_backend_context) ||
       config->live_scroll_region < 0 || config->clear_prompt_on_exit < 0 ||
       config->disable_image_paste < 0 ||
       !sl_clipboard_valid_path_template(config->image_paste_path_template) ||
@@ -8556,6 +8703,13 @@ static sl_t *sl_create_with_config_impl(const sl_config_t *config) {
   self->prompt_queue_set_executable = sl_prompt_queue_set_executable_method;
   self->get_prompt_queue_stopped = sl_get_prompt_queue_stopped_method;
   self->prompt_queue_resume = sl_prompt_queue_resume_method;
+  self->queue_backend_request = sl_queue_backend_request_impl;
+  self->queue_backend_result = sl_queue_backend_result_impl;
+  self->queue_backend_update = sl_queue_backend_update_impl;
+  self->queue_backend_info = sl_queue_backend_info_impl;
+  self->queue_backend_entry = sl_queue_backend_entry_impl;
+  self->queue_backend_pending = sl_queue_backend_pending_impl;
+  self->queue_backend_recover = sl_queue_backend_recover_impl;
   impl->input_fd = config->input_fd >= 0 ? config->input_fd : STDIN_FILENO;
   impl->output_fd = config->output_fd >= 0 ? config->output_fd : STDOUT_FILENO;
   impl->screen_width = config->screen_width;
@@ -8590,6 +8744,10 @@ static sl_t *sl_create_with_config_impl(const sl_config_t *config) {
     return NULL;
   }
   impl->buf[0] = '\0';
+  if (sl_backend_create(self, config) != SL_OK) {
+    sl_destroy_method(self);
+    return NULL;
+  }
   return self;
 }
 

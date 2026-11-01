@@ -166,6 +166,13 @@ Not currently implemented:
 
 ## Examples
 
+The native local queue remains the default. For a separate-process queue owner,
+start `make run-chat-queue-server` in one terminal and `make run-chat-remote` in
+another. All C chat themes accept `CHAT_QUEUE=local|remote`, for example
+`make run-chat-riced CHAT_QUEUE=remote`. Accepted work and edit holds survive
+frontend detach; the example owner is volatile across its own restart. See
+[queue backends](docs/queue-backends.md) for the C/Lua contract and demos.
+
 `example_simple` is the normal terminal prompt. Output is printed after each
 submitted line and the next prompt proceeds below it like an ordinary REPL.
 
@@ -198,7 +205,7 @@ chat open. `/status` inspects the paused backlog without releasing it;
 `/resume` explicitly resumes it. New direct chat turns retain their usual
 resumption behavior.
 
-Both chat examples accept the exact, argument-free commands `!sh` and `/shell`
+The local C and Lua chat examples accept the exact, argument-free commands `!sh` and `/shell`
 between turns. Enter (or idle Alt-Enter) opens `$SHELL -i`, falling back to
 `/bin/sh -i` when `SHELL` is unset or empty. While an operation is running,
 these commands remain in Softline's visible, editable queue until the whole
@@ -206,7 +213,7 @@ turn ends. Alt-Enter, including empty-editor promotion, does not waive this
 execution hold. Piped input and redirected output cannot open a shell. Other
 text, including `/shell arguments`, remains a simulated chat turn.
 
-Both chat examples install the native submission classifier for slash and
+The local C and Lua chat examples install the native submission classifier for slash and
 shell commands, including idle Enter. Try these policy demonstrations in
 `run-chat-*` or the Lua chat targets:
 
@@ -773,11 +780,10 @@ the caller's normal chat history. These test stores remain available for
 diagnosis until `make clean`.
 
 Every project-owned C target is compiled as C89 with POSIX terminal APIs.
-Shared builds use `SOFTLINE_ABI_VERSION=3` for SONAME/SOVERSION. Queue policy
-methods extend the public receiver layout and entry information includes
-execution eligibility and cancellation state. Rebuild consumers against the new
-header/library pair. ABI 3 advances exactly once from released v0.13.0's ABI 2,
-independently of the project release version.
+Shared builds use `SOFTLINE_ABI_VERSION=4` for SONAME/SOVERSION. Constructor-selected
+queue backends extend the public configuration and receiver layout. Rebuild
+consumers against the new header/library pair. ABI 4 advances exactly once from
+released v0.15.1's ABI 3, independently of the project release version.
 The ABI is fixed by the source, not a CMake option. Reconfiguring an existing
 build discards any obsolete cached ABI value before generating library names
 and installed metadata.
