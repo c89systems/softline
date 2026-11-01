@@ -134,6 +134,10 @@ static int preserve_draft(const char *shell, const char *history_path) {
   }
   REQUIRE(send_bytes(&e, "!\r") == 0);
   REQUIRE(wait_records(&e, history_path, "draft first\\nsecond !tail\n") == 0);
+  /* Remote history records admission. Wait for actual execution before
+   * asserting cancellation of a running operation. */
+  if (remote_owner)
+    REQUIRE(wait_for(&e, "Thinking...", 0) == 0);
   REQUIRE(send_bytes(&e, "\003") == 0);
   REQUIRE(wait_for(&e, c_chat ? "Operation cancelled" : "[operation] cancelled",
                    0) == 0);

@@ -42,7 +42,7 @@ typedef struct owner {
   unsigned long revision, serial, token;
   int stopped, auto_approval, active, injection;
   int gated, input_empty, shell_pending, shell_requested, attach_wait_seam,
-      initialized, demo_enabled, gate_fd, waiting_gate;
+      initialized, demo_enabled, gate_fd, waiting_gate, stall_hello_once;
   unsigned long delay_us, interval_ms;
   unsigned int turn_index;
   const char *answer;
@@ -470,6 +470,11 @@ static void hello(owner_t *o, const char *name, unsigned long delay_us,
                   unsigned long request_high, int approvals,
                   unsigned long interval_ms, unsigned int seed) {
   size_t i;
+  /* Optional fixture: TCP succeeds but the first subscription never replies. */
+  if (o->stall_hello_once) {
+    o->stall_hello_once = 0;
+    return;
+  }
   if (!name || !*name || strlen(name) >= sizeof(o->clients[0].name) ||
       o->client || delay_us > 60000000 || approvals < 0 || approvals > 1 ||
       interval_ms > 60000) {
@@ -733,6 +738,7 @@ int main(int argc, char **argv) {
   o->revision = 1;
   o->delay_us = 20000;
   o->gate_fd = -1;
+  o->stall_hello_once = getenv("SOFTLINE_CHAT_TEST_STALL_HELLO") != NULL;
   o->input_empty = 1;
   if (gate) {
     long fd = strtol(gate, &end, 10);
@@ -767,7 +773,7 @@ int main(int argc, char **argv) {
   (void)setsockopt(listener, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
   memset(&address, 0, sizeof(address));
   address.sin_family = AF_INET;
-  address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  address.sin_addr.s_addr = htonl(0x7f000001UL);
   address.sin_port = htons((unsigned short)port);
   if (bind(listener, (struct sockaddr *)&address, sizeof(address)) ||
       listen(listener, 4) || demo_nonblock(listener)) {

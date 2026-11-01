@@ -499,7 +499,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND TARGET example_chat)
         ENVIRONMENT "${terminal_test_environment};SOFTLINE_CHAT_TEST_OWNER=$<TARGET_FILE:example_queue_owner>"
         LABELS "integration;queue;remote" TIMEOUT 15)
     endforeach()
-    foreach(mode blank line-keys tiny streaming)
+    foreach(mode blank line-keys tiny streaming reconnect offline stalled)
       add_test(NAME softline_chat_remote_${mode} COMMAND "${SOFTLINE_TEST_XVFB_RUN}" -a
         "$<TARGET_FILE:test_vte_chat>" "${mode}" "$<TARGET_FILE:example_chat_remote>")
       set_tests_properties(softline_chat_remote_${mode} PROPERTIES

@@ -175,6 +175,9 @@ frontend detach; the example owner is volatile across its own restart. See
 Local and remote C chat share the same frontend and Markdown renderer. Remote
 Alt-S can hand the terminal to a shell at the next response seam while retaining
 the draft; the backend continues running and missed output is not replayed.
+The remote chat host shows disconnect state in its thinking row and retries
+every two seconds (`CHAT_RECONNECT_MS` changes the interval), preserving the
+draft and reconciling queue state without resubmitting uncertain work.
 
 `example_simple` is the normal terminal prompt. Output is printed after each
 submitted line and the next prompt proceeds below it like an ordinary REPL.

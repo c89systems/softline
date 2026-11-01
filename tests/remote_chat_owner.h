@@ -14,7 +14,7 @@
 static const char *remote_owner;
 static pid_t remote_owner_pid;
 static char remote_owner_port[16];
-static int start_remote_owner(void) {
+static int start_remote_owner_at(const char *requested_port) {
   int ready[2];
   FILE *stream;
   char line[128];
@@ -29,7 +29,7 @@ static int start_remote_owner(void) {
     close(ready[0]);
     dup2(ready[1], 1);
     close(ready[1]);
-    execl(remote_owner, remote_owner, "0", (char *)NULL);
+    execl(remote_owner, remote_owner, requested_port, (char *)NULL);
     _exit(127);
   }
   close(ready[1]);
@@ -46,6 +46,7 @@ static int start_remote_owner(void) {
   snprintf(remote_owner_port, sizeof(remote_owner_port), "%u", port);
   return 0;
 }
+static int start_remote_owner(void) { return start_remote_owner_at("0"); }
 static void stop_remote_owner(void) {
   int status;
   if (remote_owner_pid > 0) {

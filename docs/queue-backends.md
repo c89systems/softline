@@ -117,6 +117,20 @@ flush offline requests. Unavailable outcomes remain unknown; only definitely
 rejected text can be recovered as unaccepted. Deduplication and persistence
 belong to the backend.
 
+Status text remains application-owned for both in-process and remote backends.
+An adapter reports its availability to its host, which uses
+`sl_set_status_message()`, `sl_set_status_busy()` and `sl_set_status_spinner()`
+to present that state. Softline does not infer a connection from an empty queue
+or prescribe what belongs in the thinking row. An in-process host can present
+its worker's state through the same setters (Lua: `set_status_message`,
+`set_status_busy`, `set_status_spinner`).
+
+Reconnect policy also belongs to the host. A descriptor-watch or idle callback
+can initiate a nonblocking adapter connection attempt; the adapter then supplies
+the new snapshot and resolves uncertain requests. For deadlines that must fire
+while typing, register an application-owned timer descriptor with `sl_watch_add()`.
+No background reader, new Softline callback family or transport API is required.
+
 Destroy invokes detach once. Cancel subscriptions and finish accessing the
 handle before returning. Detach never sends STOP, CLEAR or ABORT. Release the
 borrowed context after editor destruction has finished.
@@ -159,6 +173,21 @@ backlog, as in the released local demo.
 Injections use the same random messages and 10–20 second schedule as local chat.
 Set `CHAT_APPROVAL_DEMO=0` on the **frontend** to disable them.
 Alt-R explicitly reconnects and resolves original IDs without reoffering.
+The example adapter's existing event callback also reports `DEMO_DISCONNECTED`,
+`DEMO_CONNECTING`, `DEMO_SYNCHRONIZING`, `DEMO_READY` and intentional `DEMO_PAUSED`
+transitions. These are adapter-local notifications, not wire messages. The chat
+host clears stale thinking/spinner state on loss and displays
+`Disconnected; retrying automatically. Alt-R reconnects.` in the thinking row.
+Its watched timer retries every two seconds, including while typing. Set
+`CHAT_RECONNECT_MS=500` for make targets (direct executable:
+`SOFTLINE_CHAT_RECONNECT_MS=500`); the allowed range is 10–60000 milliseconds.
+Connection/snapshot attempts that remain incomplete for three seconds are
+restarted on the next timer tick. Starting the frontend before the owner is
+supported. Reconnection preserves the draft/cursor/undo, refreshes the accepted
+view, and resolves original request identities; it never automatically reoffers
+offline drafts or requests whose outcome is unknown. Restarting the volatile
+owner leaves lost outcomes unknown rather than executing them again.
+
 Alt-S preserves the draft and requests shell handoff at the next response seam
 (immediately when idle). The frontend closes its subscription before running
 the shell, so the owner continues producing and executing accepted work without
@@ -175,3 +204,8 @@ deduplication, hold handoff, approval FIFO and frontend teardown/reconstruction.
 The released chat policy, shell and approval interactions also run against the
 remote frontend and actual owner. VTE tests assert physical rows, wrapped and
 truncated previews, focus, edit/discard, multiline input, themes and resize.
+The reconnect tests kill/restart the actual owner while retaining a multiline
+draft, check status and cursor/undo through repeated failures and retries while
+typing, and start the frontend before an owner exists.
+Another fixture accepts TCP but withholds the first snapshot, proving the
+host's handshake deadline reconnects without a user key.

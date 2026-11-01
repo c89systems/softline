@@ -17,6 +17,7 @@
 
 #include "chat_demo_data.h"
 #include "queue_demo_client.h"
+#include "queue_demo_timer.h"
 #include "queue_demo_wire.h"
 
 struct chat_state {
@@ -44,6 +45,10 @@ struct chat_state {
   demo_client_t *remote;
   unsigned int approval_seed;
   int remote_shell, shell_requested;
+  int remote_state, reconnect_fd;
+  sl_watch_id_t reconnect_watch;
+  unsigned int reconnect_ms;
+  double connecting_since;
 };
 
 static int start_operation(struct chat_state *state);
@@ -776,6 +781,34 @@ static int remote_event(void *context, int kind, const char *text) {
   struct chat_state *state = context;
   size_t i;
   switch (kind) {
+  case DEMO_DISCONNECTED:
+  case DEMO_CONNECTING:
+    state->remote_state = kind;
+    if (kind == DEMO_CONNECTING)
+      state->connecting_since = monotonic_seconds();
+    else
+      state->shell_requested = 0;
+    /* Keep the previous availability message visible while changing activity
+     * indicators; a connection attempt must not briefly look ready. */
+    if (finish_response_document(state) ||
+        sl_set_status_spinner(state->sl, 0) != SL_OK ||
+        sl_set_status_busy(state->sl, 0) != SL_OK)
+      return SL_ERROR_IO;
+    state->busy = 0;
+    return set_chat_message(
+        state->sl,
+        kind == DEMO_CONNECTING
+            ? "Reconnecting to queue owner..."
+            : "Disconnected; retrying automatically. Alt-R reconnects.");
+  case DEMO_SYNCHRONIZING:
+    state->remote_state = kind;
+    return set_chat_message(state->sl, "Reconnecting; synchronizing queue...");
+  case DEMO_READY:
+    state->remote_state = kind;
+    return set_busy(state, 0) == 0 ? SL_OK : SL_ERROR_IO;
+  case DEMO_PAUSED:
+    state->remote_state = kind;
+    return SL_OK;
   case DEMO_PROMPT:
     return render_user_prompt(state, text) == 0 ? SL_OK : SL_ERROR_IO;
   case DEMO_RESPONSE_BEGIN:
@@ -834,6 +867,47 @@ static int remote_event(void *context, int kind, const char *text) {
   }
 }
 
+/* Reconnect policy belongs to this chat host. The adapter owns the transport
+ * and reports state through remote_event; Softline owns neither policy. A
+ * watched timer continues dispatching while the user is actively typing. */
+static int reconnect_tick(sl_t *sl, const sl_watch_event_t *event,
+                          void *context) {
+  struct chat_state *state = context;
+  (void)sl;
+  if (demo_timer_drain(event->fd))
+    return SL_ERROR_IO;
+  if (state->remote_state == DEMO_DISCONNECTED ||
+      ((state->remote_state == DEMO_CONNECTING ||
+        state->remote_state == DEMO_SYNCHRONIZING) &&
+       monotonic_seconds() - state->connecting_since >= 3))
+    return demo_client_reconnect(state->remote);
+  return SL_OK;
+}
+
+static int setup_reconnect(struct chat_state *state) {
+  const char *value = getenv("SOFTLINE_CHAT_RECONNECT_MS");
+  char *end;
+  unsigned long interval = 2000;
+  if (value) {
+    errno = 0;
+    interval = strtoul(value, &end, 10);
+    if (!*value || *end || errno || interval < 10 || interval > 60000) {
+      fprintf(stderr, "SOFTLINE_CHAT_RECONNECT_MS must be 10..60000\n");
+      return -1;
+    }
+  }
+  state->reconnect_ms = (unsigned int)interval;
+  state->reconnect_fd = demo_timer_create(state->reconnect_ms);
+  if (state->reconnect_fd < 0) {
+    perror("reconnect timer");
+    return -1;
+  }
+  return sl_watch_add(state->sl, state->reconnect_fd, SL_WATCH_READ,
+                      reconnect_tick, state, &state->reconnect_watch) == SL_OK
+             ? 0
+             : -1;
+}
+
 static int reconnect_editor(sl_t *sl, sl_key_t key, void *context,
                             sl_key_action_t *action) {
   struct chat_state *state = context;
@@ -868,6 +942,7 @@ int main(int argc, char **argv) {
   int cancelled_busy;
 
   memset(&state, 0, sizeof(state));
+  state.reconnect_fd = -1;
   state.watch_fd = -1;
   state.worker_pid = -1;
   interactive = isatty(STDIN_FILENO) && isatty(STDOUT_FILENO);
@@ -950,17 +1025,14 @@ int main(int argc, char **argv) {
                           state.approval_demo, state.approval_interval_ms,
                           state.approval_seed);
       if (demo_client_attach(state.remote, state.sl) != SL_OK ||
+          setup_reconnect(&state) != 0 ||
           sl_set_idle_callback(state.sl, approval_demo_idle, &state) != SL_OK ||
           sl_bind_key(state.sl, SL_KEY_ALT_BASE + 'r', reconnect_editor,
                       &state) != SL_OK) {
         exit_code = 1;
         goto cleanup;
       }
-      if (wait_remote_ready(&state)) {
-        fprintf(stderr, "Queue owner connection failed.\n");
-        exit_code = 1;
-        goto cleanup;
-      }
+      (void)wait_remote_ready(&state);
     }
     if (render_note(
             &state,
@@ -1019,7 +1091,8 @@ int main(int argc, char **argv) {
           (void)demo_client_reconnect(state.remote);
           if (wait_remote_ready(&state))
             (void)set_chat_message(
-                state.sl, "Queue owner disconnected; Alt-R reconnects.");
+                state.sl,
+                "Disconnected; retrying automatically. Alt-R reconnects.");
         }
         continue;
       }
@@ -1029,7 +1102,9 @@ int main(int argc, char **argv) {
         if (state.remote) {
           state.shell_requested = 0;
           if (demo_client_cancel(state.remote) != SL_OK) {
-            (void)set_chat_message(state.sl, "Queue owner disconnected.");
+            (void)set_chat_message(
+                state.sl,
+                "Disconnected; retrying automatically. Alt-R reconnects.");
             continue;
           }
           (void)finish_response_document(&state);
@@ -1114,6 +1189,10 @@ int main(int argc, char **argv) {
   }
 
 cleanup:
+  if (state.reconnect_watch)
+    (void)sl_watch_remove(state.sl, state.reconnect_watch);
+  if (state.reconnect_fd >= 0)
+    close(state.reconnect_fd);
   if (state.busy && !state.remote)
     (void)cancel_operation(&state);
   if (state.note_renderer)

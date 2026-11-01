@@ -25,6 +25,7 @@ struct demo_client {
   void *handler_context;
   unsigned int delay_us, interval_ms, seed;
   int approvals, idle_announced, input_empty;
+  int state;
   char name[64];
   sl_queue_entry_t entries[DEMO_ITEM_MAX];
 };
@@ -38,7 +39,13 @@ static int wake(demo_client_t *c) {
              ? SL_OK
              : SL_ERROR_IO;
 }
-static void lost(demo_client_t *c) {
+static int notify(demo_client_t *c, int state) {
+  if (c->state == state)
+    return SL_OK;
+  c->state = state;
+  return c->handler ? c->handler(c->handler_context, state, NULL) : SL_OK;
+}
+static int close_transport(demo_client_t *c) {
   sl_queue_change_t change;
   if (c->editor && c->socket_watch)
     (void)sl_watch_remove(c->editor, c->socket_watch);
@@ -48,8 +55,13 @@ static void lost(demo_client_t *c) {
   if (c->editor) {
     memset(&change, 0, sizeof(change));
     change.kind = SL_QUEUE_DISCONNECTED;
-    (void)sl_queue_backend_update(c->editor, &change);
+    return sl_queue_backend_update(c->editor, &change);
   }
+  return SL_OK;
+}
+static int lost(demo_client_t *c) {
+  int status = close_transport(c);
+  return status == SL_OK ? notify(c, DEMO_DISCONNECTED) : status;
 }
 static void interest(demo_client_t *c) {
   if (c->socket_watch)
@@ -130,6 +142,11 @@ static int receive(demo_client_t *c, demo_packet_t *p) {
       status = SL_OK; /* native pump requests resync */
     if (change.kind == SL_QUEUE_SNAPSHOT && status == SL_OK)
       resolve(c);
+    if (change.kind == SL_QUEUE_SNAPSHOT && status == SL_OK) {
+      sl_queue_backend_info_t info;
+      if (sl_queue_backend_info(c->editor, &info) == SL_OK && info.synchronized)
+        status = notify(c, DEMO_READY);
+    }
   } else if (kind == DEMO_PROMPT || kind == DEMO_OUTPUT ||
              kind == DEMO_OUTPUT_END || kind == DEMO_RESPONSE_BEGIN ||
              kind == DEMO_SEGMENT_END || kind == DEMO_MESSAGE ||
@@ -156,11 +173,12 @@ static int socket_ready(sl_t *sl, const sl_watch_event_t *event,
     demo_packet_t p = {0};
     if (getsockopt(c->link.fd, SOL_SOCKET, SO_ERROR, &error, &length) ||
         error) {
-      lost(c);
-      return SL_OK;
+      return lost(c);
     }
     c->connecting = 0;
     c->connected = 1;
+    if (notify(c, DEMO_SYNCHRONIZING) != SL_OK)
+      return SL_ERROR_IO;
     demo_put_number(&p, DEMO_HELLO);
     demo_put_string(&p, c->name);
     demo_put_number(&p, c->delay_us);
@@ -171,13 +189,11 @@ static int socket_ready(sl_t *sl, const sl_watch_event_t *event,
     c->idle_announced = 0;
     if (demo_link_queue(&c->link, &p)) {
       demo_packet_free(&p);
-      lost(c);
-      return SL_OK;
+      return lost(c);
     }
   }
   if (c->connected && demo_link_flush(&c->link)) {
-    lost(c);
-    return SL_OK;
+    return lost(c);
   }
   for (i = 0; i < 8 && (event->events &
                         (SL_WATCH_READ | SL_WATCH_HANGUP | SL_WATCH_ERROR));
@@ -188,8 +204,7 @@ static int socket_ready(sl_t *sl, const sl_watch_event_t *event,
       break;
     if (status < 0 || receive(c, &p)) {
       demo_packet_free(&p);
-      lost(c);
-      return SL_OK;
+      return lost(c);
     }
     demo_packet_free(&p);
   }
@@ -198,22 +213,26 @@ static int socket_ready(sl_t *sl, const sl_watch_event_t *event,
 }
 static int connect_owner(demo_client_t *c) {
   int fd, status;
-  lost(c);
+  status = close_transport(c);
+  if (status != SL_OK)
+    return status;
+  if (notify(c, DEMO_CONNECTING) != SL_OK)
+    return SL_ERROR_IO;
   fd = socket(AF_INET, SOCK_STREAM, 0);
   if (fd < 0)
-    return SL_ERROR_IO;
+    return lost(c);
   {
     int enabled = 1;
     (void)setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &enabled, sizeof(enabled));
   }
   if (demo_nonblock(fd)) {
     close(fd);
-    return SL_ERROR_IO;
+    return lost(c);
   }
   status = connect(fd, (struct sockaddr *)&c->address, sizeof(c->address));
   if (status && errno != EINPROGRESS) {
     close(fd);
-    return SL_ERROR_IO;
+    return lost(c);
   }
   demo_link_init(&c->link, fd);
   c->connecting = 1;
@@ -221,8 +240,7 @@ static int connect_owner(demo_client_t *c) {
   c->resolved_through = 0;
   if (sl_watch_add(c->editor, fd, SL_WATCH_READ | SL_WATCH_WRITE, socket_ready,
                    c, &c->socket_watch) != SL_OK) {
-    lost(c);
-    return SL_ERROR_IO;
+    return lost(c);
   }
   return SL_OK;
 }
@@ -236,11 +254,14 @@ static int wake_ready(sl_t *sl, const sl_watch_event_t *event, void *context) {
     got = read(c->wake[0], bytes, sizeof(bytes));
   } while (got > 0 || (got < 0 && errno == EINTR));
   if (c->reconnect) {
+    int status;
     c->reconnect = 0;
-    (void)connect_owner(c);
+    status = connect_owner(c);
+    if (status != SL_OK)
+      return status;
   }
   if (c->connected && demo_link_flush(&c->link))
-    lost(c);
+    return lost(c);
   interest(c);
   return SL_OK;
 }
@@ -256,7 +277,7 @@ demo_client_t *demo_client_create(const char *host, unsigned short port) {
   /* Numeric loopback address avoids DNS waits and exposing an unauthenticated
    * demo. */
   if (!host || inet_pton(AF_INET, host, &c->address.sin_addr) != 1 ||
-      ntohl(c->address.sin_addr.s_addr) != INADDR_LOOPBACK || !port ||
+      ntohl(c->address.sin_addr.s_addr) != 0x7f000001UL || !port ||
       pipe(c->wake) || demo_nonblock(c->wake[0]) || demo_nonblock(c->wake[1])) {
     demo_client_destroy(c);
     return NULL;
@@ -319,7 +340,8 @@ int demo_client_idle(demo_client_t *c) {
 }
 void demo_client_pause(demo_client_t *c) {
   c->reconnect = 0;
-  lost(c);
+  (void)close_transport(c);
+  (void)notify(c, DEMO_PAUSED);
 }
 int demo_client_shell_begin(demo_client_t *c) {
   demo_packet_t p = {0};
@@ -364,7 +386,9 @@ int demo_client_service(demo_client_t *c, int timeout_ms) {
       event.events |= SL_WATCH_WRITE;
     if (fd.revents & (POLLHUP | POLLERR))
       event.events |= SL_WATCH_HANGUP;
-    (void)socket_ready(c->editor, &event, c);
+    status = socket_ready(c->editor, &event, c);
+    if (status != SL_OK)
+      return status;
   }
   return c->connected || c->connecting ? SL_OK : SL_ERROR_NOT_READY;
 }

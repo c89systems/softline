@@ -3,7 +3,8 @@
 add_library(queue_demo_wire STATIC "${PROJECT_SOURCE_DIR}/examples/queue_demo_wire.c")
 target_link_libraries(queue_demo_wire PUBLIC softline)
 softline_apply_warnings(queue_demo_wire)
-add_library(queue_demo_client STATIC "${PROJECT_SOURCE_DIR}/examples/queue_demo_client.c")
+add_library(queue_demo_client STATIC "${PROJECT_SOURCE_DIR}/examples/queue_demo_client.c"
+  "${PROJECT_SOURCE_DIR}/examples/queue_demo_timer.c")
 target_link_libraries(queue_demo_client PUBLIC queue_demo_wire)
 softline_apply_warnings(queue_demo_client)
 add_executable(example_queue_owner "${PROJECT_SOURCE_DIR}/examples/queue_owner.c")

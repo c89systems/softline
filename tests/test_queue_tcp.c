@@ -354,10 +354,25 @@ static int owner_cases(peer_t *p, unsigned short port) {
 }
 typedef struct frontend {
   int master, stage, failed;
+  int connecting, ready;
   demo_client_t *client;
   double deadline;
   char revision[128];
 } frontend_t;
+static int frontend_event(void *context, int kind, const char *text) {
+  frontend_t *f = context;
+  (void)text;
+  if (kind == DEMO_CONNECTING && ++f->connecting == 1)
+    return demo_client_reconnect(f->client);
+  if (kind == DEMO_READY && !f->ready++) {
+    if (f->connecting != 2) {
+      fprintf(stderr, "Host callback reconnect was lost (%d attempts)\n",
+              f->connecting);
+      f->failed = 1;
+    }
+  }
+  return SL_OK;
+}
 static void drive(sl_t *sl, void *context) {
   frontend_t *f = context;
   sl_queue_backend_info_t info;
@@ -441,6 +456,7 @@ static int frontend_case(peer_t *p, unsigned short port) {
   CHECK(client);
   memset(&f, 0, sizeof(f));
   f.client = client;
+  demo_client_events(client, frontend_event, &f);
   memset(&size, 0, sizeof(size));
   size.ws_col = 80;
   size.ws_row = 24;

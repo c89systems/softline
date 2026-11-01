@@ -108,6 +108,8 @@ static int start_chat(struct chat *c, const char *example, const char *theme,
   c->child = c->worker = -1;
   if (start_remote_owner())
     return 1;
+  if (remote_owner && getenv("SOFTLINE_CHAT_TEST_OFFLINE"))
+    stop_remote_owner();
   c->screen = create();
   resize(&c->screen, 97, height);
   for (index = 0; index < 100; ++index)
@@ -857,12 +859,186 @@ cleanup:
   return failed || errors;
 }
 
+static int reconnect_case(const char *example) {
+  struct chat c;
+  struct snapshot s;
+  long column, row;
+  double deadline;
+  int cycle, failed = 0;
+  REQUIRE(remote_owner != NULL);
+  setenv("SOFTLINE_CHAT_APPROVAL_DEMO", "0", 1);
+  setenv("SOFTLINE_CHAT_RECONNECT_MS", "100", 1);
+  REQUIRE(start_chat(&c, example, "plain", 24, 20) == 0);
+  send_input(&c, "start\r");
+  REQUIRE(wait_frame(&c, "Thinking...", "> \n", -1, 2) == 0);
+  send_input(&c, "queued-before-restart\r");
+  REQUIRE(wait_frame(&c, "Q 1. queued-before-restart", "> \n", -1, 2) == 0);
+  send_input(&c, "\033[200~draft café\nsecond tail\033[201~\002\002\002\002");
+  REQUIRE(wait_frame(&c, NULL, "  second tail\n", 0, 2) == 0);
+  deadline = now() + 2;
+  do {
+    s = frame(&c);
+    if (s.column == 9)
+      break;
+    pump_once();
+  } while (now() < deadline);
+  REQUIRE(s.column == 9);
+  for (cycle = 0; cycle < 2; ++cycle) {
+    if (!cycle) {
+      /* Kill an owner with one acknowledged entry and one request still
+       * unobserved in its socket. Neither may be reoffered after restart. */
+      REQUIRE(kill(remote_owner_pid, SIGSTOP) == 0);
+      send_input(&c, "\033kuncertain-before-restart\r\033j\002\002\002\002");
+      REQUIRE(wait_frame(&c, "P 1 pending", "  second tail\n", 0, 2) == 0);
+      deadline = now() + 2;
+      do {
+        s = frame(&c);
+        if (s.column == 9)
+          break;
+        pump_once();
+      } while (now() < deadline);
+      REQUIRE(s.column == 9);
+    }
+    s = frame(&c);
+    column = s.column;
+    row = s.row - (long)v.adjustment_value(v.adjustment(c.screen.terminal));
+    if (!cycle) {
+      int status;
+      REQUIRE(kill(remote_owner_pid, SIGKILL) == 0);
+      REQUIRE(waitpid(remote_owner_pid, &status, 0) == remote_owner_pid);
+      remote_owner_pid = 0;
+    } else
+      stop_remote_owner();
+    REQUIRE(wait_frame(&c, "Disconnected;", "  second tail\n", 1, 2) == 0);
+    s = frame(&c);
+    REQUIRE(s.column == column &&
+            s.row - (long)v.adjustment_value(v.adjustment(c.screen.terminal)) ==
+                row);
+    REQUIRE(!strstr(s.text, "Thinking...") && !strstr(s.text, "Reasoning..."));
+    /* Multiple failed attempts leave the editor live and the draft intact. */
+    settle(.35);
+    REQUIRE(start_remote_owner_at(remote_owner_port) == 0);
+    REQUIRE(wait_frame(&c, NULL, "  second tail\n", 1, 2) == 0);
+    {
+      deadline = now() + 2;
+      do {
+        s = frame(&c);
+        if (!strstr(s.text, "Disconnected") &&
+            !strstr(s.text, "Reconnecting") &&
+            !strstr(s.text, "Q 1. queued-before-restart"))
+          break;
+        send_input(&c, "x\177");
+        pump_once();
+      } while (now() < deadline);
+    }
+    REQUIRE(wait_frame(&c, NULL, "  second tail\n", 1, 2) == 0);
+    s = frame(&c);
+    REQUIRE(!strstr(s.text, "Disconnected") && !strstr(s.text, "Reconnecting"));
+    REQUIRE(!strstr(s.text, "Q 1. queued-before-restart"));
+    REQUIRE(strstr(s.text, "1 unknown"));
+    REQUIRE(!strstr(s.text, "> uncertain-before-restart"));
+    REQUIRE(s.column == column &&
+            s.row - (long)v.adjustment_value(v.adjustment(c.screen.terminal)) ==
+                row);
+    send_input(&c, "X");
+    REQUIRE(wait_frame(&c, NULL, "  second Xtail\n", 1, 2) == 0);
+    send_input(&c, "\037");
+    REQUIRE(wait_frame(&c, NULL, "  second tail\n", 1, 2) == 0);
+  }
+  /* A restarted volatile owner has no accepted work to replay. New input
+   * must run normally, with the old draft still available through undo. */
+  send_input(&c, "\033nnew-after-reconnect\r");
+  REQUIRE(wait_frame(&c, "> new-after-reconnect", "> \n", -1, 2) == 0);
+  REQUIRE(wait_frame(&c, "Try another prompt.", "> \n", 1, 5) == 0);
+cleanup:
+  close_chat(&c);
+  unsetenv("SOFTLINE_CHAT_APPROVAL_DEMO");
+  unsetenv("SOFTLINE_CHAT_RECONNECT_MS");
+  return failed || errors;
+}
+
+static int offline_case(const char *example) {
+  struct chat c;
+  struct snapshot s;
+  double deadline;
+  int failed = 0;
+  setenv("SOFTLINE_CHAT_APPROVAL_DEMO", "0", 1);
+  setenv("SOFTLINE_CHAT_RECONNECT_MS", "100", 1);
+  setenv("SOFTLINE_CHAT_TEST_OFFLINE", "1", 1);
+  REQUIRE(start_chat(&c, example, "plain", 24, 1) == 0);
+  REQUIRE(wait_frame(&c, "Disconnected;", "> \n", 1, 2) == 0);
+  send_input(&c, "offline draft\r");
+  REQUIRE(wait_frame(&c, "Disconnected;", "> offline draft\n", 1, 2) == 0);
+  settle(.25);
+  REQUIRE(start_remote_owner_at(remote_owner_port) == 0);
+  deadline = now() + 2;
+  do {
+    s = frame(&c);
+    if (!strstr(s.text, "Disconnected") && !strstr(s.text, "Reconnecting") &&
+        !strstr(s.text, "P "))
+      break;
+    pump_once();
+  } while (now() < deadline);
+  REQUIRE(!strstr(s.text, "Disconnected") && !strstr(s.text, "Reconnecting"));
+  REQUIRE(!strcmp(last_row(s.text), "> offline draft\n"));
+  send_input(&c, "\r");
+  REQUIRE(wait_frame(&c, "Try another prompt.", "> \n", 1, 3) == 0);
+  s = transcript(&c.screen);
+  {
+    const char *at = strstr(s.text, "> offline draft\n");
+    REQUIRE(at && !strstr(at + 1, "> offline draft\n"));
+  }
+cleanup:
+  close_chat(&c);
+  unsetenv("SOFTLINE_CHAT_APPROVAL_DEMO");
+  unsetenv("SOFTLINE_CHAT_RECONNECT_MS");
+  unsetenv("SOFTLINE_CHAT_TEST_OFFLINE");
+  return failed || errors;
+}
+
+static int stalled_case(const char *example) {
+  struct chat c;
+  struct snapshot s;
+  double deadline;
+  int failed = 0;
+  setenv("SOFTLINE_CHAT_APPROVAL_DEMO", "0", 1);
+  setenv("SOFTLINE_CHAT_RECONNECT_MS", "100", 1);
+  setenv("SOFTLINE_CHAT_TEST_STALL_HELLO", "1", 1);
+  REQUIRE(start_chat(&c, example, "plain", 24, 1) == 0);
+  deadline = now() + 3;
+  do {
+    s = frame(&c);
+    if (!strstr(s.text, "P ") && !strstr(s.text, "Reconnecting") &&
+        !strstr(s.text, "Disconnected"))
+      break;
+    pump_once();
+  } while (now() < deadline);
+  REQUIRE(!strstr(s.text, "P ") && !strstr(s.text, "Reconnecting") &&
+          !strstr(s.text, "Disconnected"));
+  /* The fixture never answers the first HELLO: successful submission proves
+   * a timed retry occurred, without a key requesting reconnection. */
+  send_input(&c, "after-stalled-handshake\r");
+  REQUIRE(wait_frame(&c, "Try another prompt.", "> \n", 1, 3) == 0);
+cleanup:
+  close_chat(&c);
+  unsetenv("SOFTLINE_CHAT_APPROVAL_DEMO");
+  unsetenv("SOFTLINE_CHAT_RECONNECT_MS");
+  unsetenv("SOFTLINE_CHAT_TEST_STALL_HELLO");
+  return failed || errors;
+}
+
 int main(int argc, char **argv) {
   const char *themes[] = {"plain", "default", "gruvbox"};
   int theme, height, busy;
   remote_owner = getenv("SOFTLINE_CHAT_TEST_OWNER");
   if (argc < 3 || load())
     return 2;
+  if (!strcmp(argv[1], "reconnect"))
+    return reconnect_case(argv[2]);
+  if (!strcmp(argv[1], "offline"))
+    return offline_case(argv[2]);
+  if (!strcmp(argv[1], "stalled"))
+    return stalled_case(argv[2]);
   if (!strcmp(argv[1], "line-keys")) {
     for (theme = 0; theme < 2; ++theme)
       for (busy = 0; busy < 2; ++busy)

@@ -2,6 +2,15 @@
 #define SOFTLINE_QUEUE_DEMO_CLIENT_H
 #include "softline/softline.h"
 typedef struct demo_client demo_client_t;
+/* Adapter-local notifications on the same owner-thread event callback as
+ * content. These are not wire messages or Softline status-line policy. */
+enum demo_connection_event {
+  DEMO_DISCONNECTED = 100,
+  DEMO_CONNECTING,
+  DEMO_SYNCHRONIZING,
+  DEMO_READY,
+  DEMO_PAUSED
+};
 typedef int (*demo_event_fn)(void *context, int kind, const char *text);
 void demo_client_events(demo_client_t *client, demo_event_fn handler,
                         void *context);
