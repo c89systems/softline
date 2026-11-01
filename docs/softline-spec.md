@@ -448,6 +448,10 @@ readline returns. This method is part of the unreleased ABI 4 layout.
 The generic action and status extend existing
 enums without changing the public receiver/configuration layouts or ABI.
 
+The planned shared local/remote PTY adapter and locally handled escape from a
+hung session are specified in [the terminal handoff design](terminal-handoff-design.md).
+That extension is not implemented by the current local shell path.
+
 Host buffer replacements and insertions during suspension are journaled like
 active edits, including while the output session is closed. No-op or rejected
 mutations do not add undo entries. Undo validates a complete command group
