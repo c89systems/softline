@@ -39,6 +39,7 @@ typedef struct peer {
   sl_queue_result_status_t watched_status;
   sl_queue_result_status_t status;
   int active, shells;
+  int barrier_steered;
   size_t source_bytes;
   char last_source[3];
   char source_tail[64];
@@ -154,6 +155,8 @@ static int receive(peer_t *p) {
       p->active = 0;
     if (kind == DEMO_SHELL)
       ++p->shells;
+    if (kind == DEMO_PROMPT && text && !strcmp(text, "/steer barrier"))
+      ++p->barrier_steered;
     if (kind == DEMO_OUTPUT && text) {
       size_t i;
       for (i = 0; text[i]; ++i) {
@@ -572,6 +575,74 @@ static int framing(void) {
   return 0;
 }
 
+static int closed_peer(void) {
+  pid_t child = fork();
+  int status;
+  CHECK(child >= 0);
+  if (!child) {
+    int pair[2];
+    struct sigaction disposition;
+    demo_link_t link;
+    demo_packet_t packet = {0};
+    (void)signal(SIGPIPE, SIG_DFL);
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, pair))
+      _exit(2);
+    demo_link_init(&link, pair[0]);
+    demo_put_string(&packet, "pending frame");
+    if (demo_link_queue(&link, &packet))
+      _exit(3);
+    close(pair[1]);
+    status = demo_link_flush(&link);
+    if (sigaction(SIGPIPE, NULL, &disposition) ||
+        disposition.sa_handler != SIG_DFL)
+      _exit(5);
+    demo_link_close(&link);
+    _exit(status == -1 ? 0 : 4);
+  }
+  CHECK(waitpid(child, &status, 0) == child && WIFEXITED(status) &&
+        WEXITSTATUS(status) == 0);
+  return 0;
+}
+
+static int command_barrier(peer_t *p, unsigned short port, pid_t owner) {
+  sl_queue_request_t request;
+  demo_packet_t packet = {0};
+  p->serial = 0;
+  p->delay_us = 2000;
+  CHECK(!attach(p, port, "barrier-controller"));
+  while (p->active)
+    CHECK(!receive(p));
+  CHECK(!kill(owner, SIGUSR1));
+  memset(&request, 0, sizeof(request));
+  request.operation = SL_QUEUE_CLEAR;
+  CHECK(!call(p, &request));
+  request.operation = SL_QUEUE_OFFER;
+  request.text = "barrier response";
+  CHECK(!call(p, &request) && p->status == SL_QUEUE_ACCEPTED);
+  demo_put_number(&packet, DEMO_IDLE);
+  demo_put_number(&packet, 1);
+  CHECK(!demo_link_queue(&p->link, &packet) && !flush(p));
+  while (!p->active)
+    CHECK(!receive(p));
+  request.text = "/shell";
+  CHECK(!call(p, &request) && p->status == SL_QUEUE_ACCEPTED);
+  request.text = "/steer barrier";
+  request.mode = SL_PROMPT_QUEUE_MODE_STEER;
+  CHECK(!call(p, &request) && p->status == SL_QUEUE_ACCEPTED);
+  p->shells = p->barrier_steered = 0;
+  demo_put_number(&packet, DEMO_IDLE);
+  demo_put_number(&packet, 1);
+  CHECK(!demo_link_queue(&p->link, &packet) && !flush(p));
+  CHECK(!kill(owner, SIGUSR2));
+  while (!p->shells) {
+    CHECK(!receive(p));
+    CHECK(!p->barrier_steered);
+  }
+  CHECK(!p->active);
+  demo_link_close(&p->link);
+  return 0;
+}
+
 typedef struct live {
   int master, slave, stage, failed;
   double deadline;
@@ -755,7 +826,9 @@ int main(int argc, char **argv) {
   char line[128];
   pid_t child;
   peer_t *p;
-  CHECK(argc == 2 && !framing());
+  if (argc == 2 && !strcmp(argv[1], "closed-peer"))
+    return closed_peer();
+  CHECK(argc == 2 && !framing() && !closed_peer());
   child = fork();
   CHECK(child >= 0);
   if (!child) {
@@ -772,6 +845,7 @@ int main(int argc, char **argv) {
     close(startup[0]);
     close(startup[1]);
     setenv("SOFTLINE_CHAT_APPROVAL_DEMO", "0", 1);
+    setenv("SOFTLINE_CHAT_TEST_SIGNALS", "1", 1);
     execl(argv[1], argv[1], "0", (char *)NULL);
     _exit(127);
   }
@@ -794,6 +868,8 @@ int main(int argc, char **argv) {
     result = shell_case(p, (unsigned short)port);
   if (!result)
     result = completion_shell_case(p, (unsigned short)port);
+  if (!result)
+    result = command_barrier(p, (unsigned short)port, child);
   demo_link_close(&p->link);
   free(p);
   kill(child, SIGTERM);

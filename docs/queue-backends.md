@@ -69,6 +69,11 @@ entry. Configured queue keys retain precedence. After successful handoff the
 draft clears, while a provisional record preserves its text until an outcome.
 Late results never overwrite a newer draft. Rejected text can be recovered into
 an empty editor with Alt-E or `sl_queue_backend_recover()`, without resubmitting.
+If a deferred edit/promotion is accepted but its item has not appeared, native
+dispatch requests one fresh snapshot after acceptance. Absence in that view
+retires the intent and releases deferred input; consumed work is never recreated.
+A refused or rejected synchronization also releases that intent without retrying
+the offer. Ordinary deltas do not cancel an outstanding snapshot request.
 
 Alt-E requests an exact ID/revision hold; only an acknowledged owned hold opens
 the edit. A claim that wins leaves the editor untouched. Nonempty submission

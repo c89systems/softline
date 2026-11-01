@@ -463,6 +463,16 @@ static int connection_controls(int quiet) {
           goto cleanup;
         settle(probe, .06);
       }
+      if (states[state] == 2 || states[state] == 3) {
+        mark = probe->length;
+        if (send_bytes(probe, "preserved draft\033s"))
+          goto cleanup;
+        settle(probe, .08);
+        if (waitpid(probe->child, NULL, WNOHANG) != 0 ||
+            !contains(probe, "preserved draft", mark) ||
+            send_bytes(probe, "\033n"))
+          goto cleanup;
+      }
       if (states[state] == 5) {
         if (send_bytes(probe, "queued prompt\r") ||
             wait_for(probe, "Q 1. queued prompt", 0) ||

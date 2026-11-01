@@ -157,6 +157,10 @@ static int shell_editor_key(sl_t *sl, sl_key_t key, void *userdata,
     result = demo_client_shell_begin(state->remote);
     if (result == SL_OK)
       state->shell_requested = 1;
+    else if (result == SL_ERROR_NOT_READY)
+      return set_chat_message(
+          sl,
+          "Shell is unavailable while disconnected; retrying automatically.");
     return result;
   }
   *action = state->busy ? SL_KEY_ACTION_HANDLED : SL_KEY_ACTION_SUSPEND;

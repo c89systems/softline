@@ -242,13 +242,24 @@ int demo_link_queue(demo_link_t *link, demo_packet_t *packet) {
 }
 int demo_link_flush(demo_link_t *link) {
   size_t budget = 64u * 1024u;
+#if defined(MSG_NOSIGNAL)
+  int flags = MSG_NOSIGNAL;
+#elif defined(SO_NOSIGPIPE)
+  int flags = 0;
+  int enabled = 1;
+  if (link->count &&
+      setsockopt(link->fd, SOL_SOCKET, SO_NOSIGPIPE, &enabled, sizeof(enabled)))
+    return -1;
+#else
+#error "Queue demo sockets require per-socket SIGPIPE suppression"
+#endif
   while (link->count && budget) {
     demo_packet_t *p = link->output;
     size_t amount = p->length - p->offset;
     ssize_t wrote;
     if (amount > budget)
       amount = budget;
-    wrote = send(link->fd, p->data + p->offset, amount, 0);
+    wrote = send(link->fd, p->data + p->offset, amount, flags);
     if (wrote < 0 && errno == EINTR)
       continue;
     if (wrote < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))

@@ -9,7 +9,7 @@ typedef struct {
 
 typedef struct {
   sl_queue_request_t value;
-  int pending, seen, want_edit, want_steer, abandoned;
+  int pending, seen, want_edit, want_steer, abandoned, sync_requested;
   sl_queue_result_status_t status;
   char *reason, *result_id, *result_revision, *result_token;
 } backend_pending_t;
@@ -482,15 +482,18 @@ static int mirror_commit(sl_t *self, backend_entry_t *entries, size_t count,
   free(backend->revision);
   backend->revision = revision;
   backend->synchronized = 1;
-  backend->needs_sync = 0;
-  backend->sync_pending = 0;
+  if (change->kind == SL_QUEUE_SNAPSHOT) {
+    backend->needs_sync = 0;
+    backend->sync_pending = 0;
+  }
   for (index = 0; index < backend->pending_count; ++index)
     if (backend->pending[index].value.request_id == change->request_id)
       backend->pending[index].seen = 1;
     else if (change->kind == SL_QUEUE_SNAPSHOT &&
              !backend->pending[index].pending &&
              backend->pending[index].status == SL_QUEUE_ACCEPTED &&
-             backend->pending[index].value.operation == SL_QUEUE_BEGIN_EDIT)
+             (backend->pending[index].value.operation == SL_QUEUE_BEGIN_EDIT ||
+              backend->pending[index].sync_requested))
       backend->pending[index].seen = 1;
   return SL_OK;
 invalid:
@@ -522,6 +525,7 @@ int sl_queue_backend_update_impl(sl_t *self, const sl_queue_change_t *change) {
     backend->needs_sync = 0;
     backend->sync_pending = 0;
     for (index = 0; index < backend->pending_count; ++index) {
+      backend->pending[index].sync_requested = 0;
       if (backend->pending[index].value.operation == SL_QUEUE_SYNCHRONIZE ||
           backend->pending[index].value.operation == SL_QUEUE_RESOLVE) {
         request_remove(backend, index--);
@@ -544,7 +548,8 @@ int sl_queue_backend_update_impl(sl_t *self, const sl_queue_change_t *change) {
       (change->kind == SL_QUEUE_REMOVE && !token(change->item_id, 0)))
     return error(self, SL_ERROR_INVALID, "invalid backend queue state");
   if (backend->revision && !strcmp(change->revision, backend->revision) &&
-      (change->kind != SL_QUEUE_SNAPSHOT || backend->synchronized))
+      (change->kind != SL_QUEUE_SNAPSHOT ||
+       (backend->synchronized && !backend->sync_pending)))
     return SL_OK;
   if (change->kind == SL_QUEUE_SNAPSHOT && backend->revision &&
       backend->synchronized && !backend->sync_pending)
@@ -943,11 +948,22 @@ void sl_backend_pump(sl_t *self) {
   if (!backend || backend->callback_active)
     return;
   if (backend->needs_sync && !backend->sync_pending) {
-    memset(&request, 0, sizeof(request));
-    request.operation = SL_QUEUE_SYNCHRONIZE;
-    if (sl_queue_backend_request_impl(self, &request, NULL) != SL_OK)
-      backend->needs_sync = 0;
+    int outstanding = 0;
+    for (index = 0; index < backend->pending_count; ++index)
+      if (backend->pending[index].value.operation == SL_QUEUE_SYNCHRONIZE)
+        outstanding = 1;
+    /* The previous snapshot can arrive before its request's acknowledgement.
+     * Wait for that reserved control slot rather than treating it as failure.
+     */
+    if (!outstanding) {
+      memset(&request, 0, sizeof(request));
+      request.operation = SL_QUEUE_SYNCHRONIZE;
+      if (sl_queue_backend_request_impl(self, &request, NULL) != SL_OK)
+        backend->needs_sync = 0;
+    }
   }
+  if (!backend->synchronized)
+    return;
   for (index = 0; index < backend->pending_count; ++index) {
     backend_pending_t *pending = backend->pending + index;
     backend_entry_t *entry;
@@ -959,8 +975,24 @@ void sl_backend_pump(sl_t *self) {
       sl_prompt_id_t local_id;
       int edit = pending->want_edit, steer;
       entry = find(backend, pending->result_id);
-      if (!entry && !pending->seen)
+      if (!entry && !pending->seen) {
+        /* Results and the ordered view are separate. Obtain a snapshot
+         * after acceptance before treating an unseen item as consumed or
+         * outside the window; an ACK can precede its original UPSERT. */
+        if (pending->sync_requested && !backend->sync_pending &&
+            !backend->needs_sync) {
+          (void)error(
+              self, SL_ERROR_NOT_READY,
+              "accepted item is unavailable; queue synchronization failed");
+          request_remove(backend, index--);
+          continue;
+        }
+        if (!backend->sync_pending && !pending->sync_requested) {
+          pending->sync_requested = 1;
+          backend->needs_sync = 1;
+        }
         continue;
+      }
       local_id = entry ? entry->local_id : 0;
       steer = pending->want_steer && entry &&
               entry->value.mode != SL_PROMPT_QUEUE_MODE_STEER;

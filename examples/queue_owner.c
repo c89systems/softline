@@ -631,13 +631,32 @@ static int ready(owner_t *o, item_t *item, int at_seam) {
   return at_seam && item->value.mode == SL_PROMPT_QUEUE_MODE_STEER &&
          !is_shell_command(item->value.text);
 }
+static int eligible(owner_t *o, size_t index, int at_seam) {
+  const sl_queue_entry_t *after = &o->items[index].value;
+  size_t i;
+  if (!ready(o, o->items + index, at_seam))
+    return 0;
+  if (is_local_command(after->text))
+    return 1;
+  for (i = 0; i < index; ++i) {
+    const sl_queue_entry_t *before = &o->items[i].value;
+    if (is_local_command(before->text) || before->stopped)
+      continue;
+    if (!before->action &&
+        (before->held || (after->mode == SL_PROMPT_QUEUE_MODE_STEER &&
+                          before->mode == SL_PROMPT_QUEUE_MODE_QUEUED)))
+      continue;
+    return 0;
+  }
+  return 1;
+}
 static void claim_ready(owner_t *o, int at_seam, double now) {
   size_t i, selected, budget = DEMO_ITEM_MAX;
   int segment_ended = 0;
   while (budget--) {
     selected = o->count;
     for (i = 0; i < o->count; ++i)
-      if (ready(o, o->items + i, at_seam)) {
+      if (eligible(o, i, at_seam)) {
         if (selected == o->count || (!o->active && o->items[i].direct_start))
           selected = i;
         if (o->active || o->items[i].direct_start)

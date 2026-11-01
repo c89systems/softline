@@ -25,6 +25,7 @@ struct bridge {
   sl_t *sl;
   int calls, detached, reentry, failed, stage, master, signal[2], version;
   int host_discard;
+  int reject_sync;
   sl_prompt_id_t local_id;
   sl_queue_request_t request;
   char text[256], id[128], revision[128], token[128];
@@ -35,6 +36,8 @@ static int request(void *context, const sl_queue_request_t *value) {
   sl_queue_change_t change;
   ++bridge->calls;
   bridge->request = *value;
+  if (bridge->reject_sync && value->operation == SL_QUEUE_SYNCHRONIZE)
+    return SL_ERROR_NOT_READY;
   snprintf(bridge->text, sizeof(bridge->text), "%s",
            value->text ? value->text : "");
   snprintf(bridge->id, sizeof(bridge->id), "%s",
@@ -747,14 +750,60 @@ static int delayed_step(sl_t *sl, struct delayed *d) {
           !draft.id);
     d->original = b->request.request_id;
     d->ticks = 0;
-    if (d->kind == 2) {
+    if (d->kind >= 7) {
+      sl_queue_change_t change;
+      sl_queue_result_t result;
+      memset(&change, 0, sizeof(change));
+      change.kind = SL_QUEUE_DISCONNECTED;
+      CHECK(sl_queue_backend_update(sl, &change) == SL_OK);
+      memset(&result, 0, sizeof(result));
+      result.request_id = d->original;
+      result.item_id = "already-consumed";
+      result.item_revision = "accepted-version";
+      d->bridge.reject_sync = d->kind == 10;
+      if (d->kind == 8)
+        CHECK(sl_queue_backend_result(sl, &result) == SL_OK);
+      CHECK(snapshot(sl, "reconnected", NULL, 0) == SL_OK);
+      if (d->kind != 8)
+        CHECK(sl_queue_backend_result(sl, &result) == SL_OK);
+      d->phase = d->kind == 10 ? 3 : 2;
+    } else if (d->kind == 2) {
       CHECK(sl_cancel(sl) == SL_OK);
       d->phase = 6;
     } else {
       CHECK(delayed_result(d, d->original, 0) == 0);
       d->phase = 2;
     }
+  } else if (d->phase == 2 && b->calls == 1 && d->kind == 7 && !d->version) {
+    sl_queue_change_t change;
+    memset(&change, 0, sizeof(change));
+    change.kind = SL_QUEUE_STATE;
+    change.previous_revision = "reconnected";
+    change.revision = "before-sync-request";
+    CHECK(sl_queue_backend_update(sl, &change) == SL_OK);
+    d->version = 1;
   } else if (d->phase == 2 && b->calls == 2 && ++d->ticks >= 4) {
+    if (d->kind == 7 || d->kind == 8 || d->kind == 9) {
+      sl_queue_change_t change;
+      CHECK(b->request.operation == SL_QUEUE_SYNCHRONIZE);
+      if (d->kind == 9) {
+        sl_queue_result_t result;
+        memset(&result, 0, sizeof(result));
+        result.request_id = b->request.request_id;
+        result.status = SL_QUEUE_REJECTED;
+        CHECK(sl_queue_backend_result(sl, &result) == SL_OK);
+        d->phase = 3;
+        return 0;
+      }
+      memset(&change, 0, sizeof(change));
+      change.kind = SL_QUEUE_STATE;
+      change.previous_revision =
+          d->version ? "before-sync-request" : "reconnected";
+      change.revision = "while-synchronizing";
+      CHECK(sl_queue_backend_update(sl, &change) == SL_OK);
+      d->phase = 9;
+      return 0;
+    }
     CHECK(b->request.operation == SL_QUEUE_BEGIN_EDIT && !*sl_buffer(sl) &&
           !draft.id);
     d->original = b->request.request_id;
@@ -791,8 +840,27 @@ static int delayed_step(sl_t *sl, struct delayed *d) {
       CHECK(delayed_result(d, d->original, 1) == 0);
       d->phase = 3;
     }
+  } else if (d->phase == 9) {
+    sl_queue_result_t result;
+    CHECK(b->calls == 2 && b->request.operation == SL_QUEUE_SYNCHRONIZE);
+    memset(&result, 0, sizeof(result));
+    result.request_id = b->request.request_id;
+    if (d->kind == 8)
+      CHECK(sl_queue_backend_result(sl, &result) == SL_OK);
+    /* A fresh query can acknowledge an unchanged queue revision. */
+    CHECK(snapshot(sl, d->kind == 8 ? "while-synchronizing" : "post-acceptance",
+                   NULL, 0) == SL_OK);
+    if (d->kind != 8)
+      CHECK(sl_queue_backend_result(sl, &result) == SL_OK);
+    d->phase = 3;
   } else if (d->phase == 3 && !strcmp(sl_buffer(sl), expected)) {
-    CHECK(draft.id && draft.held && b->calls == 2);
+    if (d->kind >= 7) {
+      sl_queue_backend_info_t info;
+      CHECK(!draft.id && b->calls == 2);
+      CHECK(sl_queue_backend_info(sl, &info) == SL_OK && info.synchronized &&
+            !info.pending_count && !info.visible_count);
+    } else
+      CHECK(draft.id && draft.held && b->calls == 2);
     CHECK(sl_suspend(sl) == SL_OK);
     d->phase = 7;
   } else if (d->phase == 4) {
@@ -844,6 +912,8 @@ static int delayed_edit(int kind) {
   pid_t drainer = -1;
   CHECK(d);
   d->kind = kind;
+  if (kind >= 7)
+    fprintf(stderr, "Deferred edit reconciliation case %d\n", kind);
   if (kind == 5) {
     size_t i;
     d->paste = malloc(LARGE_PASTE_LEN + 13);
@@ -890,14 +960,13 @@ static int delayed_edit(int kind) {
   if (kind == 6) {
     CHECK(d->phase == 8 && d->control_calls == 1 && d->bridge.calls == 2 &&
           sl_last_readline_status(d->bridge.sl) == SL_READLINE_SUSPENDED);
-  } else if (kind < 2 || kind == 5) {
+  } else if (kind < 2 || kind == 5 || kind >= 7) {
     CHECK(d->phase == 7 &&
           sl_last_readline_status(d->bridge.sl) == SL_READLINE_SUSPENDED);
     CHECK(!strcmp(sl_buffer(d->bridge.sl), kind == 5   ? d->paste + 6
                                            : kind == 1 ? "x\303\251\nz"
                                                        : "x\303\251"));
-    CHECK(d->bridge.calls ==
-          2); /* suspension never stops or aborts owner work */
+    CHECK(d->bridge.calls == 2);
     if (kind < 2)
       CHECK(d->control_calls == 1);
   } else {
@@ -937,6 +1006,9 @@ int main(int argc, char **argv) {
     return delayed_edit(5);
   if (argc == 2 && !strcmp(argv[1], "controls"))
     return delayed_edit(6);
+  if (argc == 2 && !strcmp(argv[1], "reconcile"))
+    return delayed_edit(7) || delayed_edit(8) || delayed_edit(9) ||
+           delayed_edit(10);
   return api() || failures() || fifo() || native() || native_edit(0) ||
          native_edit(1) || delayed_edit(0) || delayed_edit(1) ||
          delayed_edit(2) || delayed_edit(3) || delayed_edit(4);
