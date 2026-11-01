@@ -16,7 +16,7 @@
 #include <unistd.h>
 
 #define SL_BUF_INITIAL 256
-#define SL_LINE_DEFAULT_MAX 4096
+#define SL_LINE_DEFAULT_MAX (128u * 1024u)
 #define SL_HISTORY_DEFAULT_MAX 100
 #define SL_PROMPT_QUEUE_DEFAULT_MAX 64
 #define SL_PROMPT_QUEUE_DEFAULT_PREVIEWS 3
@@ -197,6 +197,9 @@ typedef struct sl_impl {
   int rendered_width;
   int rendered_height;
   int native_prompt_rows;
+  /* First visual input row in the local editor viewport. Never producer text.
+   */
+  int editor_view_first;
   char **rendered_lines;
   size_t *rendered_lens;
   int *rendered_cols;

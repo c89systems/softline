@@ -422,6 +422,13 @@ Chat uses the full terminal width and needs at least three rows: two for the
 VT100 scroll region and one for the prompt. Rectangular viewports are unsupported.
 Softline never enters or leaves the alternate screen itself.
 
+The default draft limit is 128 KiB (131072 UTF-8 bytes), configurable with
+`sl_config_t.line_max_len`. Multiline input shows at most half the terminal
+rows, leaving room for output and separate queue/status rows. The viewport
+follows the cursor one visual row at a time when it crosses an edge; hidden
+input stays editable without being painted into terminal history. Producer
+output is never retained or replayed by this viewport.
+
 For ordinary finite `print_above()` calls without a persistent output
 session, `sl_set_live_scroll_region()` remains available to configure the
 readline scrollback editor. It acquires ownership at startup and retries

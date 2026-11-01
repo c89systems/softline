@@ -345,7 +345,7 @@ static void handle_request(owner_t *o, const sl_queue_request_t *r) {
   }
   switch (r->operation) {
   case SL_QUEUE_OFFER:
-    if (!r->text || !*r->text || strlen(r->text) > 4096 ||
+    if (!r->text || !*r->text || strlen(r->text) > DEMO_PROMPT_MAX ||
         (r->mode != SL_PROMPT_QUEUE_MODE_QUEUED &&
          r->mode != SL_PROMPT_QUEUE_MODE_STEER))
       break;
@@ -370,7 +370,7 @@ static void handle_request(owner_t *o, const sl_queue_request_t *r) {
     result.status = SL_QUEUE_ACCEPTED;
     break;
   case SL_QUEUE_END_EDIT:
-    if (!r->text || !*r->text || strlen(r->text) > 4096)
+    if (!r->text || !*r->text || strlen(r->text) > DEMO_PROMPT_MAX)
       break;
     {
       char *text = duplicate(r->text);

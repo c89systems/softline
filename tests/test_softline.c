@@ -149,7 +149,7 @@ static void test_config_init(void) {
   ASSERT_TRUE(cfg.image_paste_path_template == NULL,
               "image paste uses XDG cache by default");
   ASSERT_TRUE(cfg.history_max_len == 100, "history max default");
-  ASSERT_TRUE(cfg.line_max_len == 4096, "line max default");
+  ASSERT_TRUE(cfg.line_max_len == 131072, "line max default");
   ASSERT_TRUE(cfg.prompt_queue == 0, "prompt queue default");
   ASSERT_TRUE(cfg.prompt_queue_max_entries == 64, "prompt queue max default");
   ASSERT_TRUE(cfg.prompt_queue_preview_entries == 3,
@@ -171,6 +171,50 @@ static void test_plain_config_init(sl_config_t *config) {
 }
 
 #define sl_config_init test_plain_config_init
+
+static void test_large_draft_limits(void) {
+  sl_config_t config;
+  sl_t *sl;
+  sl_prompt_id_t id;
+  char *text, *taken;
+  size_t i;
+  TEST("128 KiB drafts and queue entries round-trip at default limit");
+  sl_config_init(&config);
+  config.prompt_queue = 1;
+  config.input_fd = config.output_fd = open("/dev/null", O_RDWR);
+  ASSERT_TRUE(config.input_fd >= 0, "open null");
+  sl = sl_create_with_config(&config);
+  text = malloc(131074);
+  ASSERT_TRUE(sl && text, "allocate draft");
+  for (i = 0; i < 131072; ++i)
+    text[i] = i % 80 == 79 ? '\n' : 'a';
+  text[131072] = 0;
+  ASSERT_TRUE(sl_set_buffer(sl, text) == SL_OK, "maximum draft accepted");
+  ASSERT_TRUE(!strcmp(sl_buffer(sl), text), "maximum draft preserved");
+  ASSERT_TRUE(sl_prompt_queue_append(sl, text, 1, &id) == SL_OK && id,
+              "maximum held queue entry accepted");
+  text[131072] = 'b';
+  text[131073] = 0;
+  ASSERT_TRUE(sl_set_buffer(sl, text) != SL_OK, "oversize draft rejected");
+  ASSERT_TRUE(sl_insert(sl, "b") != SL_OK && strlen(sl_buffer(sl)) == 131072,
+              "oversize insertion leaves draft intact");
+  ASSERT_TRUE(sl_prompt_queue_replace(sl, 0, text) != SL_OK,
+              "oversize replacement rejected");
+  ASSERT_TRUE(sl_prompt_queue_append(sl, text, 1, NULL) != SL_OK &&
+                  sl_prompt_queue_count(sl) == 1,
+              "oversize insertion leaves queue intact");
+  text[131072] = 0;
+  ASSERT_TRUE(!strcmp(sl_buffer(sl), text), "failed mutation preserved text");
+  ASSERT_TRUE(sl_prompt_queue_approve(sl, id) == SL_OK, "approve held entry");
+  ASSERT_TRUE(sl_prompt_queue_take(sl, 0, &taken) == SL_OK &&
+                  !strcmp(taken, text),
+              "queue round-trip preserved complete text");
+  sl_free_string(sl, taken);
+  sl_destroy(sl);
+  close(config.input_fd);
+  free(text);
+  PASS();
+}
 
 static void test_receiver_shell(void) {
   sl_t *sl;
@@ -6214,10 +6258,10 @@ static void test_normal_prompt_growth_scrolls_at_screen_bottom(void) {
   int status;
   int tries;
 
-  TEST("normal prompt growth scrolls at screen bottom");
+  TEST("normal prompt growth within viewport scrolls at screen bottom");
   memset(&ws, 0, sizeof(ws));
   ws.ws_col = 16;
-  ws.ws_row = 3;
+  ws.ws_row = 6;
   ASSERT_TRUE(openpty(&master_fd, &slave_fd, NULL, NULL, &ws) == 0,
               "openpty failed");
   ASSERT_TRUE(pipe(result_pipe) == 0, "pipe failed");
@@ -6232,7 +6276,7 @@ static void test_normal_prompt_growth_scrolls_at_screen_bottom(void) {
     sl_config_init(&cfg);
     cfg.input_fd = slave_fd;
     cfg.output_fd = slave_fd;
-    if (write(slave_fd, "one\r\ntwo\r\n", 10) != 10)
+    if (write(slave_fd, "one\r\ntwo\r\nthree\r\nfour\r\nfive\r\n", 29) != 29)
       _exit(2);
     sl = sl_create_with_config(&cfg);
     if (!sl)
@@ -6261,7 +6305,7 @@ static void test_normal_prompt_growth_scrolls_at_screen_bottom(void) {
               "write input failed");
   tries = 0;
   while (tries < 300) {
-    vt_init(&screen, 3, 16);
+    vt_init(&screen, 6, 16);
     vt_apply(&screen, terminal);
     if (vt_contains(&screen, "p> hello world") &&
         vt_contains(&screen, "   sentence"))
@@ -6271,7 +6315,7 @@ static void test_normal_prompt_growth_scrolls_at_screen_bottom(void) {
       append_terminal_bytes(terminal, &terminal_len, sizeof(terminal), buf, n);
     tries++;
   }
-  vt_init(&screen, 3, 16);
+  vt_init(&screen, 6, 16);
   vt_apply(&screen, terminal);
   ASSERT_TRUE(vt_contains(&screen, "p> hello world"),
               "bottom growth first row missing");
@@ -11105,6 +11149,10 @@ static void test_live_output_error_resets_terminal_style(void) {
 int main(int argc, char **argv) {
   printf("softline unit tests\n");
   printf("===================\n\n");
+  if (argc == 2 && strcmp(argv[1], "large-drafts") == 0) {
+    test_large_draft_limits();
+    return tests_passed == tests_run ? 0 : 1;
+  }
 #if SL_TEST_PTY
   if (argc == 2 && strcmp(argv[1], "wrapped-output-prompt") == 0) {
     test_normal_wrapped_prompt_proceeds_after_output();
@@ -11152,6 +11200,7 @@ int main(int argc, char **argv) {
   }
 
   test_config_init();
+  test_large_draft_limits();
   test_receiver_shell();
   test_status_message_api();
   test_parser_only_stream_allows_geometry_changes();

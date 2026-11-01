@@ -26,7 +26,7 @@ The public API is the installed header `include/softline/softline.h`.
   - output fd: `STDOUT_FILENO`
   - ordinary readline at the current cursor
   - history max length: 100
-  - line max length: 4096 bytes
+  - complete editable draft max length: 131072 UTF-8 bytes (128 KiB)
   - prompt queueing and live scroll regions: disabled
   - prompt queue capacity and previews when enabled: 64 and 3
   - prompt theme: ANSI-only `default`
@@ -169,6 +169,17 @@ The editor supports these built-in behaviors:
 - Bracketed paste mode is enabled while editing; pasted carriage returns become
   buffer content instead of submitting the prompt.
 - Input is limited by `line_max_len`.
+- The editable input viewport occupies at most half the terminal rows (at least
+  one row), independently of the complete draft length. Queue/status rows are
+  separate; native output retains at least two output rows where geometry allows.
+  Only visible input rows are formatted and painted. At the end of a long draft,
+  the last rows are visible. Moving within the viewport keeps it stationary;
+  crossing its top/bottom edge scrolls just enough to reveal the cursor's row.
+  The prompt prefix stays on the first visible input row when it fits the width.
+  Resize recomputes wrapping and viewport capacity without discarding draft text.
+  This does not retain or replay producer output.
+  While reverse search is active, its query occupies a separate, width-limited
+  header row above the scrollable result so scrolling cannot hide the query.
 - Editing falls back to a plain line reader when either input or output is not
   a TTY; it does not emit prompts.
 
@@ -509,8 +520,9 @@ slots and absent status messages reserve no rows. Adding or removing queue,
 status, or editor rows adjusts the output margin immediately. Growth scrolls
 existing output cells only by the rows needed to fit; shrink clears former
 prompt cells and returns their rows to output without moving transcript cells.
-The editor pages only when the frame exceeds the physical terminal capacity;
-queue and status rows stay visible whenever they fit.
+The editable input pages at half the terminal height, or earlier when needed
+to leave two output rows and the queue/status panel. Queue and status rows
+stay visible whenever they fit.
 
 `print_above()` accepts a chunk callback and writes all chunks above the active
 prompt. The callback returns `SL_OK` with a non-empty chunk to continue, or

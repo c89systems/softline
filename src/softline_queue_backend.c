@@ -30,7 +30,7 @@ struct sl_backend {
   char *revision;
   int synchronized, callback_active, needs_sync, sync_pending;
   backend_key_t *keys;
-  size_t key_count, key_capacity;
+  size_t key_count, key_capacity, key_head;
   int reading_paste;
 };
 
@@ -804,26 +804,35 @@ int sl_backend_push_key(sl_t *self, int key, const char *bytes, size_t len) {
   sl_impl_t *impl = editor(self);
   sl_backend_t *b = impl->backend;
   backend_key_t *keys;
-  if (len > sizeof(b->keys[0].bytes) || b->key_count >= impl->line_max_len)
+  size_t index;
+  /* Leave room for bracketed-paste framing and ordinary edit controls around
+   * a full-size draft while keeping deferred keyboard input bounded. */
+  size_t limit = impl->line_max_len + SL_PENDING_INPUT_MAX;
+  if (len > sizeof(b->keys[0].bytes) || b->key_count >= limit)
     return error(
         self, SL_ERROR_FULL,
         "input waiting for the edit hold exceeds the configured limit");
   if (b->key_count == b->key_capacity) {
     size_t capacity = b->key_capacity ? b->key_capacity * 2 : 32;
-    if (capacity > impl->line_max_len)
-      capacity = impl->line_max_len;
+    if (capacity > limit)
+      capacity = limit;
     if (capacity > (size_t)-1 / sizeof(*keys))
       return SL_ERROR_NOMEM;
-    keys = realloc(b->keys, capacity * sizeof(*keys));
+    keys = malloc(capacity * sizeof(*keys));
     if (!keys)
       return SL_ERROR_NOMEM;
+    for (index = 0; index < b->key_count; ++index)
+      keys[index] = b->keys[(b->key_head + index) % b->key_capacity];
+    free(b->keys);
     b->keys = keys;
     b->key_capacity = capacity;
+    b->key_head = 0;
   }
-  b->keys[b->key_count].key = key;
-  b->keys[b->key_count].len = len;
+  index = (b->key_head + b->key_count) % b->key_capacity;
+  b->keys[index].key = key;
+  b->keys[index].len = len;
   if (len)
-    memcpy(b->keys[b->key_count].bytes, bytes, len);
+    memcpy(b->keys[index].bytes, bytes, len);
   ++b->key_count;
   if (key == SL_KEY_PASTE_BEGIN)
     b->reading_paste = 1;
@@ -835,12 +844,12 @@ int sl_backend_pop_key(sl_impl_t *impl, int *key, char *bytes, size_t *len) {
   sl_backend_t *b = impl->backend;
   if (!b || !b->key_count)
     return 0;
-  *key = b->keys[0].key;
-  *len = b->keys[0].len;
+  *key = b->keys[b->key_head].key;
+  *len = b->keys[b->key_head].len;
   if (*len)
-    memcpy(bytes, b->keys[0].bytes, *len);
+    memcpy(bytes, b->keys[b->key_head].bytes, *len);
   --b->key_count;
-  memmove(b->keys, b->keys + 1, b->key_count * sizeof(*b->keys));
+  b->key_head = b->key_count ? (b->key_head + 1) % b->key_capacity : 0;
   return 1;
 }
 
@@ -909,6 +918,7 @@ void sl_backend_cancel_waiting(sl_impl_t *impl) {
   if (!backend)
     return;
   backend->key_count = 0;
+  backend->key_head = 0;
   backend->reading_paste = 0;
   for (i = 0; i < backend->pending_count; ++i) {
     backend_pending_t *p = backend->pending + i;

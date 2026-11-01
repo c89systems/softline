@@ -32,6 +32,9 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   add_test(NAME softline_queue_backend COMMAND test_queue_backend)
   set_tests_properties(softline_queue_backend PROPERTIES
     LABELS "unit;queue;editing;memcheck" TIMEOUT 15)
+  add_test(NAME softline_queue_backend_large_edit COMMAND test_queue_backend large-edit)
+  set_tests_properties(softline_queue_backend_large_edit PROPERTIES
+    LABELS "integration;queue;editing;memcheck" TIMEOUT 15)
   add_executable(test_edit test_edit.c "${PROJECT_SOURCE_DIR}/src/softline_edit.c")
   softline_apply_warnings(test_edit)
   softline_local_runtime(test_edit)
@@ -57,6 +60,8 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     LABELS "unit;editing;memcheck" TIMEOUT 30)
   set_tests_properties(softline_suspend PROPERTIES LABELS "unit;editing;queue;memcheck" TIMEOUT 15)
   add_test(NAME softline_readline_edit COMMAND test_softline readline-edit)
+  add_test(NAME softline_large_drafts COMMAND test_softline large-drafts)
+  set_tests_properties(softline_large_drafts PROPERTIES LABELS "unit;editing;memcheck" TIMEOUT 5)
   set_tests_properties(softline_readline_edit PROPERTIES LABELS "unit;editing" TIMEOUT 10)
   add_executable(test_reconcile test_reconcile.c)
   target_link_libraries(test_reconcile PRIVATE softline util)
@@ -462,6 +467,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND TARGET example_chat)
       add_test(NAME softline_terminal_prompt_themes COMMAND "${SOFTLINE_TEST_XVFB_RUN}" -a
         "$<TARGET_FILE:test_vte_editor>" "$<TARGET_FILE:editor_resize_fixture>" themes)
       set_tests_properties(softline_terminal_prompt_themes PROPERTIES
+        ENVIRONMENT "${terminal_test_environment}" LABELS "integration;editing" TIMEOUT 20)
+      add_test(NAME softline_terminal_input_viewport COMMAND "${SOFTLINE_TEST_XVFB_RUN}" -a
+        "$<TARGET_FILE:test_vte_editor>" "$<TARGET_FILE:editor_resize_fixture>" viewport)
+      set_tests_properties(softline_terminal_input_viewport PROPERTIES
         ENVIRONMENT "${terminal_test_environment}" LABELS "integration;editing" TIMEOUT 20)
     endif()
     if(_softline_test_libmdf_supported)

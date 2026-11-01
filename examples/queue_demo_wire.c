@@ -223,7 +223,7 @@ int demo_link_queue(demo_link_t *link, demo_packet_t *packet) {
   uint32_t length;
   if (packet->failed || !packet->length || packet->length > DEMO_FRAME_MAX ||
       link->count == DEMO_OUT_MAX ||
-      link->queued_bytes + packet->length + 4 > 1024u * 1024u)
+      link->queued_bytes + packet->length + 4 > DEMO_QUEUED_BYTES_MAX)
     return -1;
   framed = realloc(packet->data, packet->length + 4);
   if (!framed)

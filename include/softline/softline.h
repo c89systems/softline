@@ -716,7 +716,7 @@ typedef struct sl_config {
   int live_scroll_region;
   /** Maximum retained history entries; default is 100. */
   int history_max_len;
-  /** Maximum editable line length in bytes; default is 4096. */
+  /** Maximum complete editable draft in UTF-8 bytes; default is 131072. */
   size_t line_max_len;
   /** Non-zero enables Tab queueing while the interactive terminal editor is
    * active. Editing is plain when either input or output is not a TTY. */
@@ -1175,7 +1175,7 @@ struct sl {
  * limits.
  *
  * Passing NULL is ignored. Defaults are stdin/stdout file descriptors,
- * ordinary readline rendering, 100 history entries, and a 4096-byte editable
+ * ordinary readline rendering, 100 history entries, and a 128 KiB editable
  * line. Prompt queueing and live scroll regions are disabled; the queue
  * defaults to a capacity of 64 and three previews when enabled. The prompt
  * theme is SL_PROMPT_THEME_DEFAULT, the status line and spinner are disabled,
@@ -1352,9 +1352,9 @@ int sl_prompt_queue_peek(const sl_t *self, size_t index, char **out);
 int sl_prompt_queue_insert(sl_t *self, size_t index, const char *text, int held,
                            sl_prompt_id_t *out_id);
 
-/** Append text with held 0 or 1 and optionally return its new identity.
- * out_id is zeroed on failure; held entries require approval. Auto-approval
- * overrides a requested hold. */
+/** Append nonempty text within line_max_len, with held 0 or 1, and optionally
+ * return its new identity. out_id is zeroed on failure; held entries require
+ * approval. Auto-approval overrides a requested hold. */
 int sl_prompt_queue_append(sl_t *self, const char *text, int held,
                            sl_prompt_id_t *out_id);
 
@@ -1375,7 +1375,8 @@ int sl_set_auto_approval(sl_t *self, int enabled);
 /** Read auto_approval into out; invalid arguments return SL_ERROR_INVALID. */
 int sl_get_auto_approval(const sl_t *self, int *out);
 
-/** Replace queue index with nonempty text. Index zero is the oldest entry. */
+/** Replace queue index with nonempty text within line_max_len.
+ * Index zero is the oldest entry. */
 int sl_prompt_queue_replace(sl_t *self, size_t index, const char *text);
 
 /** Remove queue index and transfer its softline-allocated text through out. */

@@ -3,9 +3,12 @@
 #include "softline/softline.h"
 
 /* Example-only bounded framing. This is not a Softline wire protocol/API. */
-#define DEMO_FRAME_MAX (320u * 1024u)
 #define DEMO_OUT_MAX 16
 #define DEMO_ITEM_MAX 64
+#define DEMO_PROMPT_MAX (128u * 1024u)
+/* A full accepted queue snapshot, with bounded per-entry metadata. */
+#define DEMO_FRAME_MAX (DEMO_ITEM_MAX * (DEMO_PROMPT_MAX + 1024u) + 4096u)
+#define DEMO_QUEUED_BYTES_MAX (DEMO_FRAME_MAX + 2u * DEMO_PROMPT_MAX)
 enum demo_message {
   DEMO_HELLO = 1,
   DEMO_REQUEST,

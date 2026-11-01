@@ -1,10 +1,14 @@
 #define _DEFAULT_SOURCE
 #include <fcntl.h>
+#include <poll.h>
 #include <pty.h>
+#include <signal.h>
 #include <softline/softline.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #define CHECK(test)                                                            \
@@ -14,6 +18,8 @@
       return 1;                                                                \
     }                                                                          \
   } while (0)
+
+#define LARGE_PASTE_LEN (128u * 1024u)
 
 struct bridge {
   sl_t *sl;
@@ -679,6 +685,9 @@ struct delayed {
   struct bridge bridge;
   int kind, phase, ticks, version;
   sl_queue_request_id_t original;
+  int slave;
+  size_t written;
+  char *paste;
 };
 
 static int delayed_result(struct delayed *d, sl_queue_request_id_t id,
@@ -718,12 +727,16 @@ static int delayed_step(sl_t *sl, struct delayed *d) {
   struct bridge *b = &d->bridge;
   char drain[2048];
   sl_prompt_queue_entry_info_t draft;
-  const char *expected = d->kind == 1 ? "x\303\251\nz" : "x\303\251";
-  while (read(b->master, drain, sizeof(drain)) > 0) {
-  }
+  const char *expected = d->kind == 5   ? d->paste + 6
+                         : d->kind == 1 ? "x\303\251\nz"
+                                        : "x\303\251";
+  if (d->kind != 5)
+    while (read(b->master, drain, sizeof(drain)) > 0) {
+    }
   CHECK(sl_prompt_queue_draft_info(sl, &draft) == SL_OK);
   if (!d->phase) {
-    const char *keys = d->kind == 1
+    const char *keys = d->kind == 5 ? "original\r\033e\025"
+                       : d->kind == 1
                            ? "original\r\033e\025\033[200~x\303\251\nz\033[201~"
                            : "original\r\033e\025x\303\251";
     CHECK(write(b->master, keys, strlen(keys)) == (ssize_t)strlen(keys));
@@ -744,7 +757,26 @@ static int delayed_step(sl_t *sl, struct delayed *d) {
     CHECK(b->request.operation == SL_QUEUE_BEGIN_EDIT && !*sl_buffer(sl) &&
           !draft.id);
     d->original = b->request.request_id;
-    if (d->kind >= 3) {
+    if (d->kind == 5) {
+      int pending;
+      size_t length = LARGE_PASTE_LEN + 12;
+      if (d->written < length) {
+        size_t chunk = length - d->written;
+        ssize_t sent;
+        if (chunk > 4096)
+          chunk = 4096;
+        sent = write(b->master, d->paste + d->written, chunk);
+        if (sent > 0)
+          d->written += (size_t)sent;
+        return 0;
+      }
+      CHECK(!ioctl(d->slave, FIONREAD, &pending));
+      if (pending)
+        return 0;
+      d->paste[6 + LARGE_PASTE_LEN] = 0;
+      CHECK(delayed_result(d, d->original, 1) == 0);
+      d->phase = 3;
+    } else if (d->kind >= 3) {
       if (d->kind == 4)
         CHECK(write(b->master, "\033", 1) == 1);
       else
@@ -795,25 +827,54 @@ static int delayed_edit(int kind) {
   sl_prompt_source_t source;
   struct winsize size;
   int slave;
+  pid_t drainer = -1;
   CHECK(d);
   d->kind = kind;
+  if (kind == 5) {
+    size_t i;
+    d->paste = malloc(LARGE_PASTE_LEN + 13);
+    CHECK(d->paste);
+    memcpy(d->paste, "\033[200~", 6);
+    for (i = 0; i < LARGE_PASTE_LEN; ++i)
+      d->paste[i + 6] = i % 67 == 66 ? '\n' : (char)('a' + i % 26);
+    memcpy(d->paste + 6 + LARGE_PASTE_LEN, "\033[201~", 7);
+  }
   memset(&size, 0, sizeof(size));
   size.ws_col = 80;
   size.ws_row = 24;
   CHECK(!openpty(&d->bridge.master, &slave, NULL, NULL, &size));
+  d->slave = slave;
   CHECK(fcntl(d->bridge.master, F_SETFL, O_NONBLOCK) == 0);
-  CHECK(create(&d->bridge, slave, slave, kind >= 3 ? 1 : 8));
+  if (kind == 5) {
+    /* A real terminal drains output during replay too, when no idle callback
+     * runs. Do not let this fixture's PTY output capacity throttle the editor.
+     */
+    drainer = fork();
+    CHECK(drainer >= 0);
+    if (!drainer) {
+      struct pollfd fd;
+      char bytes[2048];
+      close(slave);
+      fd.fd = d->bridge.master;
+      fd.events = POLLIN;
+      while (poll(&fd, 1, -1) > 0 && read(fd.fd, bytes, sizeof(bytes)) > 0) {
+      }
+      _exit(0);
+    }
+  }
+  CHECK(create(&d->bridge, slave, slave, kind >= 3 && kind != 5 ? 1 : 8));
   CHECK(sl_bind_key(d->bridge.sl, SL_KEY_ESCAPE, cancel_key, NULL) == SL_OK);
   CHECK(sl_suspend(d->bridge.sl) == SL_ERROR_INVALID);
   CHECK(snapshot(d->bridge.sl, "q0", NULL, 0) == SL_OK);
   CHECK(sl_set_idle_callback(d->bridge.sl, delayed_idle, d) == SL_OK);
   CHECK(!sl_next_prompt(d->bridge.sl, "> ", &source) && !d->bridge.failed);
   CHECK(source == SL_PROMPT_SOURCE_NONE);
-  if (kind < 2) {
+  if (kind < 2 || kind == 5) {
     CHECK(d->phase == 7 &&
           sl_last_readline_status(d->bridge.sl) == SL_READLINE_SUSPENDED);
-    CHECK(!strcmp(sl_buffer(d->bridge.sl),
-                  kind == 1 ? "x\303\251\nz" : "x\303\251"));
+    CHECK(!strcmp(sl_buffer(d->bridge.sl), kind == 5   ? d->paste + 6
+                                           : kind == 1 ? "x\303\251\nz"
+                                                       : "x\303\251"));
     CHECK(d->bridge.calls ==
           2); /* suspension never stops or aborts owner work */
   } else {
@@ -837,13 +898,20 @@ static int delayed_edit(int kind) {
           sl_last_readline_status(d->bridge.sl) == SL_READLINE_EOF);
   }
   sl_destroy(d->bridge.sl);
+  if (drainer > 0) {
+    int status;
+    CHECK(!kill(drainer, SIGTERM) && waitpid(drainer, &status, 0) == drainer);
+  }
   close(d->bridge.master);
   close(slave);
+  free(d->paste);
   free(d);
   return 0;
 }
 
-int main(void) {
+int main(int argc, char **argv) {
+  if (argc == 2 && !strcmp(argv[1], "large-edit"))
+    return delayed_edit(5);
   return api() || failures() || fifo() || native() || native_edit(0) ||
          native_edit(1) || delayed_edit(0) || delayed_edit(1) ||
          delayed_edit(2) || delayed_edit(3) || delayed_edit(4);

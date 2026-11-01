@@ -27,6 +27,8 @@ typedef struct sl_row {
   int has_cursor;
   int base_col;
   int cols;
+  size_t text_first, text_end;
+  int leading_tab, trailing_tab;
 } sl_row_t;
 
 typedef struct sl_render {
@@ -37,6 +39,7 @@ typedef struct sl_render {
   int cursor_row;
   int cursor_col;
   int editor_first;
+  int editor_offset;
 } sl_render_t;
 
 typedef struct sl_rgb {
@@ -2063,6 +2066,10 @@ static int sl_render_new_row_at(sl_render_t *render, size_t start,
   render->rows[render->count].has_cursor = 0;
   render->rows[render->count].base_col = base_col;
   render->rows[render->count].cols = base_col;
+  render->rows[render->count].text_first = start;
+  render->rows[render->count].text_end = start;
+  render->rows[render->count].leading_tab = 0;
+  render->rows[render->count].trailing_tab = 0;
   render->count++;
   return 0;
 }
@@ -2693,24 +2700,9 @@ static int sl_prompt_input_style(const sl_impl_t *impl, char *style,
   return sl_rgb_style(style, style_cap, palette->input, palette->input_bold);
 }
 
-static int sl_render_close_input_row(sl_render_t *render,
-                                     const char *input_style) {
-  if (!render || !input_style)
-    return -1;
-  if (input_style[0] == '\0')
-    return 0;
-  return sl_row_append(&render->rows[render->count - 1], "\033[0m", 4);
-}
-
 static int sl_render_new_input_row(sl_render_t *render, int indent,
-                                   size_t start, const char *input_style) {
-  if (sl_render_close_input_row(render, input_style) != 0 ||
-      sl_render_new_indented_row(render, indent, start) != 0)
-    return -1;
-  if (input_style[0] == '\0')
-    return 0;
-  return sl_row_append(&render->rows[render->count - 1], input_style,
-                       strlen(input_style));
+                                   size_t start) {
+  return sl_render_new_row_at(render, start, indent);
 }
 
 static int sl_row_append_styled(sl_row_t *row, const char *text,
@@ -3234,6 +3226,25 @@ static void sl_render_cursor(sl_render_t *render, size_t offset, int col,
   }
 }
 
+/* Input layout records source spans and cursor positions only. Formatting
+ * text is allocated later for visible rows, including partial tab cells. */
+static void sl_render_input_span(sl_render_t *render, size_t at, size_t len,
+                                 int cells, int tab) {
+  sl_row_t *row = &render->rows[render->count - 1];
+  if (row->text_first == row->text_end)
+    row->text_first = at;
+  if (tab) {
+    if (at == row->text_first)
+      row->leading_tab += cells;
+    if (row->text_end != at + len)
+      row->trailing_tab = 0;
+    row->trailing_tab += cells;
+  } else
+    row->trailing_tab = 0;
+  row->text_end = at + len;
+  row->cols += cells;
+}
+
 static int sl_render_build(sl_t *self, const char *prompt,
                            sl_render_t *render) {
   sl_impl_t *impl;
@@ -3241,9 +3252,10 @@ static int sl_render_build(sl_t *self, const char *prompt,
   int col;
   int prompt_width;
   int indent;
-  const char *prompt_style;
-  char input_style[32];
   size_t i;
+  size_t space_end = 0;
+  int space_word_width = 0;
+  int space_has_word = 0;
   memset(render, 0, sizeof(*render));
   impl = sl_impl(self);
   if (!impl)
@@ -3260,24 +3272,19 @@ static int sl_render_build(sl_t *self, const char *prompt,
     return -1;
   if (sl_render_append_statusline(self, render, width) != 0)
     return -1;
+  /* A search query is persistent chrome, not part of the scrollable result.
+   * Keeping it on one bounded row also handles a query as wide as the PTY. */
+  if (impl->history_search_active && prompt) {
+    if (sl_render_new_row_at(render, 0, 0) != 0 ||
+        sl_queue_row_append_preview(
+            &render->rows[render->count - 1], prompt, width,
+            sl_prompt_theme_style(impl->prompt_theme)) != 0)
+      return -1;
+    prompt = "";
+  }
   render->editor_first = render->count;
-  prompt_style = sl_prompt_theme_style(impl->prompt_theme);
   prompt_width = prompt ? sl_text_width(prompt, strlen(prompt)) : 0;
   if (sl_render_new_row_at(render, 0, prompt_width) != 0)
-    return -1;
-  if (sl_prompt_input_style(impl, input_style, sizeof(input_style)) != 0)
-    return -1;
-  if (prompt && prompt[0] != '\0' &&
-      (sl_row_append(&render->rows[render->editor_first], prompt_style,
-                     strlen(prompt_style)) != 0 ||
-       sl_row_append(&render->rows[render->editor_first], prompt,
-                     strlen(prompt)) != 0 ||
-       (prompt_style[0] != '\0' &&
-        sl_row_append(&render->rows[render->editor_first], "\033[0m", 4) != 0)))
-    return -1;
-  if (input_style[0] != '\0' &&
-      sl_row_append(&render->rows[render->editor_first], input_style,
-                    strlen(input_style)) != 0)
     return -1;
   indent = prompt_width;
   if (indent >= width)
@@ -3294,7 +3301,7 @@ static int sl_render_build(sl_t *self, const char *prompt,
       char_len = 1;
     if (ch == '\n') {
       sl_render_cursor(render, i, col, impl->cursor);
-      if (sl_render_new_input_row(render, indent, i + 1, input_style) != 0)
+      if (sl_render_new_input_row(render, indent, i + 1) != 0)
         return -1;
       col = indent;
       i++;
@@ -3302,21 +3309,27 @@ static int sl_render_build(sl_t *self, const char *prompt,
     }
     if (ch == ' ' && col > indent) {
       size_t spaces;
-      size_t word_len;
       int word_width;
       int avail;
-      spaces = 0;
-      while (i + spaces < impl->len && impl->buf[i + spaces] == ' ')
-        spaces++;
-      word_len = sl_next_word_len(impl->buf, impl->len, i + spaces);
-      word_width = sl_word_width(impl->buf, impl->len, i + spaces, word_len);
+      if (i >= space_end) {
+        size_t word_len;
+        space_end = i;
+        while (space_end < impl->len && impl->buf[space_end] == ' ')
+          ++space_end;
+        word_len = sl_next_word_len(impl->buf, impl->len, space_end);
+        space_has_word = word_len != 0;
+        space_word_width =
+            word_len ? sl_word_width(impl->buf, impl->len, space_end, word_len)
+                     : 0;
+      }
+      spaces = space_end - i;
+      word_width = space_word_width;
       avail = width - indent;
       if (avail < 1)
         avail = 1;
-      if (word_len > 0 && word_width <= avail &&
+      if (space_has_word && word_width <= avail &&
           col + (int)spaces + word_width > width) {
-        if (sl_render_new_input_row(render, indent, i + spaces, input_style) !=
-            0)
+        if (sl_render_new_input_row(render, indent, i + spaces) != 0)
           return -1;
         col = indent;
         if (impl->cursor >= i && impl->cursor <= i + spaces) {
@@ -3338,13 +3351,13 @@ static int sl_render_build(sl_t *self, const char *prompt,
       if (avail < 1)
         avail = 1;
       if (word_width <= avail && col + word_width > width) {
-        if (sl_render_new_input_row(render, indent, i, input_style) != 0)
+        if (sl_render_new_input_row(render, indent, i) != 0)
           return -1;
         col = indent;
       }
     }
     if (col >= width || (char_width > 0 && col + char_width > width)) {
-      if (sl_render_new_input_row(render, indent, i, input_style) != 0)
+      if (sl_render_new_input_row(render, indent, i) != 0)
         return -1;
       col = indent;
     }
@@ -3354,33 +3367,27 @@ static int sl_render_build(sl_t *self, const char *prompt,
       spaces = 8 - (col % 8);
       while (spaces-- > 0) {
         if (col >= width) {
-          if (sl_render_new_input_row(render, indent, i, input_style) != 0)
+          if (sl_render_new_input_row(render, indent, i) != 0)
             return -1;
           col = indent;
         }
-        if (sl_row_append_cells(&render->rows[render->count - 1], " ", 1, 1) !=
-            0)
-          return -1;
+        sl_render_input_span(render, i, 1, 1, 1);
         col++;
       }
     } else {
-      if (sl_row_append_cells(&render->rows[render->count - 1], impl->buf + i,
-                              char_len, char_width) != 0)
-        return -1;
+      sl_render_input_span(render, i, char_len, char_width, 0);
       col += char_width;
     }
     i += char_len;
   }
   if (col < width || impl->cursor == impl->len) {
     if (col >= width) {
-      if (sl_render_new_input_row(render, indent, impl->len, input_style) != 0)
+      if (sl_render_new_input_row(render, indent, impl->len) != 0)
         return -1;
       col = indent;
     }
     sl_render_cursor(render, impl->len, col, impl->cursor);
   }
-  if (sl_render_close_input_row(render, input_style) != 0)
-    return -1;
   return 0;
 }
 
@@ -3469,16 +3476,30 @@ static int sl_native_prompt_height(sl_impl_t *impl, const sl_render_t *render) {
 }
 
 /* Page the editor within its space while retaining the queue/status panel. */
-static void sl_render_page_editor(sl_render_t *render, int limit) {
-  int rows, first, i;
-  if (render->count <= limit || render->editor_first >= limit)
-    return;
-  rows = limit - render->editor_first;
-  first = render->cursor_row - rows + 1;
-  if (first < render->editor_first)
-    first = render->editor_first;
-  if (first > render->count - rows)
-    first = render->count - rows;
+static void sl_render_page_editor(sl_impl_t *impl, sl_render_t *render) {
+  int rows, first, i, available;
+  int height = sl_terminal_height(impl);
+  int count = render->count - render->editor_first;
+  rows = height / 2;
+  available = height - render->editor_first;
+  if (impl->output_stream_active || sl_surface_is_native(impl->output_surface))
+    available -= 2;
+  if (rows > available)
+    rows = available;
+  if (rows < 1)
+    rows = 1;
+  if (rows > count)
+    rows = count;
+  first = impl->editor_view_first;
+  if (first > count - rows)
+    first = count - rows;
+  if (first > render->cursor_row - render->editor_first)
+    first = render->cursor_row - render->editor_first;
+  if (first + rows <= render->cursor_row - render->editor_first)
+    first = render->cursor_row - render->editor_first - rows + 1;
+  impl->editor_view_first = first;
+  render->editor_offset = first;
+  first += render->editor_first;
   for (i = render->editor_first; i < first; i++)
     free(render->rows[i].text);
   for (i = first + rows; i < render->count; i++)
@@ -3487,6 +3508,68 @@ static void sl_render_page_editor(sl_render_t *render, int limit) {
           (size_t)rows * sizeof(*render->rows));
   render->cursor_row -= first - render->editor_first;
   render->count = render->editor_first + rows;
+}
+
+/* Materialize only the selected input viewport. Layout/navigation retain byte
+ * positions, never hidden display strings or any producer transcript. */
+static int sl_render_paint_editor(sl_t *self, const char *prompt,
+                                  sl_render_t *render) {
+  sl_impl_t *impl = sl_impl(self);
+  char input_style[32];
+  const char *prompt_style = sl_prompt_theme_style(impl->prompt_theme);
+  int i;
+  if (impl->history_search_active)
+    prompt = "";
+  if (sl_prompt_input_style(impl, input_style, sizeof(input_style)) != 0)
+    return -1;
+  for (i = render->editor_first; i < render->count; ++i) {
+    sl_row_t *row = &render->rows[i];
+    int indent = row->cols;
+    size_t pos = row->text_first;
+    /* The layout's initial column is independent of cursor ownership (a
+     * continuation of a tab may have no addressable cursor position). */
+    int base = prompt ? sl_text_width(prompt, strlen(prompt)) : 0;
+    int initial = i == render->editor_first &&
+                  (!render->editor_offset || base < render->width);
+    if (!initial && base >= render->width)
+      base = render->width > 1 ? render->width - 1 : 0;
+    row->cols = 0;
+    if (initial) {
+      if (sl_row_append_styled(row, prompt ? prompt : "", prompt_style) != 0)
+        return -1;
+    } else {
+      while (base-- > 0)
+        if (sl_row_append_cells(row, " ", 1, 1) != 0)
+          return -1;
+    }
+    if (sl_row_append(row, input_style, strlen(input_style)) != 0)
+      return -1;
+    while (pos < row->text_end) {
+      int cells;
+      size_t n;
+      if (impl->buf[pos] == '\t') {
+        cells = pos == row->text_first     ? row->leading_tab
+                : pos + 1 == row->text_end ? row->trailing_tab
+                                           : 8 - row->cols % 8;
+        while (cells-- > 0)
+          if (sl_row_append_cells(row, " ", 1, 1) != 0)
+            return -1;
+        ++pos;
+      } else {
+        n = sl_utf8_cluster_len_width(impl->buf, row->text_end, pos, &cells);
+        if (!n)
+          n = 1;
+        if (sl_row_append_cells(row, impl->buf + pos, n, cells) != 0)
+          return -1;
+        pos += n;
+      }
+    }
+    if (input_style[0] && sl_row_append(row, "\033[0m", 4) != 0)
+      return -1;
+    if (row->cols != indent)
+      return -1;
+  }
+  return 0;
 }
 
 /* A retained editor frame still has physical cells after readline returns.
@@ -3630,7 +3713,6 @@ static int sl_render_apply_absolute(sl_t *self, sl_render_t *render) {
   if (impl->output_stream_active ||
       sl_surface_is_native(impl->output_surface)) {
     impl->native_prompt_rows = sl_native_prompt_height(impl, render);
-    sl_render_page_editor(render, sl_output_prompt_rows(impl));
   }
   if (sl_surface_is_native(impl->output_surface) && impl->rendered_rows > 0 &&
       (sl_native_resize_pending(impl) || impl->rendered_width != width ||
@@ -3863,6 +3945,12 @@ retry:
   if (impl->preferred_column_valid &&
       impl->preferred_column_width != render.width)
     impl->preferred_column_valid = 0;
+  sl_render_page_editor(impl, &render);
+  if (sl_render_paint_editor(self, prompt, &render) != 0) {
+    sl_render_free(&render);
+    sl_set_error(self, "failed to format prompt viewport");
+    return -1;
+  }
   if (sl_prompt_uses_absolute_rows(impl)) {
     rc = sl_render_apply_absolute(self, &render);
     sl_render_free(&render);
@@ -3874,7 +3962,8 @@ retry:
   }
   width = sl_terminal_width(impl);
   resizing_width = impl->rendered_rows > 0 && impl->rendered_width != width;
-  if (resizing_width) {
+  if (impl->rendered_rows > 0 &&
+      (resizing_width || impl->rendered_height != sl_terminal_height(impl))) {
     int columns = sl_terminal_columns(impl);
     int height = sl_terminal_height(impl);
     int span, offset, column, editor_offset, observed, top;
@@ -3902,6 +3991,7 @@ retry:
   if (sl_render_visible_equal(impl, &render, 0, render.count, render.cursor_row,
                               render.cursor_col, -1)) {
     impl->rendered_width = width;
+    impl->rendered_height = sl_terminal_height(impl);
     sl_render_free(&render);
     return 0;
   }
@@ -3946,8 +4036,10 @@ retry:
     sl_set_error(self, "out of memory while storing terminal render state");
     rc = -1;
   }
-  if (rc == 0)
+  if (rc == 0) {
     impl->rendered_width = width;
+    impl->rendered_height = sl_terminal_height(impl);
+  }
   sl_render_free(&render);
   if (rc != 0)
     sl_set_error(self, "failed to write terminal output");
@@ -4549,6 +4641,7 @@ static int sl_output_stream_begin_method(sl_t *self) {
       sl_render_free(&initial);
       goto failed;
     }
+    sl_render_page_editor(impl, &initial);
     impl->native_prompt_rows = sl_native_prompt_height(impl, &initial);
     sl_render_free(&initial);
   }
@@ -6563,6 +6656,8 @@ static char *sl_readline_impl(sl_t *self, const char *prompt,
   int failed;
   char *promoted;
   char *queued;
+  size_t pasted_since_render = 0;
+  unsigned int deferred_since_render = 0;
   impl = sl_impl(self);
   if (!impl)
     return NULL;
@@ -6656,6 +6751,7 @@ static char *sl_readline_impl(sl_t *self, const char *prompt,
     int key;
     int queue_key_checked = 0;
     int replayed = 0, waiting_edit;
+    int deferred_input = 0;
     sl_key_action_t action;
     sl_backend_pump(self);
     sl_edit_end(&impl->edit);
@@ -6691,6 +6787,8 @@ static char *sl_readline_impl(sl_t *self, const char *prompt,
         break;
       }
       key = SL_KEY_NONE;
+      deferred_input = 1;
+      ++deferred_since_render;
       paste_len = 0;
       errno = 0;
     }
@@ -6761,6 +6859,7 @@ static char *sl_readline_impl(sl_t *self, const char *prompt,
       } else if (paste_len > 0 && paste_len <= impl->line_max_len - impl->len) {
         if (sl_buf_insert(self, impl->cursor, paste_bytes, paste_len) == 0) {
           impl->cursor += paste_len;
+          pasted_since_render += paste_len;
         } else {
           failed = 1;
           done = 1;
@@ -6769,10 +6868,13 @@ static char *sl_readline_impl(sl_t *self, const char *prompt,
       render_prompt =
           impl->history_search_active && search.prompt ? search.prompt : prompt;
       impl->active_prompt = render_prompt;
-      if (!done && sl_render_apply(self, render_prompt) != 0) {
+      if (!done && (!impl->bracketed_paste || pasted_since_render >= 4096) &&
+          sl_render_apply(self, render_prompt) != 0) {
         failed = 1;
         done = 1;
       }
+      if (!impl->bracketed_paste || pasted_since_render >= 4096)
+        pasted_since_render = 0;
       continue;
     }
     action = SL_KEY_ACTION_PASS;
@@ -6817,10 +6919,6 @@ static char *sl_readline_impl(sl_t *self, const char *prompt,
                             ? search.prompt
                             : prompt;
         impl->active_prompt = render_prompt;
-        if (sl_render_apply(self, render_prompt) != 0) {
-          failed = 1;
-          done = 1;
-        }
       }
       break;
     default:
@@ -7111,6 +7209,7 @@ static char *sl_readline_impl(sl_t *self, const char *prompt,
       }
       case SL_KEY_PASTE_BEGIN:
         impl->bracketed_paste = 1;
+        pasted_since_render = 0;
         break;
       case SL_KEY_PASTE_END:
         impl->bracketed_paste = 0;
@@ -7286,9 +7385,15 @@ static char *sl_readline_impl(sl_t *self, const char *prompt,
     render_prompt =
         impl->history_search_active && search.prompt ? search.prompt : prompt;
     impl->active_prompt = render_prompt;
-    if (!done && sl_render_apply(self, render_prompt) != 0) {
-      failed = 1;
-      done = 1;
+    /* Deferred keys leave the draft unchanged. Keep callbacks live but
+     * coalesce frame construction, as for a large bracketed paste. A real
+     * idle tick still redraws even below this bounded batch. */
+    if (!done && (!deferred_input || deferred_since_render >= 4096)) {
+      if (sl_render_apply(self, render_prompt) != 0) {
+        failed = 1;
+        done = 1;
+      }
+      deferred_since_render = 0;
     }
   }
   sl_edit_end(&impl->edit);
@@ -7736,10 +7841,10 @@ static int sl_prompt_queue_insert_mode(sl_t *self, size_t index,
   if (sl_prompt_queue_require_enabled(self, impl) != SL_OK)
     return SL_ERROR_INVALID;
   if (!text || text[0] == '\0' || (held != 0 && held != 1) ||
+      strlen(text) > impl->line_max_len ||
       !sl_prompt_queue_index_valid(index, impl->prompt_queue.len, 1)) {
-    sl_set_error(
-        self,
-        "prompt queue insertion requires nonempty text and a valid index");
+    sl_set_error(self, "prompt queue insertion requires text within the line "
+                       "limit and a valid index");
     return SL_ERROR_INVALID;
   }
   rc = sl_prompt_queue_insert_raw(impl, (int)index, text, mode, held, 0);
@@ -7824,11 +7929,10 @@ static int sl_prompt_queue_replace_method(sl_t *self, size_t index,
     return sl_backend_unsupported(self);
   if (sl_prompt_queue_require_enabled(self, impl) != SL_OK)
     return SL_ERROR_INVALID;
-  if (!text || text[0] == '\0' ||
+  if (!text || text[0] == '\0' || strlen(text) > impl->line_max_len ||
       !sl_prompt_queue_index_valid(index, impl->prompt_queue.len, 0)) {
-    sl_set_error(
-        self,
-        "prompt queue replacement requires nonempty text and a valid index");
+    sl_set_error(self, "prompt queue replacement requires text within the line "
+                       "limit and a valid index");
     return SL_ERROR_INVALID;
   }
   rc = sl_prompt_queue_replace_raw(impl, (int)index, text);

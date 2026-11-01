@@ -23,7 +23,7 @@
     }                                                                          \
   } while (0)
 typedef struct record {
-  char id[128], revision[128], token[128], text[4097];
+  char id[128], revision[128], token[128], text[DEMO_PROMPT_MAX + 1];
   int held, edit_held;
 } record_t;
 typedef struct peer {
@@ -232,6 +232,59 @@ static int call_id(peer_t *p, sl_queue_request_t *r, unsigned long id) {
 }
 static int call(peer_t *p, sl_queue_request_t *r) {
   return call_id(p, r, ++p->serial);
+}
+static int large_owner_case(peer_t *p, unsigned short port) {
+  sl_queue_request_t r;
+  sl_config_t config;
+  size_t i;
+  char id[128], revision[128], token[128];
+  char *text = malloc(DEMO_PROMPT_MAX + 2);
+  CHECK(text);
+  sl_config_init(&config);
+  CHECK(config.line_max_len == DEMO_PROMPT_MAX);
+  memset(text, 'x', DEMO_PROMPT_MAX + 1);
+  text[DEMO_PROMPT_MAX] = 0;
+  CHECK(!attach(p, port, "large-controller"));
+  memset(&r, 0, sizeof(r));
+  r.operation = SL_QUEUE_OFFER;
+  r.text = text;
+  r.enabled = 1;
+  CHECK(!call(p, &r) && p->status == SL_QUEUE_ACCEPTED && p->count == 1);
+  CHECK(!strcmp(text, p->entries[0].text));
+  copy(id, sizeof(id), p->entries[0].id);
+  copy(revision, sizeof(revision), p->entries[0].revision);
+  r.operation = SL_QUEUE_BEGIN_EDIT;
+  r.item_id = id;
+  r.item_revision = revision;
+  CHECK(!call(p, &r) && p->status == SL_QUEUE_ACCEPTED);
+  copy(token, sizeof(token), p->result_token);
+  copy(revision, sizeof(revision), p->entries[0].revision);
+  r.operation = SL_QUEUE_END_EDIT;
+  r.item_revision = revision;
+  r.edit_token = token;
+  text[0] = 'Y';
+  CHECK(!call(p, &r) && p->status == SL_QUEUE_ACCEPTED);
+  CHECK(!strcmp(p->entries[0].id, id) && !strcmp(p->entries[0].text, text));
+  memset(&r, 0, sizeof(r));
+  r.operation = SL_QUEUE_OFFER;
+  r.text = text;
+  r.enabled = 1;
+  text[DEMO_PROMPT_MAX] = 'x';
+  text[DEMO_PROMPT_MAX + 1] = 0;
+  CHECK(!call(p, &r) && p->status == SL_QUEUE_REJECTED && p->count == 1);
+  text[DEMO_PROMPT_MAX] = 0;
+  for (i = 1; i < DEMO_ITEM_MAX; ++i)
+    CHECK(!call(p, &r) && p->status == SL_QUEUE_ACCEPTED && p->count == i + 1);
+  demo_link_close(&p->link);
+  CHECK(!attach(p, port, "large-controller") && p->count == DEMO_ITEM_MAX);
+  for (i = 0; i < p->count; ++i)
+    CHECK(p->entries[i].held && !strcmp(p->entries[i].text, text));
+  memset(&r, 0, sizeof(r));
+  r.operation = SL_QUEUE_CLEAR;
+  CHECK(!call(p, &r) && p->status == SL_QUEUE_ACCEPTED && !p->count);
+  demo_link_close(&p->link);
+  free(text);
+  return 0;
 }
 static int owner_cases(peer_t *p, unsigned short port) {
   sl_queue_request_t r;
@@ -629,6 +682,11 @@ static int shell_case(peer_t *p, unsigned short port) {
   size_t before;
   p->serial = 0;
   CHECK(!attach(p, port, "shell-controller"));
+  /* The previous live-editor case returns after the final visible words,
+   * before its trailing newline/end event necessarily reaches the owner.
+   * Start this seam test with its own response, not that finishing turn. */
+  while (p->active)
+    CHECK(!receive(p));
   memset(&request, 0, sizeof(request));
   request.operation = SL_QUEUE_CLEAR;
   CHECK(!call(p, &request) && p->status == SL_QUEUE_ACCEPTED);
@@ -725,7 +783,9 @@ int main(int argc, char **argv) {
   CHECK(p);
   demo_link_init(&p->link, -1);
   signal(SIGPIPE, SIG_IGN);
-  result = owner_cases(p, (unsigned short)port);
+  result = large_owner_case(p, (unsigned short)port);
+  if (!result)
+    result = owner_cases(p, (unsigned short)port);
   if (!result)
     result = frontend_case(p, (unsigned short)port);
   if (!result)

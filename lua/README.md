@@ -46,7 +46,7 @@ fields are:
 - `status_busy`
 - `status_idle_marker`
 - `history_max_len`
-- `line_max_len`
+- `line_max_len` (complete draft limit in UTF-8 bytes; default 131072 / 128 KiB)
 
 Each handle owns its buffer, cursor, history, prompt state, and diagnostics.
 Call `sl:close()` when done; the Lua finalizer also closes an unclosed handle.
