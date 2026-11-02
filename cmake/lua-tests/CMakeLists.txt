@@ -24,7 +24,7 @@ set_tests_properties(lua_runtime PROPERTIES ENVIRONMENT
 add_test(NAME lua_smoke COMMAND "${SOFTLINE_LUA_EXECUTABLE}" "${root}/tests/lua_smoke.lua")
 add_test(NAME lua_osc8 COMMAND "${SOFTLINE_LUA_EXECUTABLE}" "${root}/tests/lua_osc8.lua")
 add_test(NAME lua_queue_backend COMMAND "${SOFTLINE_LUA_EXECUTABLE}" "${root}/tests/lua_queue_backend.lua")
-foreach(mode history_auto readline simple chat)
+foreach(mode history_auto readline simple chat packaged)
   add_test(NAME "lua_console_${mode}" COMMAND "${BASH_EXECUTABLE}"
     "${root}/tests/check_lua_console.sh" "${SOFTLINE_LUA_EXECUTABLE}" "${root}" "${mode}")
 endforeach()

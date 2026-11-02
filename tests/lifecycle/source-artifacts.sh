@@ -9,12 +9,13 @@ mkdir -p "$fixture"
 # An extracted-source context supplies its own manifest, even below a checkout.
 files=(LICENSE README.md softline.rockspec.in lua/README.md lua/softline_lua.c
   lua/softline_queue_backend_lua.h
+  lua/softline_terminal_lua.h
   cmake/softline_workspace.cmake scripts/require-workspace.sh
   scripts/package-source.sh scripts/extract-release-source.sh scripts/release_lua_artifacts.sh scripts/stage_lua_rock_sources.sh
   scripts/build_lua_rock.sh scripts/require-host-bash.sh scripts/release_version.sh
   scripts/render_release_rockspec.sh scripts/render_lua_rockspec.sh
   include/softline/softline.h tests/lua_smoke.lua tests/lua_readline.lua
-  tests/lua_watch_file_gc.lua examples/simple.lua examples/chat.lua)
+  tests/lua_watch_file_gc.lua examples/simple.lua examples/chat.lua examples/completion.lua)
 for file in "${files[@]}"; do
   mkdir -p "$fixture/$(dirname "$file")"
   cp -p "$root/$file" "$fixture/$file"
