@@ -726,6 +726,9 @@ word while preserving subsequent unrelated text. A complete already-present
 phrase suffix is reused. Expansion is one undoable edit, separate from adjacent
 typing, and retains queue/approval identity, holds and order. An expansion over
 the draft limit leaves the draft/cursor unchanged and consumes Tab with a bell.
+If reused phrase bytes join an existing combining-mark or emoji continuation,
+the cursor advances past the resulting whole cluster; those existing bytes are
+preserved. Subsequent movement, deletion and undo keep their cluster semantics.
 
 A live `T ` preview above the queue/approval/status area displays the matching
 full strings, wrapping at words. At most three candidates and six physical

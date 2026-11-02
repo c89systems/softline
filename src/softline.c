@@ -3230,6 +3230,7 @@ static int sl_current_completion(sl_impl_t *impl,
   }
   return match->count > 1 || match->common > impl->cursor - match->start ||
          (impl->cursor < impl->len &&
+          !sl_completion_space((unsigned char)impl->buf[impl->cursor - 1]) &&
           !sl_completion_space((unsigned char)impl->buf[impl->cursor]));
 }
 
@@ -6764,7 +6765,14 @@ static int sl_complete_draft(sl_t *self) {
     sl_prompt_queue_bell(impl);
     return 1;
   }
-  impl->cursor = match.start + match.common;
+  /* Reused bytes can end before a combining mark or ZWJ continuation already
+   * in the draft. Place the cursor after the resulting whole cluster, not at
+   * the standalone candidate's byte endpoint. */
+  end = match.start + match.common;
+  impl->cursor = sl_utf8_clamp_cluster_boundary(impl->buf, impl->len, end);
+  if (impl->cursor < end)
+    impl->cursor +=
+        sl_utf8_next_cluster_len(impl->buf, impl->len, impl->cursor);
   impl->preferred_column_valid = 0;
   impl->edit.yank_valid = 0;
   return 1;
