@@ -519,6 +519,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND TARGET example_chat)
       set_tests_properties(softline_terminal_readline_resize PROPERTIES ENVIRONMENT "${terminal_test_environment}")
       set_tests_properties(softline_terminal_readline_resize PROPERTIES
         LABELS "integration" TIMEOUT 40)
+      add_test(NAME softline_completion_finish COMMAND "${SOFTLINE_TEST_XVFB_RUN}" -a
+        "$<TARGET_FILE:test_vte_editor>" "$<TARGET_FILE:editor_resize_fixture>" completion-finish)
+      set_tests_properties(softline_completion_finish PROPERTIES
+        ENVIRONMENT "${terminal_test_environment}" LABELS "integration;editing;completion" TIMEOUT 10)
       add_test(NAME softline_terminal_prompt_themes COMMAND "${SOFTLINE_TEST_XVFB_RUN}" -a
         "$<TARGET_FILE:test_vte_editor>" "$<TARGET_FILE:editor_resize_fixture>" themes)
       set_tests_properties(softline_terminal_prompt_themes PROPERTIES

@@ -4,7 +4,7 @@
 /* Native terminal output state: cursor, geometry and bounded parser state.
  * Transcript cells are owned exclusively by the terminal. */
 typedef struct sl_surface sl_surface_t;
-sl_surface_t *sl_surface_create_validator(void);
+sl_surface_t *sl_surface_create_validator(int fd);
 sl_surface_t *sl_surface_create_native(int fd, int width, int height, int row,
                                        int col, int history_rows);
 int sl_surface_is_native(const sl_surface_t *surface);

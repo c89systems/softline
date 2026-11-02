@@ -68,6 +68,19 @@ int main(int argc, char **argv) {
   if (!sl || sl_set_prompt_theme(sl, SL_PROMPT_THEME_PLAIN) != SL_OK ||
       sl_bind_key(sl, SL_KEY_ALT_M, barrier, &serial) != SL_OK)
     return 1;
+  if (argc == 2 && !strcmp(argv[1], "--completion")) {
+    sl_completion_t item = {"hello world and a very long suggestion",
+                            SL_COMPLETION_START};
+    if (sl_set_completions(sl, &item, 1) != SL_OK)
+      return 1;
+    line = sl_readline(sl, "softline> ");
+    if (!line)
+      return 1;
+    printf("submitted: %s\nHOST_AFTER\n", line);
+    sl_free_string(sl, line);
+    sl_destroy(sl);
+    return 0;
+  }
   if (argc == 2 && (!strcmp(argv[1], "--viewport") ||
                     !strcmp(argv[1], "--viewport-native"))) {
     int native = !strcmp(argv[1], "--viewport-native");

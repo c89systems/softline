@@ -1,6 +1,7 @@
 #define _DEFAULT_SOURCE
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <pty.h>
 #include <softline/softline.h>
 #include <stdio.h>
@@ -348,7 +349,56 @@ static int native_scope(void) {
   return 0;
 }
 
+static int redirected_teardown(int partial) {
+  int master, slave, input[2];
+  struct winsize size = {12, 40, 0, 0};
+  sl_config_t config;
+  sl_t *sl;
+  char bytes[1024];
+  size_t used = 0;
+  ssize_t count;
+  CHECK(!openpty(&master, &slave, NULL, NULL, &size) && !pipe(input));
+  CHECK(fcntl(master, F_SETFL, O_NONBLOCK) == 0);
+  sl_config_init(&config);
+  config.input_fd = input[0];
+  config.output_fd = slave;
+  config.osc8_mode = SL_OSC8_ON;
+  sl = sl_create_with_config(&config);
+  CHECK(sl && sl_output_stream_begin(sl) == SL_OK);
+  CHECK(sl_output_stream_write(
+            sl, "\033]8;;https://example.org\007LABEL",
+            strlen("\033]8;;https://example.org\007LABEL")) == SL_OK);
+  if (partial) {
+    const char *fragment = partial == 1 ? "\033]8;;unfinished" : "\033[3";
+    CHECK(sl_output_stream_write(sl, fragment, strlen(fragment)) == SL_OK);
+    CHECK(sl_output_stream_end(sl) == SL_ERROR_INVALID);
+  }
+  sl_destroy(sl);
+  CHECK(write(slave, "HOST_AFTER", 10) == 10);
+  /* A PTY can deliver the final write after an earlier readable prefix. */
+  bytes[0] = '\0';
+  while (!strstr(bytes, "HOST_AFTER")) {
+    struct pollfd fd;
+    fd.fd = master;
+    fd.events = POLLIN;
+    CHECK(poll(&fd, 1, 1000) > 0);
+    while ((count = read(master, bytes + used, sizeof(bytes) - 1 - used)) > 0)
+      used += (size_t)count;
+    bytes[used] = '\0';
+    if (strstr(bytes, "HOST_AFTER"))
+      break;
+  }
+  CHECK(scope_at(bytes, "LABEL", 1) && scope_at(bytes, "HOST_AFTER", 0));
+  CHECK(!strstr(bytes, "unfinished") && !strstr(bytes, "\033[3"));
+  close(master);
+  close(slave);
+  close(input[0]);
+  close(input[1]);
+  return 0;
+}
+
 int main(void) {
   return detection() || split_controls() || reject_controls() ||
-         limits_and_spacing() || native_scope();
+         limits_and_spacing() || native_scope() || redirected_teardown(0) ||
+         redirected_teardown(1) || redirected_teardown(2);
 }

@@ -730,7 +730,8 @@ before returning to editor UI, and reopen it for the next producer fragment.
 The URI and `id` parameters survive fragment boundaries. Queue, approval,
 reasoning, status, input and ghost text are outside producer links. Quoted user
 prompts close the producer link as a new output record. Redirected feeds retain
-raw producer controls and close any unfinished link when the stream ends.
+raw producer controls and close any unfinished link when the stream ends or
+the handle is destroyed, including after an incomplete-control error.
 Ordinary finite `print_above()` without a native surface retains its existing
 raw host-output behavior; this policy is for validated feeds.
 

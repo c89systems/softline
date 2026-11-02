@@ -457,6 +457,30 @@ cleanup:
   return failed || errors;
 }
 
+static int completion_finish(const char *fixture) {
+  struct editor e;
+  struct snapshot current;
+  int failed = 1;
+  if (start_editor(&e, fixture, 16, "", "h", "", "--completion"))
+    goto cleanup;
+  current = transcript(&e.screen);
+  if (!strstr(current.text, "world"))
+    goto cleanup;
+  v.send(e.screen.terminal, "\r", 1);
+  if (wait_marker(&e, "HOST_AFTER"))
+    goto cleanup;
+  current = transcript(&e.screen);
+  if (strstr(current.text, "world") || strstr(current.text, "suggestion") ||
+      !strstr(current.text, "softline> h\nsubmitted: h\nHOST_AFTER\n")) {
+    fprintf(stderr, "Ghost survived editor finish:\n%s\n", current.text);
+    goto cleanup;
+  }
+  failed = 0;
+cleanup:
+  stop_editor(&e);
+  return failed || errors;
+}
+
 int main(int argc, char **argv) {
   const char *sources[] = {
       "one two three four", "alpha beta gamma delta epsilon zeta eta",
@@ -466,6 +490,8 @@ int main(int argc, char **argv) {
   int filled;
   if ((argc != 2 && argc != 3) || load())
     return 2;
+  if (argc == 3 && !strcmp(argv[2], "completion-finish"))
+    return completion_finish(argv[1]);
   if (argc == 3 && !strcmp(argv[2], "viewport"))
     return case_viewport(argv[1], 0) || case_viewport(argv[1], 1);
   if (argc == 3 && !strcmp(argv[2], "themes")) {

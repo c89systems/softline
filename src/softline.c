@@ -1249,6 +1249,7 @@ static int sl_buf_set(sl_t *self, const char *s) {
   /* A recalled/queued draft is a new editing context, not an undoable
    * mutation of the previous entry's identity. Public set_buffer is journaled.
    */
+  sl_completion_cycle_clear(&impl->completion_cycle);
   if (!impl->history_search_active)
     sl_edit_clear_undo(&impl->edit);
   if (n > 0)
@@ -3241,7 +3242,8 @@ static int sl_render_project_input(sl_t *self, sl_render_t *render) {
   render->input = impl->buf;
   render->input_len = impl->len;
   render->input_cursor = impl->cursor;
-  if (impl->completion_cycle.original || !sl_current_completion(impl, &match))
+  if (!impl->active_readline || impl->completion_cycle.original ||
+      !sl_current_completion(impl, &match))
     return 0;
   item = &impl->completions.items[match.first];
   prefix = impl->cursor - match.start;
@@ -4767,7 +4769,7 @@ static int sl_output_stream_begin_method(sl_t *self) {
     sl_surface_destroy(previous_surface);
     impl->output_surface = NULL;
     previous_surface = NULL;
-    impl->output_surface = sl_surface_create_validator();
+    impl->output_surface = sl_surface_create_validator(impl->output_fd);
     sl_surface_set_osc8(impl->output_surface, impl->osc8.enabled);
     if (!impl->output_surface) {
       sl_set_error(self, "failed to create live output validator");

@@ -39,7 +39,7 @@ static const sl_completion_t candidates[] = {
     {"e\314\200tre", SL_COMPLETION_WORD}};
 
 struct driver {
-  int master, calls;
+  int master, calls, phase;
   const char *initial, *keys;
   size_t cursor;
 };
@@ -50,8 +50,17 @@ enum scenario {
   COPIED_LIST,
   CLEARED_LIST,
   CLUSTER_FIRST,
-  CLUSTER_LAST
+  CLUSTER_LAST,
+  HOST_ENQUEUE
 };
+static void enqueue_completed(sl_t *sl, void *data) {
+  struct driver *d = data;
+  if (!d->phase && !strcmp(sl_buffer(sl), "/status")) {
+    d->phase = sl_prompt_queue_enqueue_draft(sl) == SL_OK ? 1 : -1;
+    if (write(d->master, "\t\r", 2) != 2)
+      d->phase = -1;
+  }
+}
 static int host_tab(sl_t *sl, sl_key_t key, void *data,
                     sl_key_action_t *action) {
   struct driver *d = data;
@@ -120,6 +129,8 @@ static int run(int native, const char *initial, size_t cursor, const char *keys,
   d.initial = initial;
   d.cursor = cursor;
   d.keys = keys;
+  if (scenario == HOST_ENQUEUE)
+    CHECK(sl_set_idle_callback(sl, enqueue_completed, &d) == SL_OK);
   if (scenario != QUEUE_TAB)
     CHECK(sl_bind_key(sl, SL_KEY_TAB, host_tab, &d) == SL_OK);
   if (scenario == COPIED_LIST) {
@@ -166,6 +177,12 @@ static int run(int native, const char *initial, size_t cursor, const char *keys,
     return 1;
   }
   sl_free_string(sl, line);
+  if (scenario == HOST_ENQUEUE) {
+    CHECK(d.phase == 1 && sl_prompt_queue_count(sl) == 1);
+    CHECK(sl_prompt_queue_peek(sl, 0, &line) == SL_OK);
+    CHECK(!strcmp(line, "/status"));
+    sl_free_string(sl, line);
+  }
   if (scenario == QUEUE_TAB) {
     CHECK(sl_prompt_queue_count(sl) == (*expected ? 0u : 1u));
     if (!*expected) {
@@ -255,6 +272,7 @@ int main(void) {
     CHECK(!run(native, "ca", 2, "\t\r", "cafe\314\201x", 0, 131072,
                CLUSTER_FIRST));
     CHECK(!run(native, "ca", 2, "\t\r", "cafet", 0, 131072, CLUSTER_LAST));
+    CHECK(!run(native, "/", 1, "\t", "#", 1, 131072, HOST_ENQUEUE));
     {
       char *initial = malloc(50005), *expected = malloc(50014);
       CHECK(initial && expected);

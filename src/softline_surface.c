@@ -361,8 +361,11 @@ static int sl_surface_byte(sl_surface_t *surface, unsigned char byte,
   return 0;
 }
 
-sl_surface_t *sl_surface_create_validator(void) {
-  return (sl_surface_t *)calloc(1, sizeof(sl_surface_t));
+sl_surface_t *sl_surface_create_validator(int fd) {
+  sl_surface_t *surface = calloc(1, sizeof(*surface));
+  if (surface)
+    surface->fd = fd;
+  return surface;
 }
 
 int sl_surface_is_native(const sl_surface_t *surface) {
@@ -417,7 +420,7 @@ static int sl_surface_style(const sl_surface_t *surface, char *seq,
 
 sl_surface_t *sl_surface_create_native(int fd, int width, int height, int row,
                                        int col, int history_rows) {
-  sl_surface_t *surface = sl_surface_create_validator();
+  sl_surface_t *surface = sl_surface_create_validator(fd);
   struct winsize terminal;
   char seq[128];
   int count, shift;
@@ -722,6 +725,7 @@ int sl_surface_native_finish(sl_surface_t *surface, int prompt_row) {
       SL_ROW(surface) >= surface->terminal_rows - 1)
     sl_surface_native_history_shift(surface, -1);
   surface->native_stream = 0;
+  surface->osc8_open = 0;
   return 0;
 }
 
@@ -730,6 +734,8 @@ void sl_surface_destroy(sl_surface_t *surface) {
     return;
   if (surface->native_stream)
     (void)sl_surface_native_finish(surface, -1);
+  else if (surface->osc8_open)
+    (void)sl_surface_write_all(surface->fd, "\033]8;;\033\\", 7);
   free(surface->hyperlink);
   free(surface);
 }
