@@ -788,13 +788,23 @@ static int set_prompt_theme_from_environment(sl_t *sl) {
 static void report_failure(struct chat_state *state, const char *operation) {
   const char *softline_error;
   const char *mdf_error;
+  int flags = -1;
   softline_error = state->sl ? sl_last_error(state->sl) : NULL;
   mdf_error = state->response_renderer
                   ? state->response_renderer->error(state->response_renderer)
                   : NULL;
+  /* A fatal diagnostic must not turn bounded terminal failure into another
+   * blocking write to the same saturated terminal. */
+  if (isatty(STDERR_FILENO)) {
+    flags = fcntl(STDERR_FILENO, F_GETFL);
+    if (flags < 0 || fcntl(STDERR_FILENO, F_SETFL, flags | O_NONBLOCK))
+      return;
+  }
   fprintf(stderr, "chat %s failed: %s%s%s\n", operation,
           softline_error ? softline_error : "unknown error",
           mdf_error ? "; libmdf: " : "", mdf_error ? mdf_error : "");
+  if (flags >= 0)
+    (void)fcntl(STDERR_FILENO, F_SETFL, flags);
 }
 
 static int remote_event(void *context, int kind, const char *text) {

@@ -109,6 +109,9 @@ typedef int (*sl_terminal_callback_t)(void *context,
  * SL_TERMINAL_ESCAPED on escape, or an SL_ERROR_* value. Adapter callbacks must
  * not block. Bounded input overflow fails explicitly instead of growing memory.
  * Pending output is discarded on cancellation/failure. No receiver ABI change.
+ * If terminal output prevents teardown/reacquisition, return SL_ERROR_IO with
+ * input modes released and the output session closed. The editor continuation
+ * remains intact; reopen with sl_output_stream_begin() when output is writable.
  */
 int sl_terminal_handoff(sl_t *self, sl_terminal_callback_t callback,
                         void *context);

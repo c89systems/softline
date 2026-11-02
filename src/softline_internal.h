@@ -238,6 +238,7 @@ typedef struct sl_impl {
 
 void sl_terminal_reap(sl_impl_t *impl);
 void sl_terminal_cleanup(sl_impl_t *impl);
+void sl_terminal_abandon(sl_t *self);
 
 /* Internal editor/cache operations shared with the transport-independent queue
  * adapter. These are not application queue admission or consumption seams. */

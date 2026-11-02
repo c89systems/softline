@@ -795,6 +795,12 @@ terminal restoration and the close callback. The function keeps the callback
 rooted during handoff. Reentry, including `sl:close()`, is forbidden. Neither
 function adds a receiver method or changes the receiver ABI.
 
+If physical terminal output prevents session restoration, the function returns
+`nil, softline.ERROR_IO` promptly with input modes released and the output
+session closed. The draft and editing continuation remain intact. Reopen with
+`sl:output_stream_begin()` once output is writable; no terminal drainage is
+required before the failed handoff returns.
+
 The callback takes one event table, borrows it for that invocation, and returns
 a result table. `operation` is one of `softline.TERMINAL_OPEN`,
 `softline.TERMINAL_STEP`, `softline.TERMINAL_READ`, `softline.TERMINAL_WRITE`,

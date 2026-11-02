@@ -94,6 +94,12 @@ geometry, begin the existing output session and resume the preserved editor.
 Report setup, transport or shell failures without discarding the draft. If the
 local terminal itself is unusable, perform cleanup and return an explicit error
 rather than claiming successful restoration.
+Output-session teardown and reacquisition remain nonblocking, including after
+escape. If the terminal cannot accept the required controls, return
+`SL_ERROR_IO`, release input modes and discard the unusable UI surface. Retain
+the editor continuation; the host may reopen the output session when writable.
+Do not wait for terminal drainage. Cancelling a local PTY terminates its current
+foreground job group as well as the shell group before closing the master.
 
 ## Escape from a hung session
 

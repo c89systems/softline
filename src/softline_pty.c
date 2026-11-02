@@ -45,19 +45,34 @@ static void child_fail(int fd, unsigned char status) {
   (void)write(fd, &status, 1);
   _exit(status);
 }
+/* Child stdio duplication must not overwrite the exec-status pipe when the
+ * embedding process has closed one or more of descriptors 0, 1 and 2. */
+static int private_fd(int fd) {
+  if (fd < 0)
+    return -1;
+  if (fd < 3) {
+    int moved = fcntl(fd, F_DUPFD_CLOEXEC, 3);
+    close(fd);
+    return moved;
+  }
+  if (fcntl(fd, F_SETFD, FD_CLOEXEC)) {
+    close(fd);
+    return -1;
+  }
+  return fd;
+}
 static int pty_open(sl_pty_t *p, sl_terminal_event_t *e) {
   int slave;
   int started[2];
   char path[256];
   long limit = sysconf(_SC_OPEN_MAX);
   struct winsize size;
-  p->fd = posix_openpt(O_RDWR | O_NOCTTY | O_NONBLOCK);
+  p->fd = private_fd(posix_openpt(O_RDWR | O_NOCTTY | O_NONBLOCK));
   p->status = -1;
   if (p->fd < 0 || grantpt(p->fd) || unlockpt(p->fd))
     return SL_ERROR_IO;
   if (ptsname_r(p->fd, path, sizeof(path)))
     return SL_ERROR_IO;
-  (void)fcntl(p->fd, F_SETFD, FD_CLOEXEC);
   memset(&size, 0, sizeof(size));
   size.ws_row = (unsigned short)e->rows;
   size.ws_col = (unsigned short)e->columns;
@@ -65,11 +80,12 @@ static int pty_open(sl_pty_t *p, sl_terminal_event_t *e) {
     return SL_ERROR_IO;
   if (pipe(started))
     return SL_ERROR_IO;
-  p->exec_fd = started[0];
-  if (fcntl(started[0], F_SETFL, O_NONBLOCK) ||
-      fcntl(started[0], F_SETFD, FD_CLOEXEC) ||
-      fcntl(started[1], F_SETFD, FD_CLOEXEC)) {
-    close(started[1]);
+  p->exec_fd = private_fd(started[0]);
+  started[1] = private_fd(started[1]);
+  if (p->exec_fd < 0 || started[1] < 0 ||
+      fcntl(p->exec_fd, F_SETFL, O_NONBLOCK)) {
+    if (started[1] >= 0)
+      close(started[1]);
     return SL_ERROR_IO;
   }
   p->pid = fork();
@@ -178,6 +194,11 @@ int sl_pty_callback(void *context, sl_terminal_event_t *e) {
     size.ws_col = (unsigned short)e->columns;
     return ioctl(p->fd, TIOCSWINSZ, &size) ? SL_ERROR_IO : SL_OK;
   case SL_TERMINAL_CLOSE:
+    if (p->fd >= 0) {
+      pid_t foreground = tcgetpgrp(p->fd);
+      if (foreground > 0 && foreground != p->pid && foreground != getpgrp())
+        (void)kill(-foreground, SIGKILL);
+    }
     if (p->exec_fd >= 0)
       close(p->exec_fd);
     p->exec_fd = -1;

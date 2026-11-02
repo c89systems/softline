@@ -28,6 +28,7 @@ local worker_pid
 local watch_id
 local dispatch_next_queued
 local stream_open = false
+local terminal_unavailable = false
 
 local function is_shell_command(line)
   return line == "!sh" or line == "/shell"
@@ -96,10 +97,15 @@ local function run_shell(preserve_draft)
   stream_open = false
   local ok, status, escaped = softline.terminal_local(sl)
   stream_open = true
+  local message
   if not ok then
-    assert(sl:output_stream_write("shell handoff failed (" .. tostring(status) .. ")\n"))
+    message = "shell handoff failed (" .. tostring(status) .. ")\n"
   elseif status > 0 and not escaped then
-    assert(sl:output_stream_write("shell exited unsuccessfully (exit " .. tostring(status) .. ")\n"))
+    message = "shell exited unsuccessfully (exit " .. tostring(status) .. ")\n"
+  end
+  if message and not sl:output_stream_write(message) then
+    terminal_unavailable = true
+    error("terminal output unavailable")
   end
   if not preserve_draft then
     assert(sl:set_status_message_prefix(""))
@@ -369,6 +375,6 @@ if sl then
   sl:close()
 end
 if not ok then
-  io.stderr:write(err, "\n")
+  if not terminal_unavailable then io.stderr:write(err, "\n") end
   os.exit(1)
 end

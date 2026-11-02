@@ -1120,7 +1120,8 @@ static int sl_enable_raw(sl_t *self) {
   raw.c_lflag &= ~(ECHO | ICANON | IEXTEN | ISIG);
   raw.c_cc[VMIN] = 0;
   raw.c_cc[VTIME] = 1;
-  if (tcsetattr(impl->input_fd, TCSAFLUSH, &raw) != 0) {
+  if (tcsetattr(impl->input_fd, impl->terminal_active ? TCSANOW : TCSAFLUSH,
+                &raw) != 0) {
     sl_set_error(self, "failed to enable terminal raw mode");
     return -1;
   }
@@ -1156,7 +1157,8 @@ static void sl_disable_raw(sl_t *self) {
   impl = sl_impl(self);
   if (!impl || !impl->raw_active)
     return;
-  (void)tcsetattr(impl->input_fd, TCSAFLUSH, &impl->original_termios);
+  (void)tcsetattr(impl->input_fd, impl->terminal_active ? TCSANOW : TCSAFLUSH,
+                  &impl->original_termios);
   if (impl->output_oflag_changed && tcgetattr(impl->output_fd, &output) == 0) {
     output.c_oflag = impl->original_output_oflag;
     (void)tcsetattr(impl->output_fd, TCSANOW, &output);
@@ -4103,6 +4105,26 @@ static int sl_native_session_close(sl_t *self) {
   impl->output_surface = NULL;
   sl_render_store_clear(impl);
   return sl_show_cursor(impl);
+}
+
+/* A failed nonblocking handoff cannot finish drawing to an unavailable tty.
+ * Retire only UI state; the draft/undo/queue continuation stays owned here.
+ * A later begin acquires a fresh physical cursor and surface. */
+void sl_terminal_abandon(sl_t *self) {
+  sl_impl_t *impl = sl_impl(self);
+  if (!impl)
+    return;
+  sl_disable_raw(self);
+  sl_surface_destroy(impl->output_surface);
+  impl->output_surface = NULL;
+  impl->output_stream_active = 0;
+  impl->auto_scroll_pinned = 0;
+  impl->native_cursor_valid = 0;
+  impl->cursor_hidden = 0;
+  sl_render_store_clear(impl);
+  sl_set_error(
+      self,
+      "terminal output unavailable; reopen the output session when writable");
 }
 
 static int sl_render_finish(sl_t *self, int queue_dispatch) {

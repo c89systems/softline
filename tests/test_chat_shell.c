@@ -1,5 +1,7 @@
+#define _XOPEN_SOURCE 700
 #include "console_pty.h"
 #include <dirent.h>
+#include <fcntl.h>
 #include <sys/stat.h>
 
 static int fixture_shell(int argc, char **argv) {
@@ -212,6 +214,63 @@ static int escape_hung_shell(const char *shell) {
   REQUIRE(quit(&e) == 0);
 cleanup:
   close_editor(&e);
+  return failed;
+}
+static int terminal_failure(void) {
+  struct editor *probe = calloc(1, sizeof(*probe));
+  int fd = -1, failed = 1, status = 0;
+  struct termios attrs;
+  char bytes[2048];
+  char *path;
+  double until;
+  pid_t exited = 0;
+  if (!probe)
+    return 1;
+  probe->child = probe->master = -1;
+  test_no_flow = 1;
+  if (start(probe, "examples/chat.lua", NULL, NULL) || prompt(probe, 0) ||
+      send_bytes(probe, "\033s") || wait_for(probe, "SHELL_READY", 0))
+    goto cleanup;
+  path = ptsname(probe->master);
+  if (!path || (fd = open(path, O_WRONLY | O_NOCTTY | O_NONBLOCK)) < 0)
+    goto cleanup;
+  memset(bytes, 'x', sizeof(bytes));
+  if (tcflow(fd, TCOOFF))
+    goto cleanup;
+  while (write(fd, bytes, sizeof(bytes)) > 0) {
+  }
+  if (errno != EAGAIN && errno != EWOULDBLOCK)
+    goto cleanup;
+  if (send_bytes(probe, "~."))
+    goto cleanup;
+  /* Keep output unread: even fatal error reporting must not undo the relay's
+   * bounded cancellation. */
+  until = now() + 1.0;
+  do {
+    exited = waitpid(probe->child, &status, WNOHANG);
+    if (exited)
+      break;
+    (void)poll(NULL, 0, 5);
+  } while (now() < until);
+  if (exited != probe->child)
+    goto cleanup;
+  probe->child = -1;
+  if (!WIFEXITED(status) || WEXITSTATUS(status) != 1 ||
+      tcgetattr(probe->master, &attrs) || !(attrs.c_lflag & ICANON) ||
+      !(attrs.c_lflag & ECHO))
+    goto cleanup;
+  failed = 0;
+cleanup:
+  if (fd >= 0) {
+    (void)tcflow(fd, TCOON);
+    close(fd);
+  }
+  test_no_flow = 0;
+  if (failed)
+    fprintf(stderr, "Chat blocked after terminal saturation\n%.2000s\n",
+            probe->bytes);
+  close_editor(probe);
+  free(probe);
   return failed;
 }
 static int exercise(const char *shell) {
@@ -597,9 +656,12 @@ int main(int argc, char **argv) {
   if ((argc != 7 && argc != 8) ||
       (strcmp(argv[1], "c") && strcmp(argv[1], "lua") &&
        strcmp(argv[1], "remote") && strcmp(argv[1], "quiet") &&
-       strcmp(argv[1], "controls") && strcmp(argv[1], "lua-controls")))
+       strcmp(argv[1], "controls") && strcmp(argv[1], "lua-controls") &&
+       strcmp(argv[1], "pressure") && strcmp(argv[1], "lua-pressure")))
     return 2;
-  c_chat = strcmp(argv[1], "lua") != 0 && strcmp(argv[1], "lua-controls") != 0;
+  c_chat = strcmp(argv[1], "lua") != 0 &&
+           strcmp(argv[1], "lua-controls") != 0 &&
+           strcmp(argv[1], "lua-pressure") != 0;
   if (argc == 8)
     remote_owner = argv[7];
   executable = argv[2];
@@ -630,6 +692,10 @@ int main(int argc, char **argv) {
   setenv("SHELL", shell, 1);
   setenv("SOFTLINE_PROMPT_THEME", "plain", 1);
   setenv("SOFTLINE_CHAT_CHAR_MS", "50", 1);
+  if (!strcmp(argv[1], "pressure") || !strcmp(argv[1], "lua-pressure")) {
+    failed = terminal_failure();
+    goto cleanup;
+  }
   if (!strcmp(argv[1], "quiet") || !strcmp(argv[1], "controls") ||
       !strcmp(argv[1], "lua-controls")) {
     failed = connection_controls(!strcmp(argv[1], "quiet"));
@@ -642,6 +708,8 @@ int main(int argc, char **argv) {
   if (preserve_draft(shell, history_path))
     goto cleanup;
   if (escape_hung_shell(shell))
+    goto cleanup;
+  if (terminal_failure())
     goto cleanup;
   remove_files(history_dir);
   if (exercise(shell) || fallback(NULL) || fallback("") ||

@@ -30,7 +30,7 @@ static const char *executable;
 static const char *root;
 static int c_chat;
 #include "remote_chat_owner.h"
-static int test_rows = 8, test_columns = 40, test_echo;
+static int test_rows = 8, test_columns = 40, test_echo, test_no_flow;
 static int pump(struct editor *e, int timeout);
 static double now(void) {
   struct timespec t;
@@ -76,8 +76,11 @@ static int start(struct editor *e, const char *relative, const char *arg1,
     stop_remote_owner();
   if (openpty(&e->master, &slave, NULL, NULL, &size))
     return 1;
-  if (!test_echo && tcgetattr(slave, &attributes) == 0) {
-    attributes.c_lflag &= (tcflag_t)~ECHO;
+  if ((!test_echo || test_no_flow) && tcgetattr(slave, &attributes) == 0) {
+    if (!test_echo)
+      attributes.c_lflag &= (tcflag_t)~ECHO;
+    if (test_no_flow)
+      attributes.c_iflag &= (tcflag_t)~IXON;
     tcsetattr(slave, TCSANOW, &attributes);
   }
   e->child = fork();

@@ -264,15 +264,25 @@ int sl_terminal_handoff(sl_t *self, sl_terminal_callback_t callback,
   relay = calloc(1, sizeof(*relay));
   if (!relay)
     return SL_ERROR_NOMEM;
-  stream = impl->output_stream_active;
-  status = stream ? sl_output_stream_end(self) : SL_OK;
-  if (status != SL_OK) {
-    free(relay);
-    return status;
-  }
-  impl->terminal_active = 1;
   input_flags = fcntl(impl->input_fd, F_GETFL);
   output_flags = fcntl(impl->output_fd, F_GETFL);
+  if (input_flags < 0 || output_flags < 0) {
+    free(relay);
+    return SL_ERROR_IO;
+  }
+  stream = impl->output_stream_active;
+  impl->terminal_active = 1;
+  status = SL_ERROR_IO;
+  if (fcntl(impl->output_fd, F_SETFL, output_flags | O_NONBLOCK))
+    goto finished;
+  if (stream) {
+    status = sl_output_stream_end(self);
+    if (status != SL_OK) {
+      if (status == SL_ERROR_IO)
+        sl_terminal_abandon(self);
+      goto finished;
+    }
+  }
   status = SL_ERROR_IO;
   if (tcgetattr(impl->input_fd, &original) == 0 &&
       tcgetattr(impl->output_fd, &original_output) == 0) {
@@ -300,14 +310,17 @@ int sl_terminal_handoff(sl_t *self, sl_terminal_callback_t callback,
     if (restore)
       status = SL_ERROR_IO;
   }
-  if (input_flags >= 0 && fcntl(impl->input_fd, F_SETFL, input_flags))
+  if (stream && sl_output_stream_begin(self) != SL_OK) {
+    sl_terminal_abandon(self);
     status = SL_ERROR_IO;
-  if (output_flags >= 0 && fcntl(impl->output_fd, F_SETFL, output_flags))
+  }
+finished:
+  if (fcntl(impl->input_fd, F_SETFL, input_flags))
+    status = SL_ERROR_IO;
+  if (fcntl(impl->output_fd, F_SETFL, output_flags))
     status = SL_ERROR_IO;
   impl->terminal_active = 0;
   free(relay);
-  if (stream && sl_output_stream_begin(self) != SL_OK)
-    status = SL_ERROR_IO;
   return status;
 }
 int sl_terminal_local(sl_t *self, const char *shell, int *exit_status) {
