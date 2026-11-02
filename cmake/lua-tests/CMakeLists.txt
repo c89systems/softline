@@ -32,6 +32,10 @@ add_test(NAME lua_readline_edit COMMAND "${pty_test}" readline_edit "${SOFTLINE_
 add_test(NAME lua_queue_policy COMMAND "${pty_test}" policy "${SOFTLINE_LUA_EXECUTABLE}" "${root}")
 add_test(NAME lua_terminal_handoff COMMAND "${pty_test}" terminal "${SOFTLINE_LUA_EXECUTABLE}" "${root}")
 add_test(NAME lua_completion COMMAND "${pty_test}" completion "${SOFTLINE_LUA_EXECUTABLE}" "${root}")
+add_test(NAME lua_simple_completion COMMAND "${pty_test}" simple-completion "${SOFTLINE_LUA_EXECUTABLE}" "${root}")
+add_test(NAME lua_chat_completion COMMAND "${pty_test}" chat-completion "${SOFTLINE_LUA_EXECUTABLE}" "${root}")
+set_tests_properties(lua_chat_completion PROPERTIES ENVIRONMENT
+  "SOFTLINE_HISTORY_DIR=${root}/build/test-history/lua_chat_completion;SOFTLINE_PROMPT_THEME=plain;SOFTLINE_CHAT_OPERATION_STEP_MS=0")
 string(SHA256 chat_history_key "softline.examples.chat")
 add_test(NAME lua_chat_policies COMMAND "${lua_build}/test_chat_policies" lua
   "${SOFTLINE_LUA_EXECUTABLE}" "${root}" "${root}/build" "${lua_build}/test_chat_shell"

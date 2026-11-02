@@ -157,7 +157,7 @@ Currently implemented:
 
 Not currently implemented:
 
-- completion menus or completion provider APIs
+- computed/asynchronous completion provider APIs
 - inline hints, autosuggestions, or syntax highlighting
 - forward history search or history filtering hooks
 - redo, vi mode, or full readline-style command sets
@@ -190,6 +190,23 @@ waiting for a connection handshake.
 
 `example_simple` is the normal terminal prompt. Output is printed after each
 submitted line and the next prompt proceeds below it like an ordinary REPL.
+
+The C and Lua simple/multiline and chat examples all register completion lists
+and print a `Completion demo:` guide when interactive. Try them with
+`make run-simple`, `make lua-debug-simple`, any `run-chat-*` target, or
+`make lua-debug-chat`:
+
+- Type `hel`, then Tab: it expands only to `hello ` because `hello world` and
+  `hello there` still match. Type `w` or `t`, then Tab to finish the phrase.
+- Type `say ver`, then Tab: it completes `verification` after the space.
+  Ctrl-J adds a real newline; the same word completion works on that next line.
+- Type `/q`, then Tab to complete `/quit`; Enter exits.
+- Chat also completes `/app` to the common prefix of `/approve on` and
+  `/approve off`. Type `n` to finish `on`, or `f` then Tab to finish `off`.
+
+The live `T ` preview appears before Tab. These lists belong to the example
+hosts; applications using `readline()` or `next_prompt()` register their own
+with `set_completions()` / `sl_set_completions()`.
 
 `example_chat` is the C streaming Markdown demo. It links pinned libmdf 0.17.0
 only as an example dependency: libsoftline and its installed package remain

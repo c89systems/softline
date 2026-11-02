@@ -16,6 +16,16 @@ local themes = {
 }
 assert(themes[theme_name], "invalid SOFTLINE_PROMPT_THEME: " .. theme_name)
 assert(sl:set_prompt_theme(themes[theme_name]))
+assert(sl:set_completions({
+  "/quit", "hello world", "hello there",
+  {text = "verification", scope = softline.COMPLETION_WORD},
+  {text = "next steps", scope = softline.COMPLETION_WORD},
+}))
+local interactive = os.execute("test -t 0 && test -t 1")
+if interactive == true or interactive == 0 then
+  print("Completion demo: type hel, Tab, then w or t and Tab to finish.")
+  print("  Try say ver + Tab on any line; Ctrl-J adds a line; /q + Tab completes /quit.")
+end
 
 while true do
   local line, status = sl:readline("softline> ")

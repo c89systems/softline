@@ -133,6 +133,7 @@ static int run_shell(struct chat_state *state, int preserve_draft) {
 }
 
 static const sl_completion_t chat_completions[] = {
+    {"hello world", SL_COMPLETION_START},  {"hello there", SL_COMPLETION_START},
     {"/status", SL_COMPLETION_START},      {"/approve on", SL_COMPLETION_START},
     {"/approve off", SL_COMPLETION_START}, {"/steer", SL_COMPLETION_START},
     {"/resume", SL_COMPLETION_START},      {"/shell", SL_COMPLETION_START},
@@ -1007,8 +1008,13 @@ int main(int argc, char **argv) {
   }
   if (sl_set_completions(state.sl, chat_completions,
                          sizeof(chat_completions) /
-                             sizeof(chat_completions[0])) != SL_OK ||
-      sl_history_open(state.sl, "softline.examples.chat",
+                             sizeof(chat_completions[0])) != SL_OK) {
+    report_failure(&state, "completion setup");
+    sl_destroy(state.sl);
+    demo_client_destroy(state.remote);
+    return 1;
+  }
+  if (sl_history_open(state.sl, "softline.examples.chat",
                       getenv("SOFTLINE_HISTORY_DIR")) != SL_OK ||
       sl_history_set_auto_add(state.sl, 1) != SL_OK) {
     report_failure(&state, "history setup");
@@ -1080,6 +1086,15 @@ int main(int argc, char **argv) {
             "Policy demo: `/status` / `/approve` / `/steer` / `/resume`. "
             "Alt-S opens it while preserving your draft.") != 0) {
       report_failure(&state, "initial output");
+      exit_code = 1;
+      goto cleanup;
+    }
+    if (render_note(
+            &state,
+            "Completion demo: type `hel`, Tab, then `w` or `t` and Tab. "
+            "Try `say ver` + Tab on any line; Ctrl-J adds a line; "
+            "`/q` + Tab completes `/quit`.") != 0) {
+      report_failure(&state, "completion demo output");
       exit_code = 1;
       goto cleanup;
     }

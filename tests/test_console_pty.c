@@ -458,6 +458,47 @@ cleanup:
   return failed;
 }
 
+static int example_completion(int chat) {
+  struct editor e;
+  int failed = 0;
+  size_t mark;
+  const char *prompt = chat ? "> " : "softline> ";
+  test_rows = 24;
+  test_columns = 80;
+  REQUIRE(start(&e, chat ? "examples/chat.lua" : "examples/simple.lua", NULL,
+                NULL) == 0);
+  REQUIRE(wait_for(&e, "Completion demo:", 0) == 0);
+  REQUIRE(wait_for(&e, prompt, 0) == 0);
+  mark = e.length;
+  REQUIRE(send_bytes(&e, "hel") == 0);
+  REQUIRE(wait_for(&e, "T hello world", mark) == 0);
+  REQUIRE(wait_for(&e, "hello there", mark) == 0);
+  mark = e.length;
+  /* Native chat may append only the changed suffix. Assert the eventual
+   * submitted value instead of requiring an entire input row to redraw. */
+  REQUIRE(send_bytes(&e, "\tw\t\nsay ver") == 0);
+  REQUIRE(wait_for(&e, "verification", mark) == 0);
+  mark = e.length;
+  REQUIRE(send_bytes(&e, "\t\r") == 0);
+  if (chat) {
+    REQUIRE(wait_for(&e, "[turn] hello world", mark) == 0);
+    REQUIRE(wait_for(&e, "say verification", mark) == 0);
+    REQUIRE(wait_for(&e, "\033[?2004h", mark) == 0);
+  } else {
+    REQUIRE(wait_for(&e, "submitted: hello world\r\nsay verification\r\n",
+                     mark) == 0);
+    REQUIRE(wait_for(&e, "softline> ", mark) == 0);
+  }
+  mark = e.length;
+  REQUIRE(send_bytes(&e, "/q") == 0);
+  REQUIRE(wait_for(&e, "/quit", mark) == 0);
+  REQUIRE(send_bytes(&e, "\t\r") == 0);
+  REQUIRE(finish(&e) == 0);
+cleanup:
+  close_editor(&e);
+  return failed;
+}
+
 static int terminal(void) {
   struct editor e;
   int failed = 0;
@@ -495,6 +536,14 @@ int main(int argc, char **argv) {
     return terminal();
   if (!strcmp(argv[1], "completion"))
     return completion();
+  if (!strcmp(argv[1], "simple-completion-c")) {
+    c_chat = 1;
+    return example_completion(0);
+  }
+  if (!strcmp(argv[1], "simple-completion"))
+    return example_completion(0);
+  if (!strcmp(argv[1], "chat-completion"))
+    return example_completion(1);
   if (!strcmp(argv[1], "readline_edit"))
     return readline_edit();
   if (!strcmp(argv[1], "idle"))

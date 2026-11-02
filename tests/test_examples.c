@@ -787,12 +787,14 @@ test_chat_preserves_transcript_and_prompt_spacing(const char *path) {
               "editor missing");
   ASSERT_TRUE(term_contains(&t, "Enter sends or queues"),
               "introductory transcript missing");
+  ASSERT_TRUE(term_contains(&t, "Completion demo:"),
+              "completion guide missing");
   output_mark = t.raw_len;
   ASSERT_TRUE(write(fd, "hello\r", 6) == 6, "send failed");
   ASSERT_TRUE(wait_screen(&t, "A short answer", 3000) == 0,
               "response heading missing");
   note_row = term_row_of(&t, "Enter sends or queues");
-  note_last_row = term_row_of(&t, "your draft.");
+  note_last_row = term_row_of(&t, "/quit.");
   quote_row = term_row_of(&t, "> hello");
   answer_row = term_row_of(&t, "A short answer");
   ASSERT_TRUE(strstr(t.raw + output_mark, "\033[1;1H") == NULL,

@@ -737,8 +737,10 @@ have a count. Available terminal height may reduce or hide this preview while
 retaining input space. It uses the queue theme role and leaves the host's
 reasoning/status message and approval focus unchanged. It follows cursor moves,
 host list changes, undo, suspension and resize. No transcript is retained.
-The C local/remote and Lua chat examples register command completions plus
-`verification` and `next steps` at word boundaries.
+The C/Lua simple multiline and chat examples register `hello world` / `hello
+there`, `/quit`, and `verification` / `next steps` at word boundaries, with an
+interactive startup guide. Local/remote C and Lua chat also register command
+completions. Every example uses the same completion engine as other hosts.
 
 Dynamic providers, filesystem completion and asynchronous candidate-fetch
 lifecycle remain future features. Hosts can replace the literal list as their

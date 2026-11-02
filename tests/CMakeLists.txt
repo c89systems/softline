@@ -336,6 +336,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
 endif()
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND TARGET example_simple AND TARGET example_chat)
+  add_test(NAME softline_simple_completion COMMAND test_console_pty simple-completion-c
+    "$<TARGET_FILE:example_simple>" "${PROJECT_SOURCE_DIR}")
+  set_tests_properties(softline_simple_completion PROPERTIES
+    LABELS "integration;completion;example-smoke" TIMEOUT 15)
   add_test(NAME softline_examples COMMAND test_examples
     $<TARGET_FILE:example_simple>
     $<TARGET_FILE:example_chat>

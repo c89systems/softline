@@ -3,6 +3,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
+
+static const sl_completion_t completions[] = {
+    {"/quit", SL_COMPLETION_START},
+    {"hello world", SL_COMPLETION_START},
+    {"hello there", SL_COMPLETION_START},
+    {"verification", SL_COMPLETION_WORD},
+    {"next steps", SL_COMPLETION_WORD}};
 
 static int set_prompt_theme_from_environment(sl_t *sl,
                                              sl_prompt_theme_t fallback) {
@@ -56,6 +64,18 @@ int main(void) {
     fprintf(stderr, "failed to set prompt theme\n");
     sl->destroy(sl);
     return 1;
+  }
+  if (sl->set_completions(sl, completions,
+                          sizeof(completions) / sizeof(completions[0])) !=
+      SL_OK) {
+    fprintf(stderr, "failed to set completions\n");
+    sl->destroy(sl);
+    return 1;
+  }
+  if (isatty(STDIN_FILENO) && isatty(STDOUT_FILENO)) {
+    puts("Completion demo: type hel, Tab, then w or t and Tab to finish.");
+    puts("  Try say ver + Tab on any line; Ctrl-J adds a line; /q + Tab "
+         "completes /quit.");
   }
 
   for (;;) {
