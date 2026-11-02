@@ -7,6 +7,12 @@ int sl_completion_space(unsigned char ch) {
          ch == '\f';
 }
 
+void sl_completion_cycle_clear(sl_completion_cycle_t *cycle) {
+  free(cycle->original);
+  free(cycle->items);
+  memset(cycle, 0, sizeof(*cycle));
+}
+
 void sl_completion_clear(sl_completion_list_t *list) {
   size_t i;
   for (i = 0; i < list->count; ++i)
@@ -52,7 +58,7 @@ int sl_completion_copy(sl_completion_list_t *out, const sl_completion_t *items,
 }
 
 /* Prefer the longest matching phrase prefix when several whitespace anchors
- * qualify. Candidates from different replacement spans never share an LCP. */
+ * qualify. Candidates from different replacement spans never share a cycle. */
 int sl_completion_find(const sl_completion_list_t *list, const char *text,
                        size_t cursor, sl_completion_match_t *match) {
   size_t start, i;
@@ -66,22 +72,14 @@ int sl_completion_find(const sl_completion_list_t *list, const char *text,
       continue;
     for (i = 0; i < list->count; ++i) {
       const sl_completion_item_t *item = &list->items[i];
-      size_t common;
       if ((start && item->scope != SL_COMPLETION_WORD) ||
           prefix > item->length || memcmp(text + start, item->text, prefix))
         continue;
       if (!match->count) {
         match->start = start;
-        match->common = item->length;
+        match->first = i;
       }
-      if (match->count < 3)
-        match->preview[match->count] = i;
       ++match->count;
-      common = 0;
-      while (common < match->common && common < item->length &&
-             item->text[common] == list->items[match->preview[0]].text[common])
-        ++common;
-      match->common = common;
     }
     if (match->count)
       return 1;

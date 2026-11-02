@@ -1774,12 +1774,14 @@ int sl_set_quoted_prompt_style(sl_t *self, const sl_quote_style_t *style);
  * with count zero clears them. Invalid input or failure to copy keeps the old
  * list. A subsequent redraw failure returns SL_ERROR_IO with the new list set.
  * Each string is bounded by line_max_len. Matching is case-sensitive and
- * requires a nonempty prefix; longest matching phrase prefix wins. Tab expands
- * the common UTF-8 prefix, replacing the current word's remaining suffix and
- * preserving later text. Ambiguity consumes Tab even without progress. A fully
- * present completion or no match passes Tab to normal host/queue key handling.
- * Live matching strings appear above status/reasoning, independently of it.
- * Each expansion is undoable. No whitespace is automatically appended.
+ * requires a nonempty prefix; longest matching phrase prefix wins. The first
+ * match appears as dimmed inline ghost text. Tab accepts it; repeated Tabs
+ * cycle the original matches in list order. Other edits or movement reset
+ * matching. Completion replaces the current word's remaining suffix and keeps
+ * later text. With no active cycle, a fully present unique completion or no
+ * match passes Tab to host/queue handling. A cycle is one undoable edit,
+ * separate from typing. Ghost text is never submitted without acceptance.
+ * No whitespace is automatically appended.
  */
 int sl_set_completions(sl_t *self, const sl_completion_t *items, size_t count);
 

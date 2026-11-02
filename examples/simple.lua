@@ -23,7 +23,7 @@ assert(sl:set_completions({
 }))
 local interactive = os.execute("test -t 0 && test -t 1")
 if interactive == true or interactive == 0 then
-  print("Completion demo: type hel, Tab, then w or t and Tab to finish.")
+  print("Completion demo: type h for a dim suggestion; Tab accepts, more Tabs cycle. Backspace restarts matching.")
   print("  Try say ver + Tab on any line; Ctrl-J adds a line; /q + Tab completes /quit.")
 end
 

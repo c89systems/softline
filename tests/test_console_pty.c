@@ -422,10 +422,9 @@ static int completion(void) {
   REQUIRE(wait_for(&e, "complete> ", 0) == 0);
   mark = e.length;
   REQUIRE(send_bytes(&e, "/app") == 0);
-  /* Preview is visible before the first Tab; queue/approval/status coexist. */
-  REQUIRE(wait_for(&e, "T /approve on", mark) == 0);
-  REQUIRE(wait_for(&e, "/approve off", mark) == 0);
-  REQUIRE(wait_for(&e, "more matches", mark) == 0);
+  /* The missing suffix is dimmed inline before Tab, with no preview panel. */
+  REQUIRE(wait_for(&e, "\033[2mrove on", mark) == 0);
+  REQUIRE(!contains(&e, "T /approve", mark));
   REQUIRE(contains(&e, "queued stays visible", 0));
   REQUIRE(contains(&e, "held stays visible", 0));
   REQUIRE(contains(&e, "Reasoning remains host owned.", 0));
@@ -440,14 +439,14 @@ static int completion(void) {
     e.column = e.columns - 1;
   mark = e.length;
   REQUIRE(send_bytes(&e, "\014\t\t") == 0);
-  REQUIRE(wait_for(&e, "T /approve on", mark) == 0);
-  REQUIRE(send_bytes(&e, "rove \tn\t\033s") == 0);
+  REQUIRE(wait_for(&e, "/approve off", mark) == 0);
+  REQUIRE(send_bytes(&e, "\177\177\t\002\006\t\033s") == 0);
   REQUIRE(wait_for(&e, "inside> ", 0) == 0);
   REQUIRE(send_bytes(&e, "\t\033s") == 0);
   REQUIRE(wait_for(&e, "update> ", 0) == 0);
   mark = e.length;
   REQUIRE(send_bytes(&e, "\024") == 0);
-  REQUIRE(wait_for(&e, "T /stop", mark) == 0);
+  REQUIRE(wait_for(&e, "\033[2mop", mark) == 0);
   REQUIRE(send_bytes(&e, "\t\033s") == 0);
   REQUIRE(wait_for(&e, "cleared> ", 0) == 0);
   REQUIRE(send_bytes(&e, "\t\033s") == 0);
@@ -471,12 +470,11 @@ static int example_completion(int chat) {
   REQUIRE(wait_for(&e, prompt, 0) == 0);
   mark = e.length;
   REQUIRE(send_bytes(&e, "hel") == 0);
-  REQUIRE(wait_for(&e, "T hello world", mark) == 0);
-  REQUIRE(wait_for(&e, "hello there", mark) == 0);
+  REQUIRE(wait_for(&e, "\033[2mlo world", mark) == 0);
   mark = e.length;
   /* Native chat may append only the changed suffix. Assert the eventual
    * submitted value instead of requiring an entire input row to redraw. */
-  REQUIRE(send_bytes(&e, "\tw\t\nsay ver") == 0);
+  REQUIRE(send_bytes(&e, "\t\t\t\nsay ver") == 0);
   REQUIRE(wait_for(&e, "verification", mark) == 0);
   mark = e.length;
   REQUIRE(send_bytes(&e, "\t\r") == 0);
@@ -491,7 +489,7 @@ static int example_completion(int chat) {
   }
   mark = e.length;
   REQUIRE(send_bytes(&e, "/q") == 0);
-  REQUIRE(wait_for(&e, "/quit", mark) == 0);
+  REQUIRE(wait_for(&e, "\033[2muit", mark) == 0);
   REQUIRE(send_bytes(&e, "\t\r") == 0);
   REQUIRE(finish(&e) == 0);
 cleanup:

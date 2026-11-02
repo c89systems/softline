@@ -40,6 +40,9 @@ typedef struct sl_render {
   int cursor_col;
   int editor_first;
   int editor_offset;
+  const char *input;
+  size_t input_len, input_cursor, ghost_start, ghost_end;
+  char *projected;
 } sl_render_t;
 
 typedef struct sl_rgb {
@@ -1209,6 +1212,8 @@ static int sl_buf_replace(sl_t *self, size_t at, size_t removed,
   }
   if (!removed && !inserted)
     return 0;
+  if (!impl->completion_cycle.updating)
+    sl_completion_cycle_clear(&impl->completion_cycle);
   if (removed == inserted && !memcmp(impl->buf + at, text, inserted))
     return 0;
   len = impl->len - removed + inserted;
@@ -1328,6 +1333,7 @@ static int sl_set_cursor_method(sl_t *self, size_t cursor) {
   impl = sl_impl(self);
   if (!impl)
     return SL_ERROR_INVALID;
+  sl_completion_cycle_clear(&impl->completion_cycle);
   if (cursor > impl->len)
     cursor = impl->len;
   impl->cursor = sl_utf8_clamp_cluster_boundary(impl->buf, impl->len, cursor);
@@ -2093,6 +2099,8 @@ static void sl_render_free(sl_render_t *render) {
   for (i = 0; i < render->count; i++)
     free(render->rows[i].text);
   free(render->rows);
+  free(render->projected);
+  render->projected = NULL;
   render->rows = NULL;
   render->cap = 0;
   render->count = 0;
@@ -3210,74 +3218,63 @@ static int sl_render_append_queue_panel(sl_t *self, sl_render_t *render,
   return 0;
 }
 
-/* Completion owns neither the reasoning row nor approval focus. */
+/* A hint is a view of the draft, never an edit or a queue operation. */
 static int sl_current_completion(sl_impl_t *impl,
                                  sl_completion_match_t *match) {
-  size_t i, prefix;
   if (impl->history_search_active || impl->bracketed_paste ||
       !sl_completion_find(&impl->completions, impl->buf, impl->cursor, match))
     return 0;
-  prefix = impl->cursor - match->start;
-  /* A common byte prefix can end inside a cluster in a different candidate.
-   * Preserve the same safe expansion regardless of host list order. */
-  for (i = 0; i < impl->completions.count; ++i) {
-    const sl_completion_item_t *item = &impl->completions.items[i];
-    if ((!match->start || item->scope == SL_COMPLETION_WORD) &&
-        item->length >= prefix &&
-        !memcmp(impl->buf + match->start, item->text, prefix))
-      match->common = sl_utf8_clamp_cluster_boundary(item->text, item->length,
-                                                     match->common);
-  }
-  return match->count > 1 || match->common > impl->cursor - match->start ||
+  return match->count > 1 ||
+         impl->completions.items[match->first].length >
+             impl->cursor - match->start ||
          (impl->cursor < impl->len &&
           !sl_completion_space((unsigned char)impl->buf[impl->cursor - 1]) &&
           !sl_completion_space((unsigned char)impl->buf[impl->cursor]));
 }
 
-static int sl_render_append_completions(sl_t *self, sl_render_t *render,
-                                        int width) {
+static int sl_render_project_input(sl_t *self, sl_render_t *render) {
   sl_impl_t *impl = sl_impl(self);
   sl_completion_match_t match;
-  char style[32] = "", summary[80];
-  size_t i;
-  int available, before = render->count, at;
-  if (!sl_current_completion(impl, &match))
+  const sl_completion_item_t *item;
+  size_t prefix, overlap = 0, length, at;
+  render->input = impl->buf;
+  render->input_len = impl->len;
+  render->input_cursor = impl->cursor;
+  if (impl->completion_cycle.original || !sl_current_completion(impl, &match))
     return 0;
-  /* Reserve one input row and two producer rows after existing chrome. */
-  available = sl_terminal_height(impl) - render->count - 3;
-  if (available > 6)
-    available = 6;
-  if (available < 1)
+  item = &impl->completions.items[match.first];
+  prefix = impl->cursor - match.start;
+  while (prefix + overlap < item->length &&
+         impl->cursor + overlap < impl->len &&
+         item->text[prefix + overlap] == impl->buf[impl->cursor + overlap])
+    ++overlap;
+  /* Keep both UTF-8 values whole when their common bytes end mid-character. */
+  while (overlap &&
+         ((unsigned char)item->text[prefix + overlap] & 0xc0u) == 0x80u)
+    --overlap;
+  length = item->length - prefix - overlap;
+  if (!length)
     return 0;
-  if (impl->prompt_theme != SL_PROMPT_THEME_PLAIN &&
-      sl_theme_color_style(impl->prompt_theme, SL_THEME_COLOR_QUEUE, 0, style,
-                           sizeof(style)) != 0)
+  if (length > (size_t)-1 - impl->len - 1)
     return -1;
-  if (match.count > 1)
-    --available; /* Keep a row for an undisplayed-match count. */
-  for (i = 0; i < match.count && i < 3 && available > 0; ++i) {
-    int rows = render->count;
-    if (sl_render_queue_text(render,
-                             impl->completions.items[match.preview[i]].text,
-                             width, i ? "  " : "T ", style, available) != 0)
-      return -1;
-    available -= render->count - rows;
-  }
-  if (match.count > i) {
-    (void)snprintf(summary, sizeof(summary), "... %lu more matches",
-                   (unsigned long)(match.count - i));
-    if (sl_render_queue_text(render, summary, width, "  ", style, 1) != 0)
-      return -1;
-  }
-  /* Put the preview above queue/approval/status rows, once their real height
-   * is known. Only bounded preview rows move; the input cursor is untouched. */
-  for (at = before; at < render->count; ++at) {
-    sl_row_t row = render->rows[at];
-    int to = at - before;
-    memmove(render->rows + to + 1, render->rows + to,
-            (size_t)before * sizeof(row));
-    render->rows[to] = row;
-  }
+  render->projected = malloc(impl->len + length + 1);
+  if (!render->projected)
+    return -1;
+  at = impl->cursor + overlap;
+  memcpy(render->projected, impl->buf, at);
+  memcpy(render->projected + at, item->text + prefix + overlap, length);
+  memcpy(render->projected + at + length, impl->buf + at, impl->len - at + 1);
+  render->input = render->projected;
+  render->input_len += length;
+  render->ghost_start = at;
+  render->ghost_end = at + length;
+  /* A ghost combining mark/ZWJ can attach to the real prefix. Its whole glyph
+   * owns one display caret, while the real byte cursor remains unchanged. */
+  render->input_cursor = sl_utf8_clamp_cluster_boundary(
+      render->input, render->input_len, impl->cursor);
+  if (render->input_cursor < impl->cursor)
+    render->input_cursor += sl_utf8_next_cluster_len(
+        render->input, render->input_len, render->input_cursor);
   return 0;
 }
 
@@ -3318,9 +3315,11 @@ static void sl_render_input_span(sl_render_t *render, size_t at, size_t len,
   row->cols += cells;
 }
 
-static int sl_render_build(sl_t *self, const char *prompt,
-                           sl_render_t *render) {
+static int sl_render_layout(sl_t *self, const char *prompt,
+                            sl_render_t *render) {
   sl_impl_t *impl;
+  const char *buf = render->input;
+  size_t len = render->input_len, cursor = render->input_cursor;
   int width;
   int col;
   int prompt_width;
@@ -3329,11 +3328,8 @@ static int sl_render_build(sl_t *self, const char *prompt,
   size_t space_end = 0;
   int space_word_width = 0;
   int space_has_word = 0;
-  memset(render, 0, sizeof(*render));
   impl = sl_impl(self);
   if (!impl)
-    return -1;
-  if (sl_render_init(self, render) != 0)
     return -1;
   width = sl_terminal_width(impl);
   if (width < 1)
@@ -3344,8 +3340,6 @@ static int sl_render_build(sl_t *self, const char *prompt,
   if (sl_render_append_status_message(self, render, width) != 0)
     return -1;
   if (sl_render_append_statusline(self, render, width) != 0)
-    return -1;
-  if (sl_render_append_completions(self, render, width) != 0)
     return -1;
   /* A search query is persistent chrome, not part of the scrollable result.
    * Keeping it on one bounded row also handles a query as wide as the PTY. */
@@ -3366,16 +3360,19 @@ static int sl_render_build(sl_t *self, const char *prompt,
     indent = width > 1 ? width - 1 : 0;
   col = prompt_width;
   i = 0;
-  while (i < impl->len) {
+  while (i < len) {
     char ch;
     size_t char_len;
     int char_width;
-    ch = impl->buf[i];
-    char_len = sl_utf8_cluster_len_width(impl->buf, impl->len, i, &char_width);
+    size_t lookahead = render->ghost_end && i < render->ghost_start
+                           ? render->ghost_start
+                           : len;
+    ch = buf[i];
+    char_len = sl_utf8_cluster_len_width(buf, len, i, &char_width);
     if (char_len == 0)
       char_len = 1;
     if (ch == '\n') {
-      sl_render_cursor(render, i, col, impl->cursor);
+      sl_render_cursor(render, i, col, cursor);
       if (sl_render_new_input_row(render, indent, i + 1) != 0)
         return -1;
       col = indent;
@@ -3389,13 +3386,12 @@ static int sl_render_build(sl_t *self, const char *prompt,
       if (i >= space_end) {
         size_t word_len;
         space_end = i;
-        while (space_end < impl->len && impl->buf[space_end] == ' ')
+        while (space_end < lookahead && buf[space_end] == ' ')
           ++space_end;
-        word_len = sl_next_word_len(impl->buf, impl->len, space_end);
+        word_len = sl_next_word_len(buf, lookahead, space_end);
         space_has_word = word_len != 0;
         space_word_width =
-            word_len ? sl_word_width(impl->buf, impl->len, space_end, word_len)
-                     : 0;
+            word_len ? sl_word_width(buf, lookahead, space_end, word_len) : 0;
       }
       spaces = space_end - i;
       word_width = space_word_width;
@@ -3407,7 +3403,7 @@ static int sl_render_build(sl_t *self, const char *prompt,
         if (sl_render_new_input_row(render, indent, i + spaces) != 0)
           return -1;
         col = indent;
-        if (impl->cursor >= i && impl->cursor <= i + spaces) {
+        if (cursor >= i && cursor <= i + spaces) {
           render->cursor_row = render->count - 1;
           render->cursor_col = col;
         }
@@ -3415,13 +3411,13 @@ static int sl_render_build(sl_t *self, const char *prompt,
         continue;
       }
     }
-    if (sl_word_byte(ch) && (i == 0 || !sl_word_byte(impl->buf[i - 1])) &&
+    if (sl_word_byte(ch) && (i == 0 || !sl_word_byte(buf[i - 1])) &&
         col > indent) {
       size_t word_len;
       int word_width;
       int avail;
-      word_len = sl_next_word_len(impl->buf, impl->len, i);
-      word_width = sl_word_width(impl->buf, impl->len, i, word_len);
+      word_len = sl_next_word_len(buf, lookahead, i);
+      word_width = sl_word_width(buf, lookahead, i, word_len);
       avail = width - indent;
       if (avail < 1)
         avail = 1;
@@ -3436,7 +3432,7 @@ static int sl_render_build(sl_t *self, const char *prompt,
         return -1;
       col = indent;
     }
-    sl_render_cursor(render, i, col, impl->cursor);
+    sl_render_cursor(render, i, col, cursor);
     if (ch == '\t') {
       int spaces;
       spaces = 8 - (col % 8);
@@ -3455,15 +3451,23 @@ static int sl_render_build(sl_t *self, const char *prompt,
     }
     i += char_len;
   }
-  if (col < width || impl->cursor == impl->len) {
+  if (col < width || cursor == len) {
     if (col >= width) {
-      if (sl_render_new_input_row(render, indent, impl->len) != 0)
+      if (sl_render_new_input_row(render, indent, len) != 0)
         return -1;
       col = indent;
     }
-    sl_render_cursor(render, impl->len, col, impl->cursor);
+    sl_render_cursor(render, len, col, cursor);
   }
   return 0;
+}
+
+static int sl_render_build(sl_t *self, const char *prompt,
+                           sl_render_t *render) {
+  if (sl_render_init(self, render) != 0 ||
+      sl_render_project_input(self, render) != 0)
+    return -1;
+  return sl_render_layout(self, prompt, render);
 }
 
 static size_t sl_cursor_for_render_col(sl_render_t *render, int row_index,
@@ -3506,7 +3510,13 @@ static int sl_move_visual(sl_t *self, const char *prompt, int direction) {
   impl = sl_impl(self);
   if (!impl)
     return 0;
-  if (sl_render_build(self, prompt, &render) != 0) {
+  /* Ghost rows are not editable positions. Navigate the real draft using the
+   * same layout engine, then project the new cursor for the visible frame. */
+  (void)sl_render_init(self, &render);
+  render.input = impl->buf;
+  render.input_len = impl->len;
+  render.input_cursor = impl->cursor;
+  if (sl_render_layout(self, prompt, &render) != 0) {
     sl_render_free(&render);
     return 0;
   }
@@ -3601,6 +3611,7 @@ static int sl_render_paint_editor(sl_t *self, const char *prompt,
     sl_row_t *row = &render->rows[i];
     int indent = row->cols;
     size_t pos = row->text_first;
+    int dim = 0;
     /* The layout's initial column is independent of cursor ownership (a
      * continuation of a tab may have no addressable cursor position). */
     int base = prompt ? sl_text_width(prompt, strlen(prompt)) : 0;
@@ -3622,7 +3633,16 @@ static int sl_render_paint_editor(sl_t *self, const char *prompt,
     while (pos < row->text_end) {
       int cells;
       size_t n;
-      if (impl->buf[pos] == '\t') {
+      int ghost = render->ghost_end && pos >= render->ghost_start &&
+                  pos < render->ghost_end;
+      if (ghost != dim) {
+        if (sl_row_append(row, ghost ? "\033[2m" : "\033[0m", 4) != 0 ||
+            (!ghost &&
+             sl_row_append(row, input_style, strlen(input_style)) != 0))
+          return -1;
+        dim = ghost;
+      }
+      if (render->input[pos] == '\t') {
         cells = pos == row->text_first     ? row->leading_tab
                 : pos + 1 == row->text_end ? row->trailing_tab
                                            : 8 - row->cols % 8;
@@ -3631,15 +3651,16 @@ static int sl_render_paint_editor(sl_t *self, const char *prompt,
             return -1;
         ++pos;
       } else {
-        n = sl_utf8_cluster_len_width(impl->buf, row->text_end, pos, &cells);
+        n = sl_utf8_cluster_len_width(render->input, row->text_end, pos,
+                                      &cells);
         if (!n)
           n = 1;
-        if (sl_row_append_cells(row, impl->buf + pos, n, cells) != 0)
+        if (sl_row_append_cells(row, render->input + pos, n, cells) != 0)
           return -1;
         pos += n;
       }
     }
-    if (input_style[0] && sl_row_append(row, "\033[0m", 4) != 0)
+    if ((dim || input_style[0]) && sl_row_append(row, "\033[0m", 4) != 0)
       return -1;
     if (row->cols != indent)
       return -1;
@@ -6740,41 +6761,90 @@ static int sl_transpose_draft(sl_t *self) {
   return status;
 }
 
+static size_t sl_completion_end(const char *buf, size_t len, size_t cursor,
+                                size_t start,
+                                const sl_completion_item_t *item) {
+  size_t end = cursor, prefix = cursor - start;
+  size_t extension = item->length - prefix;
+  while (end < len && !sl_completion_space((unsigned char)buf[end]))
+    end += sl_utf8_next_cluster_len(buf, len, end);
+  /* Reuse an already present phrase suffix, including internal spaces. */
+  if (extension <= len - cursor &&
+      !memcmp(buf + cursor, item->text + prefix, extension) &&
+      end < cursor + extension)
+    end = cursor + extension;
+  return end;
+}
+
 static int sl_complete_draft(sl_t *self) {
   sl_impl_t *impl = sl_impl(self);
-  sl_completion_match_t match;
+  sl_completion_cycle_t *cycle = &impl->completion_cycle;
+  const sl_completion_item_t *item;
+  size_t selected, end, removed, restore, i;
   const char *text;
-  size_t end, prefix, extension;
-  if (!sl_current_completion(impl, &match))
-    return 0;
-  prefix = impl->cursor - match.start;
-  if (match.common < prefix || (match.count > 1 && match.common == prefix))
-    return 1;
-  text = impl->completions.items[match.preview[0]].text;
-  end = impl->cursor;
-  while (end < impl->len && !sl_completion_space((unsigned char)impl->buf[end]))
-    end += sl_utf8_next_cluster_len(impl->buf, impl->len, end);
-  extension = match.common - prefix;
-  /* Reuse an already present phrase suffix, including internal spaces. */
-  if (extension <= impl->len - impl->cursor &&
-      !memcmp(impl->buf + impl->cursor, text + prefix, extension) &&
-      end < impl->cursor + extension)
-    end = impl->cursor + extension;
-  if (sl_buf_replace(self, match.start, end - match.start, text,
-                     match.common) != 0) {
-    sl_prompt_queue_bell(impl);
-    return 1;
+  char *replacement = NULL;
+  if (!cycle->original) {
+    sl_completion_match_t match;
+    size_t prefix;
+    if (!sl_current_completion(impl, &match))
+      return 0;
+    cycle->original = sl_strdup(impl->buf);
+    cycle->items = malloc(match.count * sizeof(*cycle->items));
+    if (!cycle->original || !cycle->items)
+      goto failed;
+    cycle->start = match.start;
+    cycle->cursor = cycle->end = impl->cursor;
+    cycle->inserted = prefix = impl->cursor - match.start;
+    for (i = 0; i < impl->completions.count; ++i) {
+      item = &impl->completions.items[i];
+      if ((!match.start || item->scope == SL_COMPLETION_WORD) &&
+          item->length >= prefix &&
+          !memcmp(item->text, impl->buf + match.start, prefix))
+        cycle->items[cycle->count++] = i;
+    }
+    selected = 0;
+  } else
+    selected = (cycle->selected + 1) % cycle->count;
+  item = &impl->completions.items[cycle->items[selected]];
+  end = sl_completion_end(cycle->original, strlen(cycle->original),
+                          cycle->cursor, cycle->start, item);
+  removed = cycle->inserted + (end > cycle->end ? end - cycle->end : 0);
+  restore = cycle->end > end ? cycle->end - end : 0;
+  text = item->text;
+  if (restore) {
+    replacement = malloc(item->length + restore);
+    if (!replacement)
+      goto failed;
+    memcpy(replacement, text, item->length);
+    memcpy(replacement + item->length, cycle->original + end, restore);
+    text = replacement;
   }
+  cycle->updating = 1;
+  i = sl_buf_replace(self, cycle->start, removed, text,
+                     item->length + restore) != 0;
+  cycle->updating = 0;
+  free(replacement);
+  if (i)
+    goto failed;
+  cycle->selected = selected;
+  cycle->end = end;
+  cycle->inserted = item->length;
   /* Reused bytes can end before a combining mark or ZWJ continuation already
    * in the draft. Place the cursor after the resulting whole cluster, not at
    * the standalone candidate's byte endpoint. */
-  end = match.start + match.common;
+  end = cycle->start + item->length;
   impl->cursor = sl_utf8_clamp_cluster_boundary(impl->buf, impl->len, end);
   if (impl->cursor < end)
     impl->cursor +=
         sl_utf8_next_cluster_len(impl->buf, impl->len, impl->cursor);
   impl->preferred_column_valid = 0;
   impl->edit.yank_valid = 0;
+  if (cycle->count == 1)
+    sl_completion_cycle_clear(cycle);
+  return 1;
+failed:
+  sl_completion_cycle_clear(cycle);
+  sl_prompt_queue_bell(impl);
   return 1;
 }
 
@@ -6888,6 +6958,7 @@ static char *sl_readline_impl(sl_t *self, const char *prompt,
     int replayed = 0, waiting_edit;
     int deferred_input = 0;
     int binding_done = 0;
+    sl_completion_match_t completion;
     sl_key_action_t action;
     sl_backend_pump(self);
     sl_edit_end(&impl->edit);
@@ -6959,12 +7030,20 @@ static char *sl_readline_impl(sl_t *self, const char *prompt,
         key = SL_KEY_UNKNOWN;
       }
     }
+    if (key != SL_KEY_NONE && key != SL_KEY_TAB)
+      sl_completion_cycle_clear(&impl->completion_cycle);
     if (key != SL_KEY_NONE &&
         (key != SL_KEY_CTRL_L || sl_find_key_binding(impl, (sl_key_t)key))) {
       int command = SL_EDIT_OTHER;
       if (impl->bracketed_paste && key != SL_KEY_PASTE_END)
         command = SL_EDIT_PASTE;
-      else if (sl_find_key_binding(impl, (sl_key_t)key))
+      else if (key == SL_KEY_TAB &&
+               (impl->completion_cycle.original ||
+                sl_current_completion(impl, &completion))) {
+        command = SL_EDIT_COMPLETE;
+        if (!impl->completion_cycle.original)
+          impl->edit.last_command = SL_EDIT_OTHER;
+      } else if (sl_find_key_binding(impl, (sl_key_t)key))
         command = SL_EDIT_OTHER;
       else if (key == SL_KEY_CTRL_U || key == SL_KEY_CTRL_K ||
                key == SL_KEY_CTRL_W || key == SL_KEY_ALT_D ||
@@ -7826,6 +7905,7 @@ static void sl_destroy_method(sl_t *self) {
     free(impl->pending_input);
     free(impl->retained_prompt);
     sl_edit_destroy(&impl->edit);
+    sl_completion_cycle_clear(&impl->completion_cycle);
     sl_completion_clear(&impl->completions);
     free(impl->buf);
     free(impl);
@@ -7863,6 +7943,7 @@ static int sl_set_completions_method(sl_t *self, const sl_completion_t *items,
     return status;
   }
   sl_completion_clear(&impl->completions);
+  sl_completion_cycle_clear(&impl->completion_cycle);
   impl->completions = next;
   if (impl->active_prompt && sl_render_apply(self, impl->active_prompt) != 0)
     return SL_ERROR_IO;

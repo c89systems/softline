@@ -793,10 +793,11 @@ assert(sl:set_completions({
 }))
 ```
 
-Matching is case-sensitive and needs a nonempty prefix. The live preview uses
-the queue theme role above queue/approval/status rows. Tab expands only the
-common prefix; ambiguous matches consume it even without progress. Fully
-completed text or no match lets Tab reach ordinary host/queue handling.
+Matching is case-sensitive and needs a nonempty prefix. The first match is a
+dimmed inline ghost in the multiline prompt. Tab accepts it; further Tabs cycle
+the original matches in list order. Other edits, movement or list replacement
+restart matching. Ghost text is not submitted without acceptance. With no
+active cycle, uniquely completed text or no match lets Tab reach host/queue handling.
 Completion replaces the current word suffix when the cursor is inside text,
 preserves later text and is undoable. Strings allow printable UTF-8, LF and Tab,
 are limited by `line_max_len`, and cannot contain NUL or terminal escapes.

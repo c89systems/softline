@@ -1091,7 +1091,8 @@ int main(int argc, char **argv) {
     }
     if (render_note(
             &state,
-            "Completion demo: type `hel`, Tab, then `w` or `t` and Tab. "
+            "Completion demo: type `h` for a dim suggestion; Tab accepts, "
+            "more Tabs cycle. Backspace restarts matching. "
             "Try `say ver` + Tab on any line; Ctrl-J adds a line; "
             "`/q` + Tab completes `/quit`.") != 0) {
       report_failure(&state, "completion demo output");

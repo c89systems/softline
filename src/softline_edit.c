@@ -30,7 +30,8 @@ void sl_edit_destroy(sl_edit_t *edit) {
 }
 
 void sl_edit_begin(sl_edit_t *edit, int command) {
-  if ((command != SL_EDIT_INSERT && command != SL_EDIT_PASTE) ||
+  if ((command != SL_EDIT_INSERT && command != SL_EDIT_PASTE &&
+       command != SL_EDIT_COMPLETE) ||
       edit->last_command != command)
     edit->group++;
   edit->open = 1;

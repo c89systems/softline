@@ -40,8 +40,9 @@ Currently implemented:
 
 - Enter submits the current buffer.
 - `Ctrl-J` inserts a newline.
-- Host-supplied literal completions show live previews. Tab expands their common
-  prefix; each word/phrase selects draft-start or whitespace-boundary matching.
+- Host-supplied literal completions show inline dimmed suggestions. Tab accepts
+  the suggestion and cycles matches; each word/phrase selects draft-start or
+  whitespace-boundary matching.
   See `sl_set_completions()` and the [completion contract](docs/softline-spec.md#literal-completion).
 - `Ctrl-D` on an empty buffer returns `NULL`; inside text it deletes forward.
 - `Ctrl-C` remains a terminal interrupt instead of being swallowed.
@@ -196,15 +197,16 @@ and print a `Completion demo:` guide when interactive. Try them with
 `make run-simple`, `make lua-debug-simple`, any `run-chat-*` target, or
 `make lua-debug-chat`:
 
-- Type `hel`, then Tab: it expands only to `hello ` because `hello world` and
-  `hello there` still match. Type `w` or `t`, then Tab to finish the phrase.
+- Type `h` to see `hello world` as dim ghost text. Tab accepts it; further Tabs
+  cycle between `hello there` and `hello world`. Backspace restarts matching
+  from the remaining actual text.
 - Type `say ver`, then Tab: it completes `verification` after the space.
   Ctrl-J adds a real newline; the same word completion works on that next line.
 - Type `/q`, then Tab to complete `/quit`; Enter exits.
-- Chat also completes `/app` to the common prefix of `/approve on` and
-  `/approve off`. Type `n` to finish `on`, or `f` then Tab to finish `off`.
+- Chat completes `/app` to `/approve on`, with another Tab choosing `/approve
+  off`. Type `/` to cycle through all registered slash commands.
 
-The live `T ` preview appears before Tab. These lists belong to the example
+The inline ghost appears before Tab and is not submitted until accepted. These lists belong to the example
 hosts; applications using `readline()` or `next_prompt()` register their own
 with `set_completions()` / `sl_set_completions()`.
 

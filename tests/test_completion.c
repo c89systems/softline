@@ -22,8 +22,12 @@ static const sl_completion_t candidates[] = {
     {"/resume", SL_COMPLETION_START},
     {"/shell", SL_COMPLETION_START},
     {"/shellshare", SL_COMPLETION_START},
+    {"/command1", SL_COMPLETION_START},
+    {"/command2", SL_COMPLETION_START},
+    {"/cmd", SL_COMPLETION_START},
     {"verification", SL_COMPLETION_WORD},
     {"next steps", SL_COMPLETION_WORD},
+    {"next", SL_COMPLETION_WORD},
     {"hello 👩", SL_COMPLETION_WORD},
     {"ready ✈", SL_COMPLETION_WORD},
     {"trailing ", SL_COMPLETION_START},
@@ -194,10 +198,19 @@ int main(void) {
       {"say\tver", "\t\r", "say\tverification", 7, 0},
       {"say/ver", "\t\r", "say/ver#", 7, 1},
       {"VER", "\t\r", "VER#", 3, 1},
-      {"/app", "\t\r", "/approve o", 4, 0},
-      {"/app", "\t\tn\r", "/approve on", 4, 0},
-      {"/app", "\t\tf\t\r", "/approve off", 4, 0},
-      {"/shell", "\t\ts\t\r", "/shellshare", 6, 0},
+      {"/app", "\t\r", "/approve on", 4, 0},
+      {"/app", "\t\t\r", "/approve off", 4, 0},
+      {"/app", "\t\t\t\r", "/approve on", 4, 0},
+      {"/shell", "\t\t\r", "/shellshare", 6, 0},
+      {"/", "\t\t\t\t\t\t\t\t\177\t\t\r", "/command2", 1, 0},
+      {"/", "\t\t\177\t\t\r", "/stop#", 1, 1},
+      {"/app", "\t\t\037\r", "/app", 4, 0},
+      {"/app", "\t\tX\037\r", "/approve off", 4, 0},
+      {"next steps later", "\t\t\013\r", "next", 2, 0},
+      {"next steps later", "\t\t\t\013\r", "next steps", 2, 0},
+      {"/", "\r", "/", 1, 0},
+      {"e", "\r", "e", 1, 0},
+      {"/app", "\t\002!\r", "/approve o!n", 4, 0},
       {"/resX later", "\t\r", "/resume later", 4, 0},
       {"say next steps later", "\t\r", "say next steps later", 8, 0},
       {"say neX later", "\t\r", "say next steps later", 6, 0},
@@ -218,9 +231,9 @@ int main(void) {
        0},
       {"hello 👩‍💻 later", "\t\177\r", "hello  later", 2, 0},
       {"ready ✈️ later", "\t\002!\r", "ready !✈️ later", 2, 0},
-      {"caf", "\t\r", "caf", 3, 0},
-      {"caf", "\t\303\251\t\r", "caféclair", 3, 0},
-      {"e", "\t\r", "e", 1, 0},
+      {"caf", "\t\r", "caféclair", 3, 0},
+      {"caf", "\t\t\r", "cafêtre", 3, 0},
+      {"e", "\t\r", "e\314\201clair", 1, 0},
       {"/sta", "\t\037\r", "/sta", 4, 0},
       {"", "/sta\tX\037\r", "/status", 0, 0},
       {"/sta", "\033[200~\t\033[201~\r", "/sta\t", 4, 0},
@@ -239,8 +252,9 @@ int main(void) {
     CHECK(!run(native, "x ver", 5, "\t\r", "x verification", 0, 131072,
                COPIED_LIST));
     CHECK(!run(native, "/sta", 4, "\t\r", "/sta#", 1, 131072, CLEARED_LIST));
-    CHECK(!run(native, "ca", 2, "\t\r", "caf", 0, 131072, CLUSTER_FIRST));
-    CHECK(!run(native, "ca", 2, "\t\r", "caf", 0, 131072, CLUSTER_LAST));
+    CHECK(!run(native, "ca", 2, "\t\r", "cafe\314\201x", 0, 131072,
+               CLUSTER_FIRST));
+    CHECK(!run(native, "ca", 2, "\t\r", "cafet", 0, 131072, CLUSTER_LAST));
     {
       char *initial = malloc(50005), *expected = malloc(50014);
       CHECK(initial && expected);

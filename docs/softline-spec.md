@@ -709,12 +709,15 @@ Updates run on the editor owner thread, including ordinary idle/watch callbacks.
 
 Matching is literal and case-sensitive, requires at least one typed byte, and
 uses the cursor position. If phrase prefixes at multiple eligible anchors
-match, the longest prefix selects the replacement span. Tab inserts only the
-common prefix, stopping at a safe UTF-8 cluster boundary; it never chooses an
-arbitrary candidate, cycles choices or appends whitespace. Ambiguous Tab is
-consumed even when no extension is possible. Once a unique completion is fully
-present, or no candidate matches, normal host bindings and queue mappings
-receive Tab. Matching completion precedes both, including custom bindings.
+match, the longest prefix selects the replacement span. The first match in
+host-list order appears as a dimmed inline suffix. Tab accepts that full
+candidate; further Tabs cycle through the originally resolved matches in list
+order, wrapping to the first. Any other key, cursor movement, draft mutation or
+list replacement ends the cycle and matches the resulting draft again. Thus
+`/` can cycle all slash commands, while Backspace from `/command1` to `/command`
+restricts the next cycle to that prefix. No whitespace is appended. With no
+active cycle, a unique fully present completion or no match lets normal host
+bindings and queue mappings receive Tab. Matching completion precedes both.
 Reverse search and bracketed paste retain their existing key/literal semantics.
 With a completion list configured, Tab during acquisition of a backend edit hold
 waits for that outcome and earlier deferred typing. It then completes the actual
@@ -723,20 +726,21 @@ host control bindings remain responsive while the hold is pending.
 
 Completion inside text replaces the remaining current whitespace-delimited
 word while preserving subsequent unrelated text. A complete already-present
-phrase suffix is reused. Expansion is one undoable edit, separate from adjacent
+phrase suffix is reused. An entire Tab cycle is one undoable edit, separate from adjacent
 typing, and retains queue/approval identity, holds and order. An expansion over
 the draft limit leaves the draft/cursor unchanged and consumes Tab with a bell.
 If reused phrase bytes join an existing combining-mark or emoji continuation,
 the cursor advances past the resulting whole cluster; those existing bytes are
 preserved. Subsequent movement, deletion and undo keep their cluster semantics.
 
-A live `T ` preview above the queue/approval/status area displays the matching
-full strings, wrapping at words. At most three candidates and six physical
-preview rows are shown; long candidates end with `...`, and undisplayed matches
-have a count. Available terminal height may reduce or hide this preview while
-retaining input space. It uses the queue theme role and leaves the host's
-reasoning/status message and approval focus unchanged. It follows cursor moves,
-host list changes, undo, suspension and resize. No transcript is retained.
+Ghost text is a display-only projection inside the multiline editor, wrapping
+and paging with it. It does not change the draft, actual cursor, undo journal,
+queue/approval entries or host status/reasoning. Enter submits only actual text;
+Tab is required to accept a suggestion. Existing matching text after the cursor
+is reused in the preview; unrelated text remains visible. Navigation operates
+on the actual draft. There is no separate completion panel. Ghosts follow
+cursor moves, host list changes, undo, suspension and resize. No producer
+transcript is retained.
 The C/Lua simple multiline and chat examples register `hello world` / `hello
 there`, `/quit`, and `verification` / `next steps` at word boundaries, with an
 interactive startup guide. Local/remote C and Lua chat also register command

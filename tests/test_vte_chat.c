@@ -62,6 +62,16 @@ static int wait_visible(struct chat *c, const char *marker) {
   } while (now() < deadline);
   return 1;
 }
+static int wait_column(struct chat *c, long column) {
+  double deadline = now() + 2;
+  do {
+    struct snapshot s = frame(c);
+    if (s.column == column)
+      return 0;
+    pump_once();
+  } while (now() < deadline);
+  return 1;
+}
 static int drain(void *context) {
   struct chat *c = (struct chat *)context;
   int status;
@@ -1036,47 +1046,65 @@ static int completion_case(const char *example, const char *theme) {
   REQUIRE(start_chat(&c, example, theme, 24, 10) == 0);
   REQUIRE(wait_frame(&c, "Completion demo:", "> \n", 0, 2) == 0);
   send_input(&c, "hel");
-  REQUIRE(wait_frame(&c, "T hello world", "> hel\n", 0, 2) == 0);
-  REQUIRE(wait_visible(&c, "hello there") == 0);
+  REQUIRE(wait_frame(&c, NULL, "> hello world\n", 0, 2) == 0);
+  s = frame(&c);
+  REQUIRE(s.column == 5 && !strstr(s.text, "T hello"));
   send_input(&c, "\t");
-  REQUIRE(wait_frame(&c, "T hello world", "> hello \n", 0, 2) == 0);
-  send_input(&c, "w\t\nsay ver");
-  REQUIRE(wait_frame(&c, "T verification", "  say ver\n", 0, 2) == 0);
+  REQUIRE(wait_frame(&c, NULL, "> hello world\n", 0, 2) == 0);
+  send_input(&c, "\t");
+  REQUIRE(wait_frame(&c, NULL, "> hello there\n", 0, 2) == 0);
+  send_input(&c, "\t\nsay ver");
+  REQUIRE(wait_frame(&c, NULL, "  say verification\n", 0, 2) == 0);
+  s = frame(&c);
+  REQUIRE(s.column == 9);
   send_input(&c, "\t");
   REQUIRE(wait_frame(&c, NULL, "  say verification\n", 0, 2) == 0);
+  REQUIRE(coordinated_resize(&c, 24, 24, 1) == 0);
+  send_input(&c, "\033nsay say say say ver");
+  REQUIRE(wait_visible(&c, "> say say say say verifi\n  cation") == 0);
+  REQUIRE(wait_column(&c, 21) == 0);
+  REQUIRE(coordinated_resize(&c, 97, 24, 1) == 0);
   send_input(&c, "\033n");
   REQUIRE(wait_frame(&c, NULL, "> \n", 0, 2) == 0);
   send_input(&c, "hello\r");
   REQUIRE(wait_frame(&c, "Demo queued request #1:", "> \n", -1, 3) == 0);
   REQUIRE(pause_producer(&c) == 0 && c.worker > 0);
   send_input(&c, "ordinary-one\rordinary-two\rver");
-  REQUIRE(wait_frame(&c, "T verification", "> ver\n", -1, 2) == 0);
+  REQUIRE(wait_frame(&c, NULL, "> verification\n", -1, 2) == 0);
   s = frame(&c);
-  REQUIRE(row_distance(s.text, "T verification", "\nQ ") >= 0);
+  REQUIRE(s.column == 5 && !strstr(s.text, "T verification"));
+  REQUIRE(strstr(s.text, "\nQ "));
   REQUIRE(row_distance(s.text, "ordinary-two", "\nA ") >= 0);
   REQUIRE(row_distance(s.text, "\nA ",
                        strstr(s.text, "Reasoning...") ? "Reasoning..."
                                                       : "Thinking...") > 0);
   REQUIRE(coordinated_resize(&c, 52, 18, 1) == 0);
-  REQUIRE(wait_frame(&c, "T verification", "> ver\n", -1, 2) == 0);
+  REQUIRE(wait_frame(&c, NULL, "> verification\n", -1, 2) == 0);
   send_input(&c, "\t");
   REQUIRE(wait_frame(&c, "ordinary-two", "> verification\n", -1, 2) == 0);
+  REQUIRE(wait_column(&c, 14) == 0);
   s = frame(&c);
   REQUIRE(!strstr(s.text, "T verification"));
   REQUIRE(strstr(s.text, "\nA ") &&
           (strstr(s.text, "Reasoning...") || strstr(s.text, "Thinking...")) &&
           s.column == 14);
   send_input(&c, "\033n/app");
-  REQUIRE(wait_frame(&c, "T /approve on", "> /app\n", -1, 2) == 0);
-  REQUIRE(wait_visible(&c, "  /approve off") == 0);
+  REQUIRE(wait_frame(&c, NULL, "> /approve on\n", -1, 2) == 0);
+  s = frame(&c);
+  REQUIRE(s.column == 6);
   send_input(&c, "\t\t");
-  REQUIRE(wait_frame(&c, "T /approve on", "> /approve o\n", -1, 2) == 0);
-  send_input(&c, "f\t");
   REQUIRE(wait_frame(&c, NULL, "> /approve off\n", -1, 2) == 0);
-  send_input(&c, "\037");
-  REQUIRE(wait_frame(&c, "T /approve off", "> /approve of\n", -1, 2) == 0);
+  send_input(&c, "\177");
+  REQUIRE(wait_frame(&c, NULL, "> /approve off\n", -1, 2) == 0);
+  REQUIRE(wait_column(&c, 13) == 0);
+  s = frame(&c);
+  REQUIRE(s.column == 13);
   REQUIRE(coordinated_resize(&c, 97, 24, 1) == 0);
-  REQUIRE(wait_frame(&c, "T /approve off", "> /approve of\n", -1, 2) == 0);
+  REQUIRE(wait_frame(&c, NULL, "> /approve off\n", -1, 2) == 0);
+  send_input(&c, "\t\037");
+  REQUIRE(wait_frame(&c, NULL, "> /approve off\n", -1, 2) == 0);
+  s = frame(&c);
+  REQUIRE(s.column == 13);
 cleanup:
   if (failed) {
     s = frame(&c);

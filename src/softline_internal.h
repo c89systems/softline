@@ -156,6 +156,7 @@ typedef struct sl_impl {
   size_t cursor;
   sl_edit_t edit;
   sl_completion_list_t completions;
+  sl_completion_cycle_t completion_cycle;
   int preferred_column;
   int preferred_column_width;
   int preferred_column_valid;

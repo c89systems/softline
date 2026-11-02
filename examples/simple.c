@@ -73,7 +73,8 @@ int main(void) {
     return 1;
   }
   if (isatty(STDIN_FILENO) && isatty(STDOUT_FILENO)) {
-    puts("Completion demo: type hel, Tab, then w or t and Tab to finish.");
+    puts("Completion demo: type h for a dim suggestion; Tab accepts, more Tabs "
+         "cycle. Backspace restarts matching.");
     puts("  Try say ver + Tab on any line; Ctrl-J adds a line; /q + Tab "
          "completes /quit.");
   }

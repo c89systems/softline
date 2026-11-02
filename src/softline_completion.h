@@ -17,9 +17,17 @@ typedef struct sl_completion_list {
 } sl_completion_list_t;
 
 typedef struct sl_completion_match {
-  size_t start, common, count;
-  size_t preview[3];
+  size_t start, count, first;
 } sl_completion_match_t;
+
+/* One Tab cycle owns the original local draft and its resolved candidate set.
+ * Neither the producer transcript nor queue authority enters this state. */
+typedef struct sl_completion_cycle {
+  char *original;
+  size_t *items;
+  size_t count, selected, start, cursor, end, inserted;
+  int updating;
+} sl_completion_cycle_t;
 
 void sl_completion_clear(sl_completion_list_t *list);
 int sl_completion_copy(sl_completion_list_t *out, const sl_completion_t *items,
@@ -27,5 +35,6 @@ int sl_completion_copy(sl_completion_list_t *out, const sl_completion_t *items,
 int sl_completion_find(const sl_completion_list_t *list, const char *text,
                        size_t cursor, sl_completion_match_t *match);
 int sl_completion_space(unsigned char ch);
+void sl_completion_cycle_clear(sl_completion_cycle_t *cycle);
 
 #endif
