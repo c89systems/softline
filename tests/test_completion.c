@@ -225,6 +225,16 @@ static int dynamic_provider(sl_t *sl, char trigger, sl_completion_emit_t emit,
     (void)emit("@\300\257", context);
     return SL_OK;
   }
+  if (data->kind >= 16 && !data->generation) {
+    snprintf(value, sizeof(value), "%cnext stop", trigger);
+    if (emit(value, context) != SL_OK)
+      return SL_ERROR;
+    snprintf(value, sizeof(value), "%cnext steps", trigger);
+    if (emit(value, context) != SL_OK)
+      return SL_ERROR;
+    snprintf(value, sizeof(value), "%cnext", trigger);
+    return emit(value, context);
+  }
   snprintf(value, sizeof(value), "%c%s", trigger,
            trigger == '@'     ? "alpha.txt"
            : data->generation ? "fresh1"
@@ -263,6 +273,8 @@ static int update_provider(sl_t *sl, sl_key_t key, void *userdata,
     return SL_ERROR;
   if (data->kind == 11 && strcmp(sl_buffer(sl), "a "))
     return SL_ERROR;
+  if (data->kind == 15 && sl_set_buffer(sl, "/") != SL_OK)
+    return SL_ERROR;
   ++data->generation;
   *action = SL_KEY_ACTION_HANDLED;
   return SL_OK;
@@ -299,7 +311,11 @@ static int provider_cases(int native) {
       {'@', 1, 11, 2, 0, 1, "@a\024@b\t\r", "a beta.txt"},
       {'/', 0, 12, 1, 0, 1, "/c\177\024\037\t\r", "/command1"},
       {'@', 1, 13, 2, 0, 1, " \001\013@a\031@b\t\r", "a beta.txt"},
-      {'/', 0, 14, 1, 0, 1, "/\t\024\037\t\r", "/command1"}};
+      {'/', 0, 14, 1, 0, 1, "/\t\024\037\t\r", "/command1"},
+      {'/', 0, 15, 2, 0, 0, "/\024\t\r", "/fresh1"},
+      {'/', 0, 16, 1, 0, 0, "\t\t\t\024\037\t\r", "/next stop steps later"},
+      {'@', 1, 17, 1, 0, 1, "\t\t\t\024\037\t\r", "next stop steps later"},
+      {'/', 0, 18, 1, 1, 0, "\t\t\t\024\037\005\t\r", "/next steps later#"}};
   size_t i;
   for (i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
     int master, slave, wake[2];
@@ -317,6 +333,11 @@ static int provider_cases(int native) {
     data.kind = cases[i].kind;
     data.driver.master = master;
     data.driver.initial = "";
+    if (data.kind >= 16) {
+      data.driver.initial =
+          cases[i].trigger == '@' ? "@next steps later" : "/next steps later";
+      data.driver.cursor = 3;
+    }
     data.driver.keys = cases[i].keys;
     sl_config_init(&config);
     config.input_fd = config.output_fd = slave;

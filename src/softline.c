@@ -1214,8 +1214,25 @@ static void sl_completion_changed(sl_impl_t *impl, size_t at, size_t removed,
   same_trigger = undo && at == state->start && inserted && at < impl->len &&
                  impl->buf[at] == state->provider.trigger;
   if ((!same_trigger && at <= state->start) || at > state->end ||
-      removed > state->end - at) {
+      (!same_trigger && removed > state->end - at)) {
     sl_completion_reset(state);
+    return;
+  }
+  if (same_trigger && removed > state->end - at) {
+    /* A phrase cycle can restore suffix bytes beyond its last, shorter
+     * candidate. The undo envelope is not the restored token boundary.
+     * Reuse complete cached phrases just as Tab reuses existing suffixes. */
+    state->end = impl->cursor > state->start ? impl->cursor : state->start;
+    while (state->end < impl->len &&
+           !sl_completion_space((unsigned char)impl->buf[state->end]))
+      ++state->end;
+    for (i = 0; i < state->list.count; ++i) {
+      const sl_completion_item_t *item = &state->list.items[i];
+      if (item->length <= impl->len - state->start &&
+          item->length > state->end - state->start &&
+          !memcmp(item->text, impl->buf + state->start, item->length))
+        state->end = state->start + item->length;
+    }
     return;
   }
   state->end = state->end - removed + inserted;
@@ -1332,6 +1349,8 @@ static int sl_buf_set_public(sl_t *self, const char *text) {
     return SL_ERROR_INVALID;
   if (sl_buf_replace(self, 0, impl->len, text, strlen(text)) != 0)
     return SL_ERROR;
+  /* Replacing the draft is a new context even when the bytes are identical. */
+  sl_completion_reset(&impl->completion);
   if (impl->cursor != impl->len) {
     if (impl->edit.open && (impl->edit.command == SL_EDIT_INSERT ||
                             impl->edit.command == SL_EDIT_PASTE))
