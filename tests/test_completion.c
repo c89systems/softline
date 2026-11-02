@@ -34,7 +34,15 @@ struct driver {
   const char *initial, *keys;
   size_t cursor;
 };
-enum scenario { NORMAL, HELD_EDIT, QUEUE_TAB, COPIED_LIST, CLEARED_LIST };
+enum scenario {
+  NORMAL,
+  HELD_EDIT,
+  QUEUE_TAB,
+  COPIED_LIST,
+  CLEARED_LIST,
+  CLUSTER_FIRST,
+  CLUSTER_LAST
+};
 static int host_tab(sl_t *sl, sl_key_t key, void *data,
                     sl_key_action_t *action) {
   struct driver *d = data;
@@ -117,6 +125,16 @@ static int run(int native, const char *initial, size_t cursor, const char *keys,
   }
   if (scenario == CLEARED_LIST)
     CHECK(sl_set_completions(sl, NULL, 0) == SL_OK);
+  if (scenario == CLUSTER_FIRST || scenario == CLUSTER_LAST) {
+    sl_completion_t cluster[2] = {{"cafet", SL_COMPLETION_START},
+                                  {"cafe\314\201x", SL_COMPLETION_START}};
+    if (scenario == CLUSTER_FIRST) {
+      sl_completion_t swap = cluster[0];
+      cluster[0] = cluster[1];
+      cluster[1] = swap;
+    }
+    CHECK(sl_set_completions(sl, cluster, 2) == SL_OK);
+  }
   CHECK(sl_bind_key(sl, SL_KEY_ALT_BASE + 's', suspend_key, NULL) == SL_OK);
   CHECK(sl_set_prompt_queue_delivery(sl, SL_PROMPT_QUEUE_DELIVERY_MANUAL) ==
         SL_OK);
@@ -198,6 +216,8 @@ int main(void) {
     CHECK(!run(native, "x ver", 5, "\t\r", "x verification", 0, 131072,
                COPIED_LIST));
     CHECK(!run(native, "/sta", 4, "\t\r", "/sta#", 1, 131072, CLEARED_LIST));
+    CHECK(!run(native, "ca", 2, "\t\r", "caf", 0, 131072, CLUSTER_FIRST));
+    CHECK(!run(native, "ca", 2, "\t\r", "caf", 0, 131072, CLUSTER_LAST));
     {
       char *initial = malloc(50005), *expected = malloc(50014);
       CHECK(initial && expected);

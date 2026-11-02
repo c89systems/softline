@@ -716,6 +716,10 @@ consumed even when no extension is possible. Once a unique completion is fully
 present, or no candidate matches, normal host bindings and queue mappings
 receive Tab. Matching completion precedes both, including custom bindings.
 Reverse search and bracketed paste retain their existing key/literal semantics.
+With a completion list configured, Tab during acquisition of a backend edit hold
+waits for that outcome and earlier deferred typing. It then completes the actual
+draft or falls through to the host, including when the hold was rejected. Other
+host control bindings remain responsive while the hold is pending.
 
 Completion inside text replaces the remaining current whitespace-delimited
 word while preserving subsequent unrelated text. A complete already-present
@@ -980,9 +984,10 @@ facade, not a reason to weaken the core handle model.
 
 ## Suggested Near-Term Milestones
 
-1. Completion provider API
+1. Dynamic completion providers
 
-   Add synchronous completion with replacement spans and native chat tests.
+   Literal completion, replacement spans and native chat tests are implemented.
+   Add computed providers only when an embedding host needs more than list updates.
 
 2. Unicode width policy
 

@@ -3213,13 +3213,21 @@ static int sl_render_append_queue_panel(sl_t *self, sl_render_t *render,
 /* Completion owns neither the reasoning row nor approval focus. */
 static int sl_current_completion(sl_impl_t *impl,
                                  sl_completion_match_t *match) {
-  const sl_completion_item_t *first;
+  size_t i, prefix;
   if (impl->history_search_active || impl->bracketed_paste ||
       !sl_completion_find(&impl->completions, impl->buf, impl->cursor, match))
     return 0;
-  first = &impl->completions.items[match->preview[0]];
-  match->common =
-      sl_utf8_clamp_cluster_boundary(first->text, first->length, match->common);
+  prefix = impl->cursor - match->start;
+  /* A common byte prefix can end inside a cluster in a different candidate.
+   * Preserve the same safe expansion regardless of host list order. */
+  for (i = 0; i < impl->completions.count; ++i) {
+    const sl_completion_item_t *item = &impl->completions.items[i];
+    if ((!match->start || item->scope == SL_COMPLETION_WORD) &&
+        item->length >= prefix &&
+        !memcmp(impl->buf + match->start, item->text, prefix))
+      match->common = sl_utf8_clamp_cluster_boundary(item->text, item->length,
+                                                     match->common);
+  }
   return match->count > 1 || match->common > impl->cursor - match->start ||
          (impl->cursor < impl->len &&
           !sl_completion_space((unsigned char)impl->buf[impl->cursor]));
@@ -6872,7 +6880,6 @@ static char *sl_readline_impl(sl_t *self, const char *prompt,
     int replayed = 0, waiting_edit;
     int deferred_input = 0;
     int binding_done = 0;
-    sl_completion_match_t completion;
     sl_key_action_t action;
     sl_backend_pump(self);
     sl_edit_end(&impl->edit);
@@ -6898,12 +6905,14 @@ static char *sl_readline_impl(sl_t *self, const char *prompt,
       key = sl_read_paste_input(self, paste_bytes, &paste_len);
     else
       key = sl_read_key(self);
+    /* Tab may complete held text and earlier typing not yet available in the
+     * draft. Classify it only after the edit outcome and deferred input. */
     if ((waiting_edit || sl_backend_wait_key(impl, key)) &&
         key != SL_KEY_NONE && key != SL_KEY_CTRL_C && key != SL_KEY_CTRL_L &&
         key != SL_KEY_ESCAPE &&
         (impl->bracketed_paste || sl_backend_reading_paste(impl) ||
          !sl_find_key_binding(impl, (sl_key_t)key) || key == SL_KEY_ENTER ||
-         (key == SL_KEY_TAB && sl_current_completion(impl, &completion)) ||
+         (key == SL_KEY_TAB && impl->completions.count) ||
          key == (int)impl->prompt_queue.keys.enqueue_draft ||
          key == (int)impl->prompt_queue.keys.submit_or_promote_newest)) {
       if (!paste_len && key >= 128 && key < 256)
