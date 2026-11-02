@@ -450,6 +450,16 @@ static int completion(void) {
   REQUIRE(send_bytes(&e, "\t\033s") == 0);
   REQUIRE(wait_for(&e, "cleared> ", 0) == 0);
   REQUIRE(send_bytes(&e, "\t\033s") == 0);
+  REQUIRE(wait_for(&e, "provider-1> ", 0) == 0);
+  REQUIRE(send_bytes(&e, "@\024\t\t\r") == 0);
+  REQUIRE(wait_for(&e, "provider-2> ", 0) == 0);
+  REQUIRE(send_bytes(&e, "@\t\r") == 0);
+  REQUIRE(wait_for(&e, "provider-3> ", 0) == 0);
+  REQUIRE(send_bytes(&e, "@a\t\r") == 0);
+  REQUIRE(wait_for(&e, "provider-4> ", 0) == 0);
+  REQUIRE(send_bytes(&e, "@\t\r") == 0);
+  REQUIRE(wait_for(&e, "provider-5> ", 0) == 0);
+  REQUIRE(send_bytes(&e, "@e\t\r") == 0);
   REQUIRE(wait_for(&e, "lua completion passed", 0) == 0);
   REQUIRE(finish(&e) == 0);
 cleanup:
@@ -485,6 +495,23 @@ static int example_completion(int chat) {
   } else {
     REQUIRE(wait_for(&e, "submitted: hello world\r\nsay verification\r\n",
                      mark) == 0);
+    REQUIRE(wait_for(&e, "softline> ", mark) == 0);
+  }
+  mark = e.length;
+  REQUIRE(send_bytes(&e, "@REA") == 0);
+  REQUIRE(wait_for(&e, "\033[2mDME.md", mark) == 0);
+  mark = e.length;
+  REQUIRE(send_bytes(&e, "\t \r") == 0);
+  if (chat) {
+    double deadline = now() + 3;
+    while (!contains(&e, "[turn] README.md ", mark) &&
+           !contains(&e, "[queued] README.md ", mark) && now() < deadline)
+      if (pump(&e, 20))
+        break;
+    REQUIRE(contains(&e, "[turn] README.md ", mark) ||
+            contains(&e, "[queued] README.md ", mark));
+  } else {
+    REQUIRE(wait_for(&e, "submitted: README.md ", mark) == 0);
     REQUIRE(wait_for(&e, "softline> ", mark) == 0);
   }
   mark = e.length;

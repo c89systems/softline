@@ -1,4 +1,5 @@
 #define _DEFAULT_SOURCE
+#include "completion_fixture.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
@@ -247,15 +248,9 @@ static int detection(void) {
   return 0;
 }
 
-static int producer(sl_t *sl, const sl_watch_event_t *event, void *data) {
-  int master = *(int *)data;
-  char byte;
+static int producer(sl_t *sl, int master) {
   const char *open = "\033]8;id=stable;https://example.org/\033\\";
   size_t i;
-  if (read(event->fd, &byte, 1) != 1)
-    return SL_ERROR_IO;
-  if (sl_set_buffer(sl, "draft") != SL_OK)
-    return SL_ERROR_IO;
   for (i = 0; i < strlen(open); ++i)
     if (sl_output_stream_write(sl, open + i, 1) != SL_OK)
       return SL_ERROR_IO;
@@ -267,6 +262,22 @@ static int producer(sl_t *sl, const sl_watch_event_t *event, void *data) {
       write(master, "\r", 1) != 1)
     return SL_ERROR_IO;
   return SL_OK;
+}
+struct producer_state {
+  int master, phase, status;
+  struct completion_fixture *completions;
+};
+static void produce_when_ready(sl_t *sl, void *data) {
+  struct producer_state *state = data;
+  if (!state->phase) {
+    state->phase = 1;
+    state->status = sl_set_buffer(sl, "draft");
+  } else if (state->phase == 1 && state->completions->calls) {
+    state->phase = 2;
+    state->status = producer(sl, state->master);
+  }
+  if (state->status != SL_OK)
+    (void)sl_cancel(sl);
 }
 
 /* Inspect only OSC 8 scope in real PTY bytes, not terminal layout. */
@@ -297,16 +308,21 @@ static int scope_at(const char *bytes, const char *word, int expected) {
 }
 
 static int native_scope(void) {
-  int master, slave, wake[2];
+  int master, slave;
   struct winsize size = {24, 80, 0, 0};
   sl_config_t config;
   sl_t *sl;
-  sl_watch_id_t watch;
+  struct producer_state producer_state;
   char bytes[32768], *line;
   ssize_t count;
   size_t used = 0;
-  sl_completion_t completion = {"draft suggestion", SL_COMPLETION_START};
-  CHECK(!openpty(&master, &slave, NULL, NULL, &size) && !pipe(wake));
+  static const struct completion_item completion = {"draft suggestion",
+                                                    SL_COMPLETION_START};
+  struct completion_fixture completions = {&completion, 1, 0};
+  CHECK(!openpty(&master, &slave, NULL, NULL, &size));
+  memset(&producer_state, 0, sizeof(producer_state));
+  producer_state.master = master;
+  producer_state.completions = &completions;
   CHECK(fcntl(master, F_SETFL, O_NONBLOCK) == 0);
   sl_config_init(&config);
   config.input_fd = config.output_fd = slave;
@@ -317,19 +333,19 @@ static int native_scope(void) {
   CHECK(sl);
   CHECK(sl_set_prompt_queue_delivery(sl, SL_PROMPT_QUEUE_DELIVERY_MANUAL) ==
         SL_OK);
-  CHECK(sl_set_completions(sl, &completion, 1) == SL_OK);
+  CHECK(fixture_setup(sl, &completions) == SL_OK);
   CHECK(sl_prompt_queue_append(sl, "QUEUE", 0, NULL) == SL_OK);
   CHECK(sl_inject_queued_prompt(sl, "APPROVAL", NULL) == SL_OK);
   CHECK(sl_set_status_message(sl, "reasoning") == SL_OK);
-  CHECK(sl_watch_add(sl, wake[0], SL_WATCH_READ, producer, &master, &watch) ==
-        SL_OK);
-  CHECK(sl_output_stream_begin(sl) == SL_OK && write(wake[1], "x", 1) == 1);
+  CHECK(sl_set_idle_callback(sl, produce_when_ready, &producer_state) == SL_OK);
+  CHECK(sl_output_stream_begin(sl) == SL_OK);
   line = sl_next_prompt(sl, "> ", NULL);
   if (!line || strcmp(line, "draft"))
     fprintf(stderr, "native draft=%s status=%d error=%s\n",
             line ? line : "NULL", sl_last_readline_status(sl),
             sl_last_error(sl));
   CHECK(line && !strcmp(line, "draft"));
+  CHECK(producer_state.status == SL_OK && completions.calls == 1);
   sl_free_string(sl, line);
   CHECK(sl_output_stream_end(sl) == SL_OK);
   sl_destroy(sl);
@@ -344,8 +360,6 @@ static int native_scope(void) {
   CHECK(scope_at(bytes, "suggestion", 0));
   close(master);
   close(slave);
-  close(wake[0]);
-  close(wake[1]);
   return 0;
 }
 

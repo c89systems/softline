@@ -40,10 +40,10 @@ Currently implemented:
 
 - Enter submits the current buffer.
 - `Ctrl-J` inserts a newline.
-- Host-supplied literal completions show inline dimmed suggestions. Tab accepts
+- Trigger callbacks supply current completions as inline dimmed suggestions. Tab accepts
   the suggestion and cycles matches; each word/phrase selects draft-start or
   whitespace-boundary matching.
-  See `sl_set_completions()` and the [completion contract](docs/softline-spec.md#literal-completion).
+  See `sl_set_completion_providers()` and the [completion contract](docs/softline-spec.md#completion-providers).
 - OSC 8 feed hyperlinks are opt-in: OFF by default, ON by host choice, or AUTO
   with conservative passive detection. `sl_get_osc8_info()` exposes the effective
   policy for renderers. C chat uses AUTO; try `make run-chat OSC8=on`.
@@ -162,8 +162,8 @@ Currently implemented:
 
 Not currently implemented:
 
-- computed/asynchronous completion provider APIs
-- inline hints, autosuggestions, or syntax highlighting
+- asynchronous completion provider APIs
+- history autosuggestions or syntax highlighting
 - forward history search or history filtering hooks
 - redo, vi mode, or full readline-style command sets
 - full Unicode Text Segmentation, locale-specific ambiguous-width handling, or
@@ -196,7 +196,7 @@ waiting for a connection handshake.
 `example_simple` is the normal terminal prompt. Output is printed after each
 submitted line and the next prompt proceeds below it like an ordinary REPL.
 
-The C and Lua simple/multiline and chat examples all register completion lists
+The C and Lua simple/multiline and chat examples all register completion providers
 and print a `Completion demo:` guide when interactive. Try them with
 `make run-simple`, `make lua-debug-simple`, any `run-chat-*` target, or
 `make lua-debug-chat`:
@@ -207,12 +207,14 @@ and print a `Completion demo:` guide when interactive. Try them with
 - Type `say ver`, then Tab: it completes `verification` after the space.
   Ctrl-J adds a real newline; the same word completion works on that next line.
 - Type `/q`, then Tab to complete `/quit`; Enter exits.
+- Type `@REA`, then Tab to complete `@README.md` from the current directory.
+  Space or Enter removes `@`. Each new `@` activation fetches a fresh file list.
 - Chat completes `/app` to `/approve on`, with another Tab choosing `/approve
   off`. Type `/` to cycle through all registered slash commands.
 
-The inline ghost appears before Tab and is not submitted until accepted. These lists belong to the example
+The inline ghost appears before Tab and is not submitted until accepted. These callbacks belong to the example
 hosts; applications using `readline()` or `next_prompt()` register their own
-with `set_completions()` / `sl_set_completions()`.
+with `set_completion_providers()` / `sl_set_completion_providers()`.
 
 `example_chat` is the C streaming Markdown demo. It links pinned libmdf 0.17.0
 only as an example dependency: libsoftline and its installed package remain

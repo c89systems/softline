@@ -33,6 +33,7 @@ typedef struct softline_lua_handle {
   char history_callback_error[SOFTLINE_LUA_IDLE_ERROR_LEN];
   int idle_callback_ref;
   int policy_callback_ref;
+  int completion_callback_active;
   sl_queue_backend_t backend_callbacks;
   int backend_callback_active;
   int terminal_callback_active;
@@ -434,7 +435,7 @@ static int softline_lua_new(lua_State *L) {
   sl_config_init(&config);
   softline_lua_config(L, 1, &config, &rooted_template, &backend,
                       &backend_context);
-  handle = (softline_lua_handle_t *)lua_newuserdatauv(L, sizeof(*handle), 2);
+  handle = (softline_lua_handle_t *)lua_newuserdatauv(L, sizeof(*handle), 3);
   memset(handle, 0, sizeof(*handle));
   handle->L = L;
   handle->history_callback_active = 0;
@@ -472,9 +473,10 @@ static int softline_lua_gc(lua_State *L) {
   softline_lua_handle_t *handle;
   int i;
   handle = (softline_lua_handle_t *)luaL_checkudata(L, 1, SOFTLINE_LUA_HANDLE);
-  if (handle->backend_callback_active || handle->policy_callback_active ||
-      handle->idle_callback_active || handle->watch_callback_active ||
-      handle->history_callback_active || handle->terminal_callback_active)
+  if (handle->completion_callback_active || handle->backend_callback_active ||
+      handle->policy_callback_active || handle->idle_callback_active ||
+      handle->watch_callback_active || handle->history_callback_active ||
+      handle->terminal_callback_active)
     return 0;
   for (i = 0; i < SOFTLINE_LUA_MAX_KEY_BINDINGS; i++) {
     if (handle->key_bindings[i].ref != LUA_NOREF) {
@@ -502,15 +504,18 @@ static int softline_lua_gc(lua_State *L) {
   }
   lua_pushnil(L);
   lua_setiuservalue(L, 1, 2);
+  lua_pushnil(L);
+  lua_setiuservalue(L, 1, 3);
   return 0;
 }
 
 static int softline_lua_close(lua_State *L) {
   softline_lua_handle_t *handle;
   handle = (softline_lua_handle_t *)luaL_checkudata(L, 1, SOFTLINE_LUA_HANDLE);
-  if (handle->backend_callback_active || handle->policy_callback_active ||
-      handle->idle_callback_active || handle->watch_callback_active ||
-      handle->history_callback_active || handle->terminal_callback_active)
+  if (handle->completion_callback_active || handle->backend_callback_active ||
+      handle->policy_callback_active || handle->idle_callback_active ||
+      handle->watch_callback_active || handle->history_callback_active ||
+      handle->terminal_callback_active)
     return luaL_error(L, "cannot close softline handle from its callback");
   return softline_lua_gc(L);
 }
@@ -903,48 +908,103 @@ static int softline_lua_get_osc8_info(lua_State *L) {
   return 1;
 }
 
-/** Lua editor:set_completions(items): copy literal strings or text/scope
- * tables. Bare strings and missing scopes default to COMPLETION_START. */
-static int softline_lua_set_completions(lua_State *L) {
+static int softline_lua_complete(sl_t *sl, char trigger,
+                                 sl_completion_emit_t emit, void *context,
+                                 void *userdata) {
+  softline_lua_handle_t *handle = userdata;
+  lua_State *L = handle->history_caller ? handle->history_caller : handle->L;
+  int top = lua_gettop(L), status = SL_OK;
+  size_t i, count;
+  (void)sl;
+  lua_getiuservalue(L, 1, 3);
+  lua_pushlstring(L, &trigger, 1);
+  lua_rawget(L, -2);
+  lua_pushlstring(L, &trigger, 1);
+  handle->completion_callback_active = 1;
+  if (lua_pcall(L, 1, 1, 0) != LUA_OK)
+    status = SL_ERROR;
+  else if (!lua_istable(L, -1))
+    status = SL_ERROR_INVALID;
+  else {
+    count = lua_rawlen(L, -1);
+    for (i = 0; i < count; ++i) {
+      const char *text;
+      size_t length;
+      lua_rawgeti(L, -1, (lua_Integer)i + 1);
+      text =
+          lua_type(L, -1) == LUA_TSTRING ? lua_tolstring(L, -1, &length) : NULL;
+      if (!text || strlen(text) != length)
+        status = SL_ERROR_INVALID;
+      else
+        status = emit(text, context);
+      lua_pop(L, 1);
+      if (status != SL_OK)
+        break;
+    }
+  }
+  handle->completion_callback_active = 0;
+  lua_settop(L, top);
+  return status;
+}
+
+/** Lua editor:set_completion_providers(registrations): trigger/scope/strip
+ * settings and a complete(trigger) callback returning full candidate strings.
+ */
+static int softline_lua_set_completion_providers(lua_State *L) {
   softline_lua_handle_t *handle = softline_lua_check(L, 1);
-  sl_completion_t *items;
-  size_t count, i;
-  int roots;
-  if (lua_isnoneornil(L, 2))
-    return softline_lua_status(L, sl_set_completions(handle->sl, NULL, 0));
-  luaL_checktype(L, 2, LUA_TTABLE);
-  count = lua_rawlen(L, 2);
+  sl_completion_provider_t *items;
+  size_t count = 0, i;
+  int callbacks, status;
+  if (handle->completion_callback_active)
+    return softline_lua_status(L, SL_ERROR_NOT_READY);
+  if (!lua_isnoneornil(L, 2)) {
+    luaL_checktype(L, 2, LUA_TTABLE);
+    count = lua_rawlen(L, 2);
+  }
   luaL_argcheck(L, count <= (size_t)-1 / sizeof(*items), 2,
-                "completion list too large");
+                "too many completion providers");
   items = lua_newuserdatauv(L, count * sizeof(*items), 0);
+  memset(items, 0, count * sizeof(*items));
   lua_newtable(L);
-  roots = lua_gettop(L);
+  callbacks = lua_gettop(L);
   for (i = 0; i < count; ++i) {
+    const char *trigger;
     size_t length;
     lua_rawgeti(L, 2, (lua_Integer)i + 1);
-    items[i].scope = SL_COMPLETION_START;
-    if (lua_istable(L, -1)) {
-      lua_getfield(L, -1, "scope");
-      if (!lua_isnil(L, -1)) {
-        lua_Integer scope = luaL_checkinteger(L, -1);
-        luaL_argcheck(
-            L, scope == SL_COMPLETION_START || scope == SL_COMPLETION_WORD, 2,
-            "invalid completion scope");
-        items[i].scope = (sl_completion_scope_t)scope;
-      }
-      lua_pop(L, 1);
-      lua_getfield(L, -1, "text");
-    } else
-      lua_pushvalue(L, -1);
-    luaL_checktype(L, -1, LUA_TSTRING);
-    items[i].text = lua_tolstring(L, -1, &length);
-    luaL_argcheck(L, strlen(items[i].text) == length, 2,
-                  "completion cannot contain NUL");
-    lua_pushvalue(L, -1);
-    lua_rawseti(L, roots, (lua_Integer)i + 1);
-    lua_pop(L, 2);
+    luaL_checktype(L, -1, LUA_TTABLE);
+    lua_getfield(L, -1, "trigger");
+    trigger = luaL_checklstring(L, -1, &length);
+    luaL_argcheck(L, length == 1, 2, "trigger must be one ASCII character");
+    items[i].trigger = trigger[0];
+    lua_pop(L, 1);
+    lua_getfield(L, -1, "scope");
+    if (!lua_isnil(L, -1)) {
+      lua_Integer scope = luaL_checkinteger(L, -1);
+      luaL_argcheck(L,
+                    scope == SL_COMPLETION_START || scope == SL_COMPLETION_WORD,
+                    2, "invalid completion scope");
+      items[i].scope = (sl_completion_scope_t)scope;
+    }
+    lua_pop(L, 1);
+    lua_getfield(L, -1, "strip_trigger");
+    if (!lua_isnil(L, -1))
+      luaL_checktype(L, -1, LUA_TBOOLEAN);
+    items[i].strip_trigger = lua_toboolean(L, -1);
+    lua_pop(L, 1);
+    lua_pushlstring(L, &items[i].trigger, 1);
+    lua_getfield(L, -2, "complete");
+    luaL_checktype(L, -1, LUA_TFUNCTION);
+    lua_rawset(L, callbacks);
+    items[i].callback = softline_lua_complete;
+    items[i].userdata = handle;
+    lua_pop(L, 1);
   }
-  return softline_lua_status(L, sl_set_completions(handle->sl, items, count));
+  status = sl_set_completion_providers(handle->sl, items, count);
+  if (status != SL_OK)
+    return softline_lua_status(L, status);
+  lua_pushvalue(L, callbacks);
+  lua_setiuservalue(L, 1, 3);
+  return softline_lua_status(L, SL_OK);
 }
 
 static int softline_lua_set_prompt_queue(lua_State *L) {
@@ -2013,7 +2073,7 @@ static const luaL_Reg softline_lua_methods[] = {
     {"history_compact", softline_lua_history_compact},
     {"history_set_auto_add", softline_lua_history_set_auto_add},
     {"set_screen_width", softline_lua_set_screen_width},
-    {"set_completions", softline_lua_set_completions},
+    {"set_completion_providers", softline_lua_set_completion_providers},
     {"set_osc8_mode", softline_lua_set_osc8_mode},
     {"get_osc8_info", softline_lua_get_osc8_info},
     {"set_live_scroll_region", softline_lua_set_live_scroll_region},

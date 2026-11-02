@@ -270,6 +270,8 @@ static char *sl_strdup(const char *s) {
 }
 
 static int sl_buf_set(sl_t *self, const char *s);
+static int sl_completion_finish(sl_t *self);
+static void sl_completion_prepare(sl_t *self);
 
 static void sl_prompt_queue_clear_raw(sl_prompt_queue_t *queue) {
   int i;
@@ -1206,6 +1208,8 @@ static int sl_buf_replace(sl_t *self, size_t at, size_t removed,
                           const char *text, size_t inserted) {
   sl_impl_t *impl = sl_impl(self);
   size_t len;
+  size_t completion_end = 0;
+  int update_completion = 0;
   if (!impl || at > impl->len || removed > impl->len - at ||
       inserted > impl->line_max_len - (impl->len - removed)) {
     sl_set_error(self, "edit exceeds the line limit");
@@ -1213,8 +1217,18 @@ static int sl_buf_replace(sl_t *self, size_t at, size_t removed,
   }
   if (!removed && !inserted)
     return 0;
-  if (!impl->completion_cycle.updating)
-    sl_completion_cycle_clear(&impl->completion_cycle);
+  if (!impl->completion.cycle.updating)
+    sl_completion_cycle_clear(&impl->completion.cycle);
+  if (impl->completion.active && !impl->completion.finishing) {
+    if (!impl->completion.cycle.updating) {
+      if (at > impl->completion.start && at <= impl->completion.end &&
+          removed <= impl->completion.end - at) {
+        completion_end = impl->completion.end - removed + inserted;
+        update_completion = 1;
+      } else
+        sl_completion_reset(&impl->completion);
+    }
+  }
   if (removed == inserted && !memcmp(impl->buf + at, text, inserted))
     return 0;
   len = impl->len - removed + inserted;
@@ -1232,6 +1246,8 @@ static int sl_buf_replace(sl_t *self, size_t at, size_t removed,
     memmove(impl->buf + at, text, inserted);
   impl->len = len;
   impl->buf[len] = '\0';
+  if (update_completion)
+    impl->completion.end = completion_end;
   impl->edit.changed = 1;
   impl->preferred_column_valid = 0;
   return 0;
@@ -1249,7 +1265,7 @@ static int sl_buf_set(sl_t *self, const char *s) {
   /* A recalled/queued draft is a new editing context, not an undoable
    * mutation of the previous entry's identity. Public set_buffer is journaled.
    */
-  sl_completion_cycle_clear(&impl->completion_cycle);
+  sl_completion_reset(&impl->completion);
   if (!impl->history_search_active)
     sl_edit_clear_undo(&impl->edit);
   if (n > 0)
@@ -1314,6 +1330,94 @@ static int sl_buf_set_public(sl_t *self, const char *text) {
   return SL_OK;
 }
 
+static int sl_completion_finish(sl_t *self) {
+  sl_impl_t *impl = sl_impl(self);
+  sl_completion_state_t *state = &impl->completion;
+  if (state->active && state->provider.strip_trigger &&
+      state->start < impl->len &&
+      impl->buf[state->start] == state->provider.trigger) {
+    size_t cursor = impl->cursor;
+    sl_edit_begin(&impl->edit, SL_EDIT_OTHER);
+    state->finishing = 1;
+    if (sl_buf_replace(self, state->start, 1, NULL, 0) != 0) {
+      state->finishing = 0;
+      return SL_ERROR;
+    }
+    state->finishing = 0;
+    impl->cursor = cursor > state->start ? cursor - 1 : cursor;
+    impl->preferred_column_valid = 0;
+    impl->edit.yank_valid = 0;
+  }
+  sl_completion_reset(state);
+  return SL_OK;
+}
+
+static int sl_completion_emit(const char *text, void *context) {
+  sl_completion_state_t *state = context;
+  int status;
+  if (state->failed)
+    return state->failed;
+  if (!text || !*text || text[0] != state->provider.trigger ||
+      strlen(text) > state->limit || !sl_quoted_prompt_text_valid(text))
+    status = SL_ERROR_INVALID;
+  else
+    status = sl_completion_add(state, text);
+  if (status != SL_OK)
+    state->failed = status;
+  return status;
+}
+
+/* Resolve only from the input owner, never from a redraw or feed. */
+static void sl_completion_prepare(sl_t *self) {
+  sl_impl_t *impl = sl_impl(self);
+  sl_completion_state_t *state = &impl->completion;
+  size_t start, end, i;
+  int status;
+  if (!state->provider_count || !impl->active_readline ||
+      impl->output_write_active || state->resolving ||
+      impl->history_search_active || impl->bracketed_paste)
+    return;
+  if (state->active) {
+    if (state->start < impl->len &&
+        impl->buf[state->start] == state->provider.trigger &&
+        impl->cursor > state->start && impl->cursor <= state->end)
+      return;
+    if (sl_completion_finish(self) != SL_OK)
+      return;
+  }
+  start = impl->cursor;
+  while (start && !sl_completion_space((unsigned char)impl->buf[start - 1]))
+    --start;
+  if (start == impl->cursor)
+    return;
+  for (i = 0; i < state->provider_count; ++i)
+    if (state->providers[i].trigger == impl->buf[start] &&
+        (!start || state->providers[i].scope == SL_COMPLETION_WORD))
+      break;
+  if (i == state->provider_count)
+    return;
+  end = impl->cursor;
+  while (end < impl->len && !sl_completion_space((unsigned char)impl->buf[end]))
+    ++end;
+  state->provider = state->providers[i];
+  state->start = start;
+  state->end = end;
+  state->limit = impl->line_max_len;
+  state->active = state->resolving = 1;
+  status = state->provider.callback(self, state->provider.trigger,
+                                    sl_completion_emit, state,
+                                    state->provider.userdata);
+  state->resolving = 0;
+  if (status != SL_OK || state->failed) {
+    state->failed = status != SL_OK ? status : state->failed;
+    sl_completion_clear(&state->list);
+    state->provider.strip_trigger = 0;
+    sl_set_error(self,
+                 "completion provider failed or emitted an invalid candidate");
+    (void)sl_write_all(impl->output_fd, "\a", 1);
+  }
+}
+
 static const char *sl_buffer_method(const sl_t *self) {
   const sl_impl_t *impl;
   impl = sl_impl_const(self);
@@ -1335,7 +1439,7 @@ static int sl_set_cursor_method(sl_t *self, size_t cursor) {
   impl = sl_impl(self);
   if (!impl)
     return SL_ERROR_INVALID;
-  sl_completion_cycle_clear(&impl->completion_cycle);
+  sl_completion_cycle_clear(&impl->completion.cycle);
   if (cursor > impl->len)
     cursor = impl->len;
   impl->cursor = sl_utf8_clamp_cluster_boundary(impl->buf, impl->len, cursor);
@@ -1348,6 +1452,9 @@ static int sl_set_cursor_method(sl_t *self, size_t cursor) {
   impl->edit.changed = 1;
   impl->preferred_column_valid = 0;
   impl->edit.yank_valid = 0;
+  if (impl->completion.active && (impl->cursor <= impl->completion.start ||
+                                  impl->cursor > impl->completion.end))
+    return sl_completion_finish(self);
   return SL_OK;
 }
 
@@ -3224,10 +3331,10 @@ static int sl_render_append_queue_panel(sl_t *self, sl_render_t *render,
 static int sl_current_completion(sl_impl_t *impl,
                                  sl_completion_match_t *match) {
   if (impl->history_search_active || impl->bracketed_paste ||
-      !sl_completion_find(&impl->completions, impl->buf, impl->cursor, match))
+      !sl_completion_find(&impl->completion, impl->buf, impl->cursor, match))
     return 0;
   return match->count > 1 ||
-         impl->completions.items[match->first].length >
+         impl->completion.list.items[match->first].length >
              impl->cursor - match->start ||
          (impl->cursor < impl->len &&
           !sl_completion_space((unsigned char)impl->buf[impl->cursor - 1]) &&
@@ -3242,10 +3349,10 @@ static int sl_render_project_input(sl_t *self, sl_render_t *render) {
   render->input = impl->buf;
   render->input_len = impl->len;
   render->input_cursor = impl->cursor;
-  if (!impl->active_readline || impl->completion_cycle.original ||
+  if (!impl->active_readline || impl->completion.cycle.original ||
       !sl_current_completion(impl, &match))
     return 0;
-  item = &impl->completions.items[match.first];
+  item = &impl->completion.list.items[match.first];
   prefix = impl->cursor - match.start;
   while (prefix + overlap < item->length &&
          impl->cursor + overlap < impl->len &&
@@ -6470,6 +6577,13 @@ static int sl_handle_prompt_queue_key(sl_t *self, int key, int *handled,
   if (!sl_prompt_queue_enabled(impl))
     return SL_OK;
   keys = &impl->prompt_queue.keys;
+  if ((keys->enqueue_draft != SL_KEY_NONE && key == (int)keys->enqueue_draft) ||
+      (keys->submit_or_promote_newest != SL_KEY_NONE &&
+       key == (int)keys->submit_or_promote_newest) ||
+      (keys->edit_newest != SL_KEY_NONE && key == (int)keys->edit_newest)) {
+    if (sl_completion_finish(self) != SL_OK)
+      return SL_ERROR;
+  }
   if (impl->backend) {
     if (key == SL_KEY_ENTER ||
         (keys->enqueue_draft != SL_KEY_NONE &&
@@ -6801,7 +6915,7 @@ static size_t sl_completion_end(const char *buf, size_t len, size_t cursor,
 
 static int sl_complete_draft(sl_t *self) {
   sl_impl_t *impl = sl_impl(self);
-  sl_completion_cycle_t *cycle = &impl->completion_cycle;
+  sl_completion_cycle_t *cycle = &impl->completion.cycle;
   const sl_completion_item_t *item;
   size_t selected, end, removed, restore, i;
   const char *text;
@@ -6818,17 +6932,16 @@ static int sl_complete_draft(sl_t *self) {
     cycle->start = match.start;
     cycle->cursor = cycle->end = impl->cursor;
     cycle->inserted = prefix = impl->cursor - match.start;
-    for (i = 0; i < impl->completions.count; ++i) {
-      item = &impl->completions.items[i];
-      if ((!match.start || item->scope == SL_COMPLETION_WORD) &&
-          item->length >= prefix &&
+    for (i = 0; i < impl->completion.list.count; ++i) {
+      item = &impl->completion.list.items[i];
+      if (item->length >= prefix &&
           !memcmp(item->text, impl->buf + match.start, prefix))
         cycle->items[cycle->count++] = i;
     }
     selected = 0;
   } else
     selected = (cycle->selected + 1) % cycle->count;
-  item = &impl->completions.items[cycle->items[selected]];
+  item = &impl->completion.list.items[cycle->items[selected]];
   end = sl_completion_end(cycle->original, strlen(cycle->original),
                           cycle->cursor, cycle->start, item);
   removed = cycle->inserted + (end > cycle->end ? end - cycle->end : 0);
@@ -6860,6 +6973,7 @@ static int sl_complete_draft(sl_t *self) {
   if (impl->cursor < end)
     impl->cursor +=
         sl_utf8_next_cluster_len(impl->buf, impl->len, impl->cursor);
+  impl->completion.end = impl->cursor;
   impl->preferred_column_valid = 0;
   impl->edit.yank_valid = 0;
   if (cycle->count == 1)
@@ -6948,6 +7062,7 @@ static char *sl_readline_impl(sl_t *self, const char *prompt,
     sl_render_store_clear(impl);
   impl->active_prompt =
       impl->history_search_active && search.prompt ? search.prompt : prompt;
+  sl_completion_prepare(self);
   if (sl_render_apply(self, impl->active_prompt) != 0) {
     impl->active_prompt = NULL;
     impl->active_readline = 0;
@@ -7014,7 +7129,7 @@ static char *sl_readline_impl(sl_t *self, const char *prompt,
         key != SL_KEY_ESCAPE &&
         (impl->bracketed_paste || sl_backend_reading_paste(impl) ||
          !sl_find_key_binding(impl, (sl_key_t)key) || key == SL_KEY_ENTER ||
-         (key == SL_KEY_TAB && impl->completions.count) ||
+         (key == SL_KEY_TAB && impl->completion.provider_count) ||
          key == (int)impl->prompt_queue.keys.enqueue_draft ||
          key == (int)impl->prompt_queue.keys.submit_or_promote_newest)) {
       if (!paste_len && key >= 128 && key < 256)
@@ -7053,18 +7168,28 @@ static char *sl_readline_impl(sl_t *self, const char *prompt,
         key = SL_KEY_UNKNOWN;
       }
     }
+    if (key == SL_KEY_TAB)
+      sl_completion_prepare(self);
+    if (key == ' ' || key == SL_KEY_CTRL_J || key == SL_KEY_ENTER ||
+        key == SL_KEY_ALT_ENTER || key == SL_KEY_ALT_E ||
+        key == SL_KEY_PASTE_BEGIN) {
+      if (sl_completion_finish(self) != SL_OK) {
+        failed = done = 1;
+        break;
+      }
+    }
     if (key != SL_KEY_NONE && key != SL_KEY_TAB)
-      sl_completion_cycle_clear(&impl->completion_cycle);
+      sl_completion_cycle_clear(&impl->completion.cycle);
     if (key != SL_KEY_NONE &&
         (key != SL_KEY_CTRL_L || sl_find_key_binding(impl, (sl_key_t)key))) {
       int command = SL_EDIT_OTHER;
       if (impl->bracketed_paste && key != SL_KEY_PASTE_END)
         command = SL_EDIT_PASTE;
       else if (key == SL_KEY_TAB &&
-               (impl->completion_cycle.original ||
+               (impl->completion.cycle.original ||
                 sl_current_completion(impl, &completion))) {
         command = SL_EDIT_COMPLETE;
-        if (!impl->completion_cycle.original)
+        if (!impl->completion.cycle.original)
           impl->edit.last_command = SL_EDIT_OTHER;
       } else if (sl_find_key_binding(impl, (sl_key_t)key))
         command = SL_EDIT_OTHER;
@@ -7603,6 +7728,9 @@ static char *sl_readline_impl(sl_t *self, const char *prompt,
       }
       break;
     }
+    if (done && !failed && !cancelled && !interrupted && !suspended && !eof &&
+        !promoted && !queued && sl_completion_finish(self) != SL_OK)
+      failed = 1;
     /* Backend admission stays asynchronous for callback submits as well as
      * native keys. Accepted remote text is never returned as local delivery. */
     if (impl->backend && done && !failed && !cancelled && !interrupted &&
@@ -7657,6 +7785,7 @@ static char *sl_readline_impl(sl_t *self, const char *prompt,
      * coalesce frame construction, as for a large bracketed paste. A real
      * idle tick still redraws even below this bounded batch. */
     if (!done && (!deferred_input || deferred_since_render >= 4096)) {
+      sl_completion_prepare(self);
       if (sl_render_apply(self, render_prompt) != 0) {
         failed = 1;
         done = 1;
@@ -7664,6 +7793,8 @@ static char *sl_readline_impl(sl_t *self, const char *prompt,
       deferred_since_render = 0;
     }
   }
+  if (!failed && sl_completion_finish(self) != SL_OK)
+    failed = 1;
   sl_edit_end(&impl->edit);
   impl->edit.enabled = 0;
   impl->active_readline = 0;
@@ -7928,8 +8059,8 @@ static void sl_destroy_method(sl_t *self) {
     free(impl->pending_input);
     free(impl->retained_prompt);
     sl_edit_destroy(&impl->edit);
-    sl_completion_cycle_clear(&impl->completion_cycle);
-    sl_completion_clear(&impl->completions);
+    sl_completion_reset(&impl->completion);
+    free(impl->completion.providers);
     free(impl->buf);
     free(impl);
   }
@@ -7993,33 +8124,42 @@ static int sl_get_osc8_info_method(const sl_t *self, sl_osc8_info_t *info) {
   return SL_OK;
 }
 
-static int sl_set_completions_method(sl_t *self, const sl_completion_t *items,
-                                     size_t count) {
+static int sl_set_completion_providers_method(
+    sl_t *self, const sl_completion_provider_t *providers, size_t count) {
   sl_impl_t *impl = sl_impl(self);
-  sl_completion_list_t next;
-  size_t i;
-  int status;
+  sl_completion_provider_t *next = NULL;
+  size_t i, j;
   if (!impl || impl->terminal_active || sl_backend_callback_active(impl) ||
-      (!items && count) || count > (size_t)-1 / sizeof(sl_completion_item_t))
+      (!providers && count) || count > (size_t)-1 / sizeof(*next))
     return SL_ERROR_INVALID;
+  if (impl->completion.resolving)
+    return SL_ERROR_NOT_READY;
   for (i = 0; i < count; ++i) {
-    if (!items[i].text || !*items[i].text ||
-        strlen(items[i].text) > impl->line_max_len ||
-        (items[i].scope != SL_COMPLETION_START &&
-         items[i].scope != SL_COMPLETION_WORD) ||
-        !sl_quoted_prompt_text_valid(items[i].text)) {
-      sl_set_error(self, "invalid completion text or scope");
+    if ((unsigned char)providers[i].trigger <= 32 ||
+        (unsigned char)providers[i].trigger >= 127 || !providers[i].callback ||
+        (providers[i].scope != SL_COMPLETION_START &&
+         providers[i].scope != SL_COMPLETION_WORD) ||
+        providers[i].strip_trigger < 0 || providers[i].strip_trigger > 1) {
+      sl_set_error(self, "invalid completion trigger, scope or callback");
       return SL_ERROR_INVALID;
     }
+    for (j = 0; j < i; ++j)
+      if (providers[j].trigger == providers[i].trigger)
+        return SL_ERROR_INVALID;
   }
-  status = sl_completion_copy(&next, items, count);
-  if (status != SL_OK) {
-    sl_set_error(self, "could not copy completion list");
-    return status;
+  if (count) {
+    next = malloc(count * sizeof(*next));
+    if (!next)
+      return SL_ERROR_NOMEM;
+    memcpy(next, providers, count * sizeof(*next));
   }
-  sl_completion_clear(&impl->completions);
-  sl_completion_cycle_clear(&impl->completion_cycle);
-  impl->completions = next;
+  if (sl_completion_finish(self) != SL_OK) {
+    free(next);
+    return SL_ERROR;
+  }
+  free(impl->completion.providers);
+  impl->completion.providers = next;
+  impl->completion.provider_count = count;
   if (impl->active_prompt && sl_render_apply(self, impl->active_prompt) != 0)
     return SL_ERROR_IO;
   return SL_OK;
@@ -8491,6 +8631,8 @@ static int sl_prompt_queue_enqueue_draft_method(sl_t *self) {
   sl_impl_t *impl;
   int rc, managed_edit;
   impl = sl_impl(self);
+  if (impl && sl_completion_finish(self) != SL_OK)
+    return SL_ERROR;
   if (impl && impl->backend)
     return sl_backend_submit(self, SL_PROMPT_QUEUE_MODE_QUEUED);
   if (sl_prompt_queue_require_enabled(self, impl) != SL_OK)
@@ -9124,7 +9266,7 @@ static sl_t *sl_create_with_config_impl(const sl_config_t *config) {
     return NULL;
   }
   self->readline = sl_readline_method;
-  self->set_completions = sl_set_completions_method;
+  self->set_completion_providers = sl_set_completion_providers_method;
   self->set_osc8_mode = sl_set_osc8_mode_method;
   self->get_osc8_info = sl_get_osc8_info_method;
   self->destroy = sl_destroy_method;
@@ -9291,10 +9433,12 @@ void sl_destroy(sl_t *self) {
     self->destroy(self);
 }
 
-int sl_set_completions(sl_t *self, const sl_completion_t *items, size_t count) {
-  if (!self || !self->set_completions)
+int sl_set_completion_providers(sl_t *self,
+                                const sl_completion_provider_t *providers,
+                                size_t count) {
+  if (!self || !self->set_completion_providers)
     return SL_ERROR_INVALID;
-  return self->set_completions(self, items, count);
+  return self->set_completion_providers(self, providers, count);
 }
 
 int sl_set_osc8_mode(sl_t *self, sl_osc8_mode_t mode) {

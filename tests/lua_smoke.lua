@@ -6,6 +6,22 @@ local function assert_eq(actual, expected, label)
   end
 end
 
+do
+  local weak = setmetatable({}, {__mode="v"})
+  local function make_cycle()
+    local editor = assert(softline.new())
+    assert(editor:set_completion_providers({{trigger="/", complete=function()
+      assert(editor:buffer() ~= nil)
+      return {"/quit"}
+    end}}))
+    return editor
+  end
+  weak[1] = make_cycle()
+  collectgarbage("collect")
+  collectgarbage("collect")
+  assert(weak[1] == nil, "completion callbacks must not root their editor")
+end
+
 local prompt_methods = {
   "next_prompt",
   "set_live_scroll_region",
@@ -38,7 +54,7 @@ local prompt_methods = {
   "set_queue_keys",
   "queue_keys",
   "set_prompt_theme",
-  "set_completions",
+  "set_completion_providers",
   "set_osc8_mode",
   "get_osc8_info",
   "set_quoted_prompt_prefix",

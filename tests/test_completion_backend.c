@@ -1,4 +1,5 @@
 #define _DEFAULT_SOURCE
+#include "completion_fixture.h"
 #include <pty.h>
 #include <softline/softline.h>
 #include <stdio.h>
@@ -92,7 +93,9 @@ static int run(int native, int kind) {
   sl_queue_backend_t backend;
   sl_queue_entry_t entry;
   sl_queue_change_t change;
-  sl_completion_t completion = {"verification", SL_COMPLETION_WORD};
+  static const struct completion_item completion = {"verification",
+                                                    SL_COMPLETION_WORD};
+  struct completion_fixture completions = {&completion, 1, 0};
   sl_watch_id_t watch;
   sl_prompt_queue_entry_info_t draft;
   sl_t *sl;
@@ -126,7 +129,7 @@ static int run(int native, int kind) {
   change.entries = &entry;
   change.count = change.total_count = 1;
   CHECK(sl_queue_backend_update(sl, &change) == SL_OK);
-  CHECK(sl_set_completions(sl, &completion, 1) == SL_OK);
+  CHECK(fixture_setup(sl, &completions) == SL_OK);
   CHECK(sl_bind_key(sl, SL_KEY_TAB, host_tab, &f) == SL_OK);
   CHECK(sl_bind_key(sl, SL_KEY_CTRL_T, acknowledge, &f) == SL_OK);
   CHECK(sl_bind_key(sl, SL_KEY_ALT_BASE + 's', suspend_key, &f) == SL_OK);

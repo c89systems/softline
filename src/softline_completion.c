@@ -6,13 +6,11 @@ int sl_completion_space(unsigned char ch) {
   return ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r' || ch == '\v' ||
          ch == '\f';
 }
-
 void sl_completion_cycle_clear(sl_completion_cycle_t *cycle) {
   free(cycle->original);
   free(cycle->items);
   memset(cycle, 0, sizeof(*cycle));
 }
-
 void sl_completion_clear(sl_completion_list_t *list) {
   size_t i;
   for (i = 0; i < list->count; ++i)
@@ -20,69 +18,55 @@ void sl_completion_clear(sl_completion_list_t *list) {
   free(list->items);
   memset(list, 0, sizeof(*list));
 }
-
-int sl_completion_copy(sl_completion_list_t *out, const sl_completion_t *items,
-                       size_t count) {
-  size_t i, j;
-  memset(out, 0, sizeof(*out));
-  if (count > (size_t)-1 / sizeof(*out->items))
-    return SL_ERROR_INVALID;
-  if (!count)
-    return SL_OK;
-  out->items = calloc(count, sizeof(*out->items));
-  if (!out->items)
-    return SL_ERROR_NOMEM;
-  for (i = 0; i < count; ++i) {
-    sl_completion_item_t *item;
-    for (j = 0; j < out->count; ++j)
-      if (!strcmp(out->items[j].text, items[i].text))
-        break;
-    if (j < out->count) {
-      if (items[i].scope == SL_COMPLETION_WORD)
-        out->items[j].scope = SL_COMPLETION_WORD;
-      continue;
-    }
-    item = &out->items[out->count++];
-    item->length = strlen(items[i].text);
-    if (out->max_length < item->length)
-      out->max_length = item->length;
-    item->scope = items[i].scope;
-    item->text = malloc(item->length + 1);
-    if (!item->text) {
-      sl_completion_clear(out);
+void sl_completion_reset(sl_completion_state_t *state) {
+  sl_completion_clear(&state->list);
+  sl_completion_cycle_clear(&state->cycle);
+  state->active = state->failed = 0;
+  state->start = state->end = 0;
+}
+int sl_completion_add(sl_completion_state_t *state, const char *text) {
+  sl_completion_list_t *list = &state->list;
+  sl_completion_item_t *item;
+  size_t length = strlen(text), i;
+  for (i = 0; i < list->count; ++i)
+    if (!strcmp(list->items[i].text, text))
+      return SL_OK;
+  if (list->count == list->capacity) {
+    size_t capacity = list->capacity ? list->capacity * 2 : 8;
+    sl_completion_item_t *next;
+    if (capacity < list->capacity || capacity > (size_t)-1 / sizeof(*next))
       return SL_ERROR_NOMEM;
-    }
-    memcpy(item->text, items[i].text, item->length + 1);
+    next = realloc(list->items, capacity * sizeof(*next));
+    if (!next)
+      return SL_ERROR_NOMEM;
+    list->items = next;
+    list->capacity = capacity;
   }
+  item = &list->items[list->count];
+  item->text = malloc(length + 1);
+  if (!item->text)
+    return SL_ERROR_NOMEM;
+  memcpy(item->text, text, length + 1);
+  item->length = length;
+  ++list->count;
   return SL_OK;
 }
-
-/* Prefer the longest matching phrase prefix when several whitespace anchors
- * qualify. Candidates from different replacement spans never share a cycle. */
-int sl_completion_find(const sl_completion_list_t *list, const char *text,
+int sl_completion_find(const sl_completion_state_t *state, const char *text,
                        size_t cursor, sl_completion_match_t *match) {
-  size_t start, i;
+  size_t i, prefix;
   memset(match, 0, sizeof(*match));
-  if (!cursor || !list->count)
+  if (!state->active || cursor <= state->start || cursor > state->end)
     return 0;
-  for (start = cursor > list->max_length ? cursor - list->max_length : 0;
-       start < cursor; ++start) {
-    size_t prefix = cursor - start;
-    if (start && !sl_completion_space((unsigned char)text[start - 1]))
-      continue;
-    for (i = 0; i < list->count; ++i) {
-      const sl_completion_item_t *item = &list->items[i];
-      if ((start && item->scope != SL_COMPLETION_WORD) ||
-          prefix > item->length || memcmp(text + start, item->text, prefix))
-        continue;
-      if (!match->count) {
-        match->start = start;
+  prefix = cursor - state->start;
+  match->start = state->start;
+  for (i = 0; i < state->list.count; ++i) {
+    const sl_completion_item_t *item = &state->list.items[i];
+    if (item->length >= prefix &&
+        !memcmp(text + state->start, item->text, prefix)) {
+      if (!match->count)
         match->first = i;
-      }
       ++match->count;
     }
-    if (match->count)
-      return 1;
   }
-  return 0;
+  return match->count != 0;
 }

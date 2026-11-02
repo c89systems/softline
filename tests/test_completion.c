@@ -1,4 +1,5 @@
 #define _DEFAULT_SOURCE
+#include "completion_fixture.h"
 #include <pty.h>
 #include <softline/softline.h>
 #include <stdio.h>
@@ -14,7 +15,7 @@
     }                                                                          \
   } while (0)
 
-static const sl_completion_t candidates[] = {
+static const struct completion_item candidates[] = {
     {"/status", SL_COMPLETION_START},
     {"/stop", SL_COMPLETION_START},
     {"/approve on", SL_COMPLETION_START},
@@ -99,7 +100,16 @@ static int run(int native, const char *initial, size_t cursor, const char *keys,
   char *line;
   sl_prompt_id_t id = 0;
   sl_prompt_queue_entry_info_t info;
-  sl_completion_t invalid = {"bad\033[31m", SL_COMPLETION_START};
+  struct completion_fixture fixture = {
+      candidates, sizeof(candidates) / sizeof(candidates[0]), 0};
+  struct completion_item cluster[2] = {{"cafet", SL_COMPLETION_START},
+                                       {"cafe\314\201x", SL_COMPLETION_START}};
+  static const struct completion_item copied[] = {
+      {"verification", SL_COMPLETION_WORD},
+      {"verification", SL_COMPLETION_WORD}};
+  static const struct completion_item short_one[] = {
+      {"verification", SL_COMPLETION_WORD}};
+  sl_completion_provider_t invalid = {'/', SL_COMPLETION_START, 0, NULL, NULL};
   CHECK(!openpty(&master, &slave, NULL, NULL, &size) && !pipe(wake));
   sl_config_init(&config);
   config.input_fd = config.output_fd = slave;
@@ -109,20 +119,18 @@ static int run(int native, const char *initial, size_t cursor, const char *keys,
   sl = sl_create_with_config(&config);
   CHECK(sl);
   if (limit > 20) {
-    CHECK(sl->set_completions(sl, candidates,
-                              sizeof(candidates) / sizeof(candidates[0])) ==
-          SL_OK);
-    CHECK(sl_set_completions(sl, &invalid, 1) == SL_ERROR_INVALID);
-    invalid.text = "\300\257";
-    CHECK(sl_set_completions(sl, &invalid, 1) == SL_ERROR_INVALID);
-    invalid.text = "fine";
+    CHECK(fixture_setup(sl, &fixture) == SL_OK);
+    CHECK(sl_set_completion_providers(sl, &invalid, 1) == SL_ERROR_INVALID);
+    invalid.callback = fixture_complete;
     invalid.scope = (sl_completion_scope_t)9;
-    CHECK(sl_set_completions(sl, &invalid, 1) == SL_ERROR_INVALID);
-    CHECK(sl_set_completions(sl, NULL, 1) == SL_ERROR_INVALID);
-    CHECK(sl_set_completions(sl, candidates, (size_t)-1) == SL_ERROR_INVALID);
+    CHECK(sl_set_completion_providers(sl, &invalid, 1) == SL_ERROR_INVALID);
+    CHECK(sl_set_completion_providers(sl, NULL, 1) == SL_ERROR_INVALID);
+    CHECK(sl_set_completion_providers(sl, &invalid, (size_t)-1) ==
+          SL_ERROR_INVALID);
   } else {
-    sl_completion_t short_one = {"verification", SL_COMPLETION_WORD};
-    CHECK(sl_set_completions(sl, &short_one, 1) == SL_OK);
+    fixture.items = short_one;
+    fixture.count = 1;
+    CHECK(fixture_setup(sl, &fixture) == SL_OK);
   }
   memset(&d, 0, sizeof(d));
   d.master = master;
@@ -134,26 +142,21 @@ static int run(int native, const char *initial, size_t cursor, const char *keys,
   if (scenario != QUEUE_TAB)
     CHECK(sl_bind_key(sl, SL_KEY_TAB, host_tab, &d) == SL_OK);
   if (scenario == COPIED_LIST) {
-    char text[] = "verification";
-    sl_completion_t copied[2];
-    copied[0].text = copied[1].text = text;
-    copied[0].scope = SL_COMPLETION_START;
-    copied[1].scope = SL_COMPLETION_WORD;
-    CHECK(sl_set_completions(sl, copied, 2) == SL_OK);
-    memset(text, 'X', sizeof(text) - 1);
-    copied[1].scope = SL_COMPLETION_START;
+    fixture.items = copied;
+    fixture.count = 2;
+    CHECK(fixture_setup(sl, &fixture) == SL_OK);
   }
   if (scenario == CLEARED_LIST)
-    CHECK(sl_set_completions(sl, NULL, 0) == SL_OK);
+    CHECK(sl_set_completion_providers(sl, NULL, 0) == SL_OK);
   if (scenario == CLUSTER_FIRST || scenario == CLUSTER_LAST) {
-    sl_completion_t cluster[2] = {{"cafet", SL_COMPLETION_START},
-                                  {"cafe\314\201x", SL_COMPLETION_START}};
     if (scenario == CLUSTER_FIRST) {
-      sl_completion_t swap = cluster[0];
+      struct completion_item swap = cluster[0];
       cluster[0] = cluster[1];
       cluster[1] = swap;
     }
-    CHECK(sl_set_completions(sl, cluster, 2) == SL_OK);
+    fixture.items = cluster;
+    fixture.count = 2;
+    CHECK(fixture_setup(sl, &fixture) == SL_OK);
   }
   CHECK(sl_bind_key(sl, SL_KEY_ALT_BASE + 's', suspend_key, NULL) == SL_OK);
   CHECK(sl_set_prompt_queue_delivery(sl, SL_PROMPT_QUEUE_DELIVERY_MANUAL) ==
@@ -196,6 +199,173 @@ static int run(int native, const char *initial, size_t cursor, const char *keys,
   close(wake[1]);
   close(master);
   close(slave);
+  return 0;
+}
+
+struct provider_data {
+  struct driver driver;
+  int calls, generation, kind;
+};
+static int dynamic_provider(sl_t *sl, char trigger, sl_completion_emit_t emit,
+                            void *context, void *userdata) {
+  struct provider_data *data = userdata;
+  char value[64];
+  int status;
+  (void)sl;
+  ++data->calls;
+  if (data->kind == 1)
+    return SL_OK;
+  if (data->kind == 2)
+    return SL_ERROR_IO;
+  if (data->kind == 3) {
+    (void)emit("bad\033[31m", context);
+    return SL_OK;
+  }
+  if (data->kind == 5) {
+    (void)emit("@\300\257", context);
+    return SL_OK;
+  }
+  snprintf(value, sizeof(value), "%c%s", trigger,
+           trigger == '@'     ? "alpha.txt"
+           : data->generation ? "fresh1"
+                              : "command1");
+  status = emit(value, context);
+  memset(value, 'X', sizeof(value));
+  if (status != SL_OK)
+    return status;
+  if (data->kind == 9) {
+    (void)emit("@bad\033[31m", context);
+    return SL_OK;
+  }
+  if (data->kind == 4)
+    return emit("/command1", context);
+  snprintf(value, sizeof(value), "%c%s", trigger,
+           trigger == '@'     ? "beta.txt"
+           : data->generation ? "fresh2"
+                              : "command2");
+  return emit(value, context);
+}
+static int update_provider(sl_t *sl, sl_key_t key, void *userdata,
+                           sl_key_action_t *action) {
+  struct provider_data *data = userdata;
+  (void)sl;
+  (void)key;
+  if (data->kind == 6 && strcmp(sl_buffer(sl), "@al")) {
+    fprintf(stderr, "strip undo restored <%s>\n", sl_buffer(sl));
+    return SL_ERROR;
+  }
+  if (data->kind == 8 && sl_prompt_queue_enqueue_draft(sl) != SL_OK)
+    return SL_ERROR;
+  if (data->kind == 10 &&
+      (sl_set_cursor(sl, 0) != SL_OK || sl_insert(sl, "X") != SL_OK))
+    return SL_ERROR;
+  ++data->generation;
+  *action = SL_KEY_ACTION_HANDLED;
+  return SL_OK;
+}
+static int provider_cases(int native) {
+  static const struct {
+    char trigger;
+    int strip, kind, calls, host_calls, word;
+    const char *keys, *expected;
+  } cases[] = {
+      {'/', 0, 0, 1, 0, 0, "/\024\t\t\r", "/command2"},
+      {'/', 0, 0, 2, 0, 0, "/\024\025/\t\r", "/fresh1"},
+      {'/', 0, 0, 1, 0, 0, "/command1\177\024\t\t\r", "/command2"},
+      {'/', 0, 0, 0, 1, 0, "say /\t\r", "say /#"},
+      {'/', 0, 0, 1, 0, 1, "say\n/\t\r", "say\n/command1"},
+      {'/', 0, 4, 1, 1, 0, "/\t\t\r", "/command1#"},
+      {'@', 1, 0, 1, 0, 1, "@al\r", "al"},
+      {'@', 1, 0, 1, 0, 1, "@a\t\r", "alpha.txt"},
+      {'@', 1, 0, 2, 0, 1, "say @a\t @b\t\r", "say alpha.txt beta.txt"},
+      {'@', 1, 0, 1, 0, 1, "@al \r", "al "},
+      {'@', 1, 0, 1, 0, 1, "@al\001X\r", "Xal"},
+      {'@', 1, 0, 1, 0, 1, "@al\033e\r", "al"},
+      {'@', 1, 0, 2, 0, 1, "@\177@b\t\r", "beta.txt"},
+      {'@', 0, 0, 1, 0, 1, "@a\t\r", "@alpha.txt"},
+      {'@', 1, 1, 1, 1, 1, "@abc\177d\024\t\r", "abd#"},
+      {'@', 1, 2, 1, 1, 1, "@abc\t\r", "@abc#"},
+      {'@', 1, 3, 1, 1, 1, "@abc\t\r", "@abc#"},
+      {'@', 1, 5, 1, 1, 1, "@abc\t\r", "@abc#"},
+      {'@', 1, 6, 2, 0, 1, "@al \037\024\r", "al"},
+      {'@', 1, 7, 1, 0, 1, "\033e\t\r\033s", "alpha.txt"},
+      {'@', 1, 8, 1, 1, 1, "@a\t\024\t\r", "#"},
+      {'@', 1, 9, 1, 1, 1, "@a\t\r", "@a#"},
+      {'@', 1, 10, 1, 0, 1, "@al\024\r", "Xal"}};
+  size_t i;
+  for (i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+    int master, slave, wake[2];
+    struct winsize size = {24, 80, 0, 0};
+    struct provider_data data;
+    sl_config_t config;
+    sl_completion_provider_t provider;
+    sl_watch_id_t watch;
+    sl_prompt_id_t id = 0;
+    sl_prompt_queue_entry_info_t info;
+    sl_t *sl;
+    char *line;
+    CHECK(!openpty(&master, &slave, NULL, NULL, &size) && !pipe(wake));
+    memset(&data, 0, sizeof(data));
+    data.kind = cases[i].kind;
+    data.driver.master = master;
+    data.driver.initial = "";
+    data.driver.keys = cases[i].keys;
+    sl_config_init(&config);
+    config.input_fd = config.output_fd = slave;
+    config.prompt_theme = SL_PROMPT_THEME_PLAIN;
+    config.prompt_queue = 1;
+    sl = sl_create_with_config(&config);
+    CHECK(sl);
+    CHECK(sl_set_prompt_queue_delivery(sl, SL_PROMPT_QUEUE_DELIVERY_MANUAL) ==
+          SL_OK);
+    CHECK(sl_bind_key(sl, SL_KEY_ALT_BASE + 's', suspend_key, NULL) == SL_OK);
+    if (data.kind == 7)
+      CHECK(sl_prompt_queue_append(sl, "@a", 1, &id) == SL_OK);
+    provider.trigger = cases[i].trigger;
+    provider.scope = cases[i].word ? SL_COMPLETION_WORD : SL_COMPLETION_START;
+    provider.strip_trigger = cases[i].strip;
+    provider.callback = dynamic_provider;
+    provider.userdata = &data;
+    CHECK(sl->set_completion_providers(sl, &provider, 1) == SL_OK);
+    memset(&provider, 0, sizeof(provider));
+    CHECK(sl_bind_key(sl, SL_KEY_TAB, host_tab, &data.driver) == SL_OK);
+    CHECK(sl_bind_key(sl, SL_KEY_CTRL_T, update_provider, &data) == SL_OK);
+    CHECK(sl_watch_add(sl, wake[0], SL_WATCH_READ, drive, &data.driver,
+                       &watch) == SL_OK);
+    CHECK(write(wake[1], "x", 1) == 1);
+    if (native)
+      CHECK(sl_output_stream_begin(sl) == SL_OK);
+    line = sl_readline(sl, "> ");
+    if (data.kind == 7) {
+      CHECK(!line && sl_last_readline_status(sl) == SL_READLINE_SUSPENDED);
+      CHECK(sl_prompt_queue_info(sl, 0, &info) == SL_OK && info.id == id &&
+            info.held);
+      CHECK(sl_prompt_queue_peek(sl, 0, &line) == SL_OK);
+    }
+    if (!line || strcmp(line, cases[i].expected) ||
+        data.calls != cases[i].calls ||
+        data.driver.calls != cases[i].host_calls) {
+      fprintf(stderr,
+              "provider case %lu native=%d got=%s expected=%s callbacks=%d/%d "
+              "host=%d/%d\n",
+              (unsigned long)i, native, line ? line : "NULL", cases[i].expected,
+              data.calls, cases[i].calls, data.driver.calls,
+              cases[i].host_calls);
+      return 1;
+    }
+    sl_free_string(sl, line);
+    if (data.kind == 8) {
+      CHECK(sl_prompt_queue_count(sl) == 1 &&
+            sl_prompt_queue_peek(sl, 0, &line) == SL_OK);
+      CHECK(!strcmp(line, "alpha.txt"));
+      sl_free_string(sl, line);
+    }
+    sl_destroy(sl);
+    close(master);
+    close(slave);
+    close(wake[0]);
+    close(wake[1]);
+  }
   return 0;
 }
 
@@ -257,8 +427,9 @@ int main(void) {
       {"/sta", "\022\t\007\r", "/sta", 4, 1}};
   size_t i;
   int native;
-  CHECK(sl_set_completions(NULL, candidates, 1) == SL_ERROR_INVALID);
+  CHECK(sl_set_completion_providers(NULL, NULL, 0) == SL_ERROR_INVALID);
   for (native = 0; native <= 1; ++native) {
+    CHECK(!provider_cases(native));
     for (i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i)
       CHECK(!run(native, cases[i].initial, cases[i].cursor, cases[i].keys,
                  cases[i].expected, cases[i].calls, 131072, 0));

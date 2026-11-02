@@ -16,6 +16,7 @@
 #include <unistd.h>
 
 #include "chat_demo_data.h"
+#include "completion.h"
 #include "queue_demo_client.h"
 #include "queue_demo_timer.h"
 #include "queue_demo_wire.h"
@@ -131,14 +132,6 @@ static int run_shell(struct chat_state *state, int preserve_draft) {
              ? 0
              : -1;
 }
-
-static const sl_completion_t chat_completions[] = {
-    {"hello world", SL_COMPLETION_START},  {"hello there", SL_COMPLETION_START},
-    {"/status", SL_COMPLETION_START},      {"/approve on", SL_COMPLETION_START},
-    {"/approve off", SL_COMPLETION_START}, {"/steer", SL_COMPLETION_START},
-    {"/resume", SL_COMPLETION_START},      {"/shell", SL_COMPLETION_START},
-    {"/quit", SL_COMPLETION_START},        {"verification", SL_COMPLETION_WORD},
-    {"next steps", SL_COMPLETION_WORD}};
 
 static int sink_to_softline(void *userdata, const char *bytes, size_t length) {
   struct chat_state *state;
@@ -1031,9 +1024,7 @@ int main(int argc, char **argv) {
       return 1;
     }
   }
-  if (sl_set_completions(state.sl, chat_completions,
-                         sizeof(chat_completions) /
-                             sizeof(chat_completions[0])) != SL_OK) {
+  if (demo_completion_setup(state.sl, 1) != SL_OK) {
     report_failure(&state, "completion setup");
     sl_destroy(state.sl);
     demo_client_destroy(state.remote);
@@ -1120,6 +1111,8 @@ int main(int argc, char **argv) {
             "more Tabs cycle. Backspace restarts matching. "
             "Try `say ver` + Tab on any line; Ctrl-J adds a line; "
             "`/q` + Tab completes `/quit`. "
+            "`/` resolves commands; `@` resolves current files once. "
+            "Tab accepts; Space/Enter removes `@`. "
             "[Hyperlink demo](https://pkt.systems).") != 0) {
       report_failure(&state, "completion demo output");
       exit_code = 1;

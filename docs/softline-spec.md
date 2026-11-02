@@ -739,31 +739,47 @@ Local and remote C chat use AUTO and pass `enabled` to their test-only libmdf
 renderer. `make run-chat OSC8=on` overrides detection; `OSC8=off` disables links.
 No libmdf dependency is introduced into the library.
 
-### Literal completion
+### Completion providers
 
-`set_completions()` / `sl_set_completions()` atomically copies a host-provided
-array of `sl_completion_t` entries. `SL_COMPLETION_START` (zero/default) anchors
-at byte zero of the entire draft. `SL_COMPLETION_WORD` also allows anchors after
-ASCII whitespace (space, Tab, LF, CR, vertical Tab and form feed). Punctuation
-alone does not create an anchor. Text is nonempty printable UTF-8 with LF and
-Tab allowed, bounded by `line_max_len`; terminal controls and malformed UTF-8
-are rejected. NULL/count zero clears the list. Invalid entries or copy failure
-preserve the old list. Duplicate strings merge, with word scope taking priority.
-Updates run on the editor owner thread, including ordinary idle/watch callbacks.
+`set_completion_providers()` / `sl_set_completion_providers()` atomically copies
+an array of `sl_completion_provider_t` registrations. Each has one printable
+non-whitespace ASCII `trigger`, a `scope`, `strip_trigger`, a synchronous
+`sl_completion_callback_t` and borrowed host context. Duplicate triggers,
+invalid fields and copy failure preserve the previous registrations.
+NULL/count zero clears them. `SL_COMPLETION_START` (zero/default) anchors only
+at byte zero of the draft. `SL_COMPLETION_WORD` also allows a trigger after
+ASCII whitespace (space, Tab, LF, CR, vertical Tab and form feed).
 
-Matching is literal and case-sensitive, requires at least one typed byte, and
-uses the cursor position. If phrase prefixes at multiple eligible anchors
-match, the longest prefix selects the replacement span. The first match in
-host-list order appears as a dimmed inline suffix. Tab accepts that full
-candidate; further Tabs cycle through the originally resolved matches in list
-order, wrapping to the first. Any other key, cursor movement, draft mutation or
-list replacement ends the cycle and matches the resulting draft again. Thus
+The input owner calls the provider once when its trigger activates a token.
+The C callback receives the editor, trigger, `sl_completion_emit_t`, emitter
+context and host context. It emits full strings including the trigger, in
+cycling order; each emission is copied immediately, so temporary host strings
+are safe. Strings are printable valid UTF-8 with LF/Tab allowed and bounded by
+`line_max_len`; duplicates merge, and malformed/control-bearing candidates
+fail. A failed callback or emission discards the entire activation's list,
+leaves typed text including its trigger intact, and is not retried until a new
+activation. Empty successful lists are cached too. Providers may read editor
+state but must not mutate/destroy it, retain the emitter or yield. No provider
+is invoked by rendering or a producer feed. Asynchronous resolution is not part
+of this interface; hosts provide a synchronous snapshot of their current data.
+
+Softline owns that snapshot while the token is active, including through typing,
+Backspace, ambiguous matches and Tab cycling. A typed whitespace character,
+bracketed paste, deleting the trigger, moving outside the token, submission,
+queueing, replacing the draft or replacing registrations ends the activation.
+Accepted candidates may themselves contain spaces; those inserted spaces do
+not end a Tab cycle. Other editing/navigation ends the Tab cycle and rematches
+the current prefix against the cached snapshot, without calling the provider.
+
+Matching is literal and case-sensitive. The first match appears as a dim inline
+suffix. Tab accepts that full candidate; further Tabs cycle the originally
+resolved matching set in list order, wrapping to the first. Thus
 `/` can cycle all slash commands, while Backspace from `/command1` to `/command`
 restricts the next cycle to that prefix. No whitespace is appended. With no
 active cycle, a unique fully present completion or no match lets normal host
 bindings and queue mappings receive Tab. Matching completion precedes both.
 Reverse search and bracketed paste retain their existing key/literal semantics.
-With a completion list configured, Tab during acquisition of a backend edit hold
+With providers configured, Tab during acquisition of a backend edit hold
 waits for that outcome and earlier deferred typing. It then completes the actual
 draft or falls through to the host, including when the hold was rejected. Other
 host control bindings remain responsive while the hold is pending.
@@ -785,21 +801,27 @@ is reused in the preview; unrelated text remains visible. Navigation operates
 on the actual draft. There is no separate completion panel. Ghosts follow
 cursor moves, host list changes, undo, suspension and resize. No producer
 transcript is retained.
-The C/Lua simple multiline and chat examples register `hello world` / `hello
-there`, `/quit`, and `verification` / `next steps` at word boundaries, with an
-interactive startup guide. Local/remote C and Lua chat also register command
-completions. Every example uses the same completion engine as other hosts.
 
-Dynamic providers, filesystem completion and asynchronous candidate-fetch
-lifecycle remain future features. Hosts can replace the literal list as their
-own data changes; no provider callback or network request runs on Tab.
+`strip_trigger` is off by default. When enabled, normal completion exit or
+submission removes the one introductory character, including from queued or
+held edited entries, without changing their identities, holds or FIFO order.
+Enter submits actual text and never accepts a ghost. For example, `@REA` + Tab
+can accept `@README.md`; Space or Enter removes `@`, leaving `README.md`.
+Trigger removal is undoable. Whole-draft replacement/discard uses its existing
+editing-context rules rather than adding a second deletion. Failed providers
+never strip the trigger. Registration replacement ends any active completion.
+
+C/Lua simple multiline and chat examples use callbacks for `/`, `h`, `v`, `n`
+and `@`. Slash callbacks provide the host's commands. `@` takes a fresh current
+directory snapshot once per activation, accepts at word boundaries and removes
+its marker on exit/submission. It uses the same frontend in local/remote chat;
+the example host owns file discovery, not the Softline library.
 
 ### Hints And Autosuggestions
 
 Missing:
 
 - right-side hints
-- inline ghost text
 - validation messages
 - async suggestion updates
 - style policy for hints in narrow terminals
@@ -1037,10 +1059,11 @@ facade, not a reason to weaken the core handle model.
 
 ## Suggested Near-Term Milestones
 
-1. Dynamic completion providers
+1. Asynchronous completion providers
 
-   Literal completion, replacement spans and native chat tests are implemented.
-   Add computed providers only when an embedding host needs more than list updates.
+   Completion providers, replacement spans and native chat tests are implemented.
+   Synchronous trigger providers are implemented. Add asynchronous resolution
+   only when an embedding host requires it.
 
 2. Unicode width policy
 

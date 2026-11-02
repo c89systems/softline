@@ -264,12 +264,7 @@ end
 
 local function run()
   sl = softline.new()
-  assert(sl:set_completions({
-    "hello world", "hello there",
-    "/status", "/approve on", "/approve off", "/steer", "/resume", "/shell", "/quit",
-    {text = "verification", scope = softline.COMPLETION_WORD},
-    {text = "next steps", scope = softline.COMPLETION_WORD},
-  }))
+  assert(dofile((arg[0]:match("^(.*[/])") or "") .. "completion.lua")(sl, true))
   assert(sl:history_open("softline.examples.chat", os.getenv("SOFTLINE_HISTORY_DIR")))
   assert(sl:history_set_auto_add(true))
   if interactive then
@@ -314,6 +309,7 @@ local function run()
     print_message({ "softline Lua turn processor. A staged operation streams for about four seconds. Enter sends while available and queues while an operation is running; Alt-Enter queues a steer for the next stage boundary; empty Alt-Enter marks the newest queued turn as steer; Alt-E edits it. Escape or Ctrl-C stops the operation; /quit or Alt-Q leaves. !sh or /shell opens your shell between turns; Alt-S opens it while preserving your draft.\n" })
     print_message({ "Policy demo: /status / /approve / /steer / /resume. Shell commands queue until the turn completes.\n" })
     print_message({ "Completion demo: type h for a dim suggestion; Tab accepts, more Tabs cycle. Backspace restarts matching. Try say ver + Tab on any line; Ctrl-J adds a line; /q + Tab completes /quit.\n" })
+    print_message({ "/ resolves commands; @ resolves current files once. Tab accepts; Space/Enter removes @.\n" })
   else
     assert(sl:output_stream_begin())
     stream_open = true

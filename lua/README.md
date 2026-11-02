@@ -794,31 +794,37 @@ complete control, including its opener and terminator. Native links cannot
 leak into editor UI.
 See the [feed contract](../docs/softline-spec.md#osc-8-hyperlinks).
 
-## Literal completion
+## Completion providers
 
-`sl:set_completions(items)` replaces the handle-owned copied list. A bare string
-or `{text = "..."}` uses `softline.COMPLETION_START`, matching only at the start
-of the entire draft. `{text = "...", scope = softline.COMPLETION_WORD}` also
-matches after ASCII whitespace, including Tab and LF. Pass nil or an empty
-table to clear the list. Invalid strings/scopes preserve the previous list.
+`sl:set_completion_providers(registrations)` replaces trigger registrations;
+nil or an empty table clears them. Each specifies `trigger`, optional `scope`
+(default `softline.COMPLETION_START`), optional `strip_trigger` (default false)
+and `complete(trigger)`, which returns an array of full candidate strings.
+`softline.COMPLETION_WORD` also permits the trigger after ASCII whitespace.
 
 ```lua
-assert(sl:set_completions({
-  "/approve on", "/approve off", "/status",
-  {text = "next steps", scope = softline.COMPLETION_WORD},
+assert(sl:set_completion_providers({
+  {trigger = "/", complete = function()
+    return {"/approve on", "/approve off", "/status"}
+  end},
+  {trigger = "@", scope = softline.COMPLETION_WORD, strip_trigger = true,
+   complete = function() return {"@README.md", "@src/softline.c"} end},
 }))
 ```
 
-Matching is case-sensitive and needs a nonempty prefix. The first match is a
-dimmed inline ghost in the multiline prompt. Tab accepts it; further Tabs cycle
-the original matches in list order. Other edits, movement or list replacement
-restart matching. Ghost text is not submitted without acceptance. With no
-active cycle, uniquely completed text or no match lets Tab reach host/queue handling.
-Completion replaces the current word suffix when the cursor is inside text,
-preserves later text and is undoable. Strings allow printable UTF-8, LF and Tab,
-are limited by `line_max_len`, and cannot contain NUL or terminal escapes.
-The owner thread may update the list from idle/watch callbacks. No callback or
-network request runs when completing. See the [full contract](../docs/softline-spec.md#literal-completion).
+The callback runs once per active token and returns the host's current snapshot.
+It may read the editor but must not mutate/close it or yield. Softline copies the
+strings, caches them through typing/Backspace, and shows the first match as a
+dimmed inline ghost. Tab accepts it; repeated Tabs cycle the original matches.
+Other edits or movement reset cycling while retaining the snapshot inside its
+token. Whitespace, deleting the trigger, leaving the token, queueing/submitting
+or replacing the draft ends completion. `strip_trigger` then removes the marker
+as an undoable edit. Enter submits actual text, never a ghost. Errors, invalid
+UTF-8/NUL/control-bearing candidates or callback exceptions discard the list,
+preserve typed text including its marker and suppress retries for that token.
+No provider runs from a feed/render operation. Callback closures are owned by
+the editor userdata and remain collectable even when they capture that editor.
+See the [full contract](../docs/softline-spec.md#completion-providers).
 
 ## PTY terminal handoff
 

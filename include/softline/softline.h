@@ -108,13 +108,32 @@ typedef enum sl_completion_scope {
   SL_COMPLETION_WORD = 1
 } sl_completion_scope_t;
 
-/** Host-supplied literal word or phrase, copied by set_completions(). */
-typedef struct sl_completion {
-  /** Nonempty printable UTF-8, with LF and Tab allowed; no terminal escapes. */
-  const char *text;
-  /** Allowed prefix anchors. */
+/** Copy a full candidate, including its trigger, into this activation's list.
+ * Call synchronously within the provider; strings are copied during emit().
+ * Return SL_OK or an error. Providers must stop emitting on error. */
+typedef int (*sl_completion_emit_t)(const char *text, void *context);
+
+/** Resolve a trigger once on the editor owner thread. Emit candidates in Tab
+ * cycling order and return SL_OK or an error. Read editor state but do not
+ * mutate/destroy the handle or retain emit/context. No provider runs from a
+ * feed or renderer. Failure discards the list, preserving the draft. */
+typedef int (*sl_completion_callback_t)(sl_t *self, char trigger,
+                                        sl_completion_emit_t emit,
+                                        void *context, void *userdata);
+
+/** One host-supplied completion trigger registration. */
+typedef struct sl_completion_provider {
+  /** Printable non-whitespace ASCII introductory character, e.g. '/' or '@'. */
+  char trigger;
+  /** Eligible positions; default is draft start only. */
   sl_completion_scope_t scope;
-} sl_completion_t;
+  /** Remove the trigger when completion exits or the prompt is submitted. */
+  int strip_trigger;
+  /** Synchronous callback called once per active token. */
+  sl_completion_callback_t callback;
+  /** Borrowed host context, valid until registrations are replaced. */
+  void *userdata;
+} sl_completion_provider_t;
 
 /** Policy for OSC 8 hyperlinks in validated producer output. */
 typedef enum sl_osc8_mode {
@@ -1283,9 +1302,10 @@ struct sl {
    * backend mutation or automatic retry. Unknown outcomes cannot be recovered.
    */
   int (*queue_backend_recover)(sl_t *self, sl_queue_request_id_t request_id);
-  /** Replace the handle's copied completion list; see sl_set_completions(). */
-  int (*set_completions)(sl_t *self, const sl_completion_t *items,
-                         size_t count);
+  /** Replace trigger registrations; see sl_set_completion_providers(). */
+  int (*set_completion_providers)(sl_t *self,
+                                  const sl_completion_provider_t *providers,
+                                  size_t count);
   /** Set hyperlink policy between streams; see sl_set_osc8_mode(). */
   int (*set_osc8_mode)(sl_t *self, sl_osc8_mode_t mode);
   /** Read cached hyperlink policy/detection; see sl_get_osc8_info(). */
@@ -1800,20 +1820,23 @@ int sl_set_quoted_prompt_prefix(sl_t *self, const char *prefix);
 /** Override per-theme quote colours, or pass NULL to restore theme defaults. */
 int sl_set_quoted_prompt_style(sl_t *self, const sl_quote_style_t *style);
 
-/** Atomically replace literal completions on the editor owner thread. NULL
- * with count zero clears them. Invalid input or failure to copy keeps the old
- * list. A subsequent redraw failure returns SL_ERROR_IO with the new list set.
- * Each string is bounded by line_max_len. Matching is case-sensitive and
- * requires a nonempty prefix; longest matching phrase prefix wins. The first
- * match appears as dimmed inline ghost text. Tab accepts it; repeated Tabs
- * cycle the original matches in list order. Other edits or movement reset
- * matching. Completion replaces the current word's remaining suffix and keeps
- * later text. With no active cycle, a fully present unique completion or no
- * match passes Tab to host/queue handling. A cycle is one undoable edit,
- * separate from typing. Ghost text is never submitted without acceptance.
- * No whitespace is automatically appended.
- */
-int sl_set_completions(sl_t *self, const sl_completion_t *items, size_t count);
+/** Atomically replace completion providers on the owner thread. NULL/count
+ * zero clears them; invalid fields, duplicate triggers or copy failure keep
+ * the previous registry. Registration changes end the current completion.
+ * Each activation copies one callback-produced list, reused through typing,
+ * Backspace and Tab cycling until whitespace is typed, the trigger is deleted,
+ * the cursor leaves its token, or the draft is submitted/replaced/queued.
+ * Candidates include the trigger and contain printable UTF-8, LF/Tab, bounded
+ * by line_max_len. The first match is a dim inline ghost; Tab accepts it and
+ * repeated Tabs cycle the original matches. Editing/navigation resets that
+ * cycle but retains the activation list inside its token. Enter submits actual
+ * text, never the ghost. strip_trigger is undoable and applied on normal exit
+ * or submission; replacing/discarding the draft needs no extra deletion.
+ * Failed providers are not retried until another activation. A fully present
+ * unique match or no match lets Tab reach ordinary host/queue handling. */
+int sl_set_completion_providers(sl_t *self,
+                                const sl_completion_provider_t *providers,
+                                size_t count);
 
 /** Set OSC 8 policy on the owner thread between output streams. Refused with
  * SL_ERROR_NOT_READY while a stream, partial control or producer link is open.

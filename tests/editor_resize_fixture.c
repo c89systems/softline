@@ -1,3 +1,4 @@
+#include "completion_fixture.h"
 #include <softline/softline.h>
 #include <stdio.h>
 #include <string.h>
@@ -69,9 +70,10 @@ int main(int argc, char **argv) {
       sl_bind_key(sl, SL_KEY_ALT_M, barrier, &serial) != SL_OK)
     return 1;
   if (argc == 2 && !strcmp(argv[1], "--completion")) {
-    sl_completion_t item = {"hello world and a very long suggestion",
-                            SL_COMPLETION_START};
-    if (sl_set_completions(sl, &item, 1) != SL_OK)
+    static const struct completion_item item = {
+        "hello world and a very long suggestion", SL_COMPLETION_START};
+    struct completion_fixture completions = {&item, 1, 0};
+    if (fixture_setup(sl, &completions) != SL_OK)
       return 1;
     line = sl_readline(sl, "softline> ");
     if (!line)

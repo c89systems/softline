@@ -1068,6 +1068,10 @@ static int completion_case(const char *example, const char *theme) {
   REQUIRE(wait_visible(&c, "> say say say say verifi\n  cation") == 0);
   REQUIRE(wait_column(&c, 21) == 0);
   REQUIRE(coordinated_resize(&c, 97, 24, 1) == 0);
+  send_input(&c, "\033n@CTestTestfile.cm");
+  REQUIRE(wait_frame(&c, NULL, "> @CTestTestfile.cmake\n", 0, 2) == 0);
+  send_input(&c, "\t ");
+  REQUIRE(wait_frame(&c, NULL, "> CTestTestfile.cmake \n", 0, 2) == 0);
   send_input(&c, "\033n");
   REQUIRE(wait_frame(&c, NULL, "> \n", 0, 2) == 0);
   send_input(&c, "hello\r");

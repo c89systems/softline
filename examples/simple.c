@@ -1,16 +1,10 @@
+#include "completion.h"
 #include "softline/softline.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-
-static const sl_completion_t completions[] = {
-    {"/quit", SL_COMPLETION_START},
-    {"hello world", SL_COMPLETION_START},
-    {"hello there", SL_COMPLETION_START},
-    {"verification", SL_COMPLETION_WORD},
-    {"next steps", SL_COMPLETION_WORD}};
 
 static int set_prompt_theme_from_environment(sl_t *sl,
                                              sl_prompt_theme_t fallback) {
@@ -65,14 +59,14 @@ int main(void) {
     sl->destroy(sl);
     return 1;
   }
-  if (sl->set_completions(sl, completions,
-                          sizeof(completions) / sizeof(completions[0])) !=
-      SL_OK) {
+  if (demo_completion_setup(sl, 0) != SL_OK) {
     fprintf(stderr, "failed to set completions\n");
     sl->destroy(sl);
     return 1;
   }
   if (isatty(STDIN_FILENO) && isatty(STDOUT_FILENO)) {
+    puts("/ resolves commands; @ resolves current files once. Tab accepts; "
+         "Space/Enter removes @.");
     puts("Completion demo: type h for a dim suggestion; Tab accepts, more Tabs "
          "cycle. Backspace restarts matching.");
     puts("  Try say ver + Tab on any line; Ctrl-J adds a line; /q + Tab "
