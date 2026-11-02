@@ -38,6 +38,7 @@ local prompt_methods = {
   "set_queue_keys",
   "queue_keys",
   "set_prompt_theme",
+  "set_completions",
   "set_quoted_prompt_prefix",
   "set_quoted_prompt_style",
   "set_statusline",

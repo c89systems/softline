@@ -100,6 +100,22 @@ typedef struct sl_terminal_event {
 typedef int (*sl_terminal_callback_t)(void *context,
                                       sl_terminal_event_t *event);
 
+/** Eligible start positions for one literal completion. */
+typedef enum sl_completion_scope {
+  /** Only byte zero of the entire draft; the default value. */
+  SL_COMPLETION_START = 0,
+  /** Byte zero or immediately after ASCII whitespace, including Tab and LF. */
+  SL_COMPLETION_WORD = 1
+} sl_completion_scope_t;
+
+/** Host-supplied literal word or phrase, copied by set_completions(). */
+typedef struct sl_completion {
+  /** Nonempty printable UTF-8, with LF and Tab allowed; no terminal escapes. */
+  const char *text;
+  /** Allowed prefix anchors. */
+  sl_completion_scope_t scope;
+} sl_completion_t;
+
 /** Successful local termination of a terminal relay by beginning-of-line ~. */
 #define SL_TERMINAL_ESCAPED 1
 
@@ -1241,6 +1257,9 @@ struct sl {
    * backend mutation or automatic retry. Unknown outcomes cannot be recovered.
    */
   int (*queue_backend_recover)(sl_t *self, sl_queue_request_id_t request_id);
+  /** Replace the handle's copied completion list; see sl_set_completions(). */
+  int (*set_completions)(sl_t *self, const sl_completion_t *items,
+                         size_t count);
 };
 
 /**
@@ -1750,6 +1769,19 @@ int sl_set_quoted_prompt_prefix(sl_t *self, const char *prefix);
 
 /** Override per-theme quote colours, or pass NULL to restore theme defaults. */
 int sl_set_quoted_prompt_style(sl_t *self, const sl_quote_style_t *style);
+
+/** Atomically replace literal completions on the editor owner thread. NULL
+ * with count zero clears them. Invalid input or failure to copy keeps the old
+ * list. A subsequent redraw failure returns SL_ERROR_IO with the new list set.
+ * Each string is bounded by line_max_len. Matching is case-sensitive and
+ * requires a nonempty prefix; longest matching phrase prefix wins. Tab expands
+ * the common UTF-8 prefix, replacing the current word's remaining suffix and
+ * preserving later text. Ambiguity consumes Tab even without progress. A fully
+ * present completion or no match passes Tab to normal host/queue key handling.
+ * Live matching strings appear above status/reasoning, independently of it.
+ * Each expansion is undoable. No whitespace is automatically appended.
+ */
+int sl_set_completions(sl_t *self, const sl_completion_t *items, size_t count);
 
 /** Return the status of the most recent readline() call on this handle. */
 sl_readline_status_t sl_last_readline_status(const sl_t *self);

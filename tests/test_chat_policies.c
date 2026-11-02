@@ -63,7 +63,7 @@ static int exercise(const char *build, const char *shell,
   REQUIRE(wait_for(&e, "\033[?2004h", 0) == 0);
   /* The entire burst enters the native queue before any command can run. */
   mark = e.length;
-  REQUIRE(send_bytes(&e, "/statux\r\033e\177s\r") == 0);
+  REQUIRE(send_bytes(&e, "/statux\r\033e\177\t\r") == 0);
   REQUIRE(wait_for(&e, "Status: idle / backlog running", mark) == 0);
   REQUIRE(!contains(&e, "Thinking...", mark));
   REQUIRE(send_bytes(&e, "start\r") == 0);

@@ -867,6 +867,50 @@ static int softline_lua_set_image_paste_path_template(lua_State *L) {
       L, sl_set_image_paste_path_template(handle->sl, path_template));
 }
 
+/** Lua editor:set_completions(items): copy literal strings or text/scope
+ * tables. Bare strings and missing scopes default to COMPLETION_START. */
+static int softline_lua_set_completions(lua_State *L) {
+  softline_lua_handle_t *handle = softline_lua_check(L, 1);
+  sl_completion_t *items;
+  size_t count, i;
+  int roots;
+  if (lua_isnoneornil(L, 2))
+    return softline_lua_status(L, sl_set_completions(handle->sl, NULL, 0));
+  luaL_checktype(L, 2, LUA_TTABLE);
+  count = lua_rawlen(L, 2);
+  luaL_argcheck(L, count <= (size_t)-1 / sizeof(*items), 2,
+                "completion list too large");
+  items = lua_newuserdatauv(L, count * sizeof(*items), 0);
+  lua_newtable(L);
+  roots = lua_gettop(L);
+  for (i = 0; i < count; ++i) {
+    size_t length;
+    lua_rawgeti(L, 2, (lua_Integer)i + 1);
+    items[i].scope = SL_COMPLETION_START;
+    if (lua_istable(L, -1)) {
+      lua_getfield(L, -1, "scope");
+      if (!lua_isnil(L, -1)) {
+        lua_Integer scope = luaL_checkinteger(L, -1);
+        luaL_argcheck(
+            L, scope == SL_COMPLETION_START || scope == SL_COMPLETION_WORD, 2,
+            "invalid completion scope");
+        items[i].scope = (sl_completion_scope_t)scope;
+      }
+      lua_pop(L, 1);
+      lua_getfield(L, -1, "text");
+    } else
+      lua_pushvalue(L, -1);
+    luaL_checktype(L, -1, LUA_TSTRING);
+    items[i].text = lua_tolstring(L, -1, &length);
+    luaL_argcheck(L, strlen(items[i].text) == length, 2,
+                  "completion cannot contain NUL");
+    lua_pushvalue(L, -1);
+    lua_rawseti(L, roots, (lua_Integer)i + 1);
+    lua_pop(L, 2);
+  }
+  return softline_lua_status(L, sl_set_completions(handle->sl, items, count));
+}
+
 static int softline_lua_set_prompt_queue(lua_State *L) {
   softline_lua_handle_t *handle;
   handle = softline_lua_check(L, 1);
@@ -1933,6 +1977,7 @@ static const luaL_Reg softline_lua_methods[] = {
     {"history_compact", softline_lua_history_compact},
     {"history_set_auto_add", softline_lua_history_set_auto_add},
     {"set_screen_width", softline_lua_set_screen_width},
+    {"set_completions", softline_lua_set_completions},
     {"set_live_scroll_region", softline_lua_set_live_scroll_region},
     {"set_image_paste_path_template",
      softline_lua_set_image_paste_path_template},
@@ -2219,6 +2264,10 @@ int luaopen_softline(lua_State *L) {
   lua_setfield(L, -2, "KEY_BACKSPACE");
   lua_pushinteger(L, SL_KEY_TAB);
   lua_setfield(L, -2, "KEY_TAB");
+  lua_pushinteger(L, SL_COMPLETION_START);
+  lua_setfield(L, -2, "COMPLETION_START");
+  lua_pushinteger(L, SL_COMPLETION_WORD);
+  lua_setfield(L, -2, "COMPLETION_WORD");
   lua_pushinteger(L, SL_KEY_ENTER);
   lua_setfield(L, -2, "KEY_ENTER");
   lua_pushinteger(L, SL_KEY_CTRL_N);

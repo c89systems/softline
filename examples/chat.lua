@@ -264,6 +264,11 @@ end
 
 local function run()
   sl = softline.new()
+  assert(sl:set_completions({
+    "/status", "/approve on", "/approve off", "/steer", "/resume", "/shell", "/quit",
+    {text = "verification", scope = softline.COMPLETION_WORD},
+    {text = "next steps", scope = softline.COMPLETION_WORD},
+  }))
   assert(sl:history_open("softline.examples.chat", os.getenv("SOFTLINE_HISTORY_DIR")))
   assert(sl:history_set_auto_add(true))
   if interactive then

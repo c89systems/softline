@@ -565,9 +565,9 @@ The exact commands `!sh` and `/shell` open `$SHELL -i` (`/bin/sh -i` when
 unset or empty), only between turns on an interactive terminal. Enter or idle
 Alt-Enter launches the shell; busy submissions and attempts to queue/steer it
 are blocked, keeping the draft editable. Arguments are not interpreted as shell
-commands. The example ends its output session before `os.execute()` and begins
-a new session on return. Clear and resize inside the shell are allowed; history,
-queue and settings survive, and the transcript is never replayed. Failed launches
+commands. The example uses the local PTY adapter, ending its output session and
+beginning a new session on return. Clear and resize inside the shell are allowed;
+history, queue and settings survive, and the transcript is never replayed. Failed launches
 and nonzero exits report an error and return to chat.
 
 Alt-S uses that same shell handoff between turns while keeping the draft,
@@ -777,6 +777,31 @@ calling coroutine, including when the constructor's coroutine has been
 collected. Callback/context references are owned by the receiver and ordinary
 reference cycles remain collectible. Accepted offers enter auto-add history
 once, in the coroutine applying the result, without replacing a newer draft.
+
+## Literal completion
+
+`sl:set_completions(items)` replaces the handle-owned copied list. A bare string
+or `{text = "..."}` uses `softline.COMPLETION_START`, matching only at the start
+of the entire draft. `{text = "...", scope = softline.COMPLETION_WORD}` also
+matches after ASCII whitespace, including Tab and LF. Pass nil or an empty
+table to clear the list. Invalid strings/scopes preserve the previous list.
+
+```lua
+assert(sl:set_completions({
+  "/approve on", "/approve off", "/status",
+  {text = "next steps", scope = softline.COMPLETION_WORD},
+}))
+```
+
+Matching is case-sensitive and needs a nonempty prefix. The live preview uses
+the queue theme role above queue/approval/status rows. Tab expands only the
+common prefix; ambiguous matches consume it even without progress. Fully
+completed text or no match lets Tab reach ordinary host/queue handling.
+Completion replaces the current word suffix when the cursor is inside text,
+preserves later text and is undoable. Strings allow printable UTF-8, LF and Tab,
+are limited by `line_max_len`, and cannot contain NUL or terminal escapes.
+The owner thread may update the list from idle/watch callbacks. No callback or
+network request runs when completing. See the [full contract](../docs/softline-spec.md#literal-completion).
 
 ## PTY terminal handoff
 

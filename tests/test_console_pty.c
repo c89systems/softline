@@ -411,6 +411,53 @@ cleanup:
   return failed;
 }
 
+static int completion(void) {
+  struct editor e;
+  int failed = 0;
+  size_t mark;
+  struct winsize size = {18, 52, 0, 0};
+  test_rows = 24;
+  test_columns = 80;
+  REQUIRE(start(&e, "tests/lua-fixtures/completion.lua", NULL, NULL) == 0);
+  REQUIRE(wait_for(&e, "complete> ", 0) == 0);
+  mark = e.length;
+  REQUIRE(send_bytes(&e, "/app") == 0);
+  /* Preview is visible before the first Tab; queue/approval/status coexist. */
+  REQUIRE(wait_for(&e, "T /approve on", mark) == 0);
+  REQUIRE(wait_for(&e, "/approve off", mark) == 0);
+  REQUIRE(wait_for(&e, "more matches", mark) == 0);
+  REQUIRE(contains(&e, "queued stays visible", 0));
+  REQUIRE(contains(&e, "held stays visible", 0));
+  REQUIRE(contains(&e, "Reasoning remains host owned.", 0));
+  REQUIRE(ioctl(e.master, TIOCSWINSZ, &size) == 0);
+  e.rows = size.ws_row;
+  e.columns = size.ws_col;
+  e.top = 0;
+  e.bottom = e.rows - 1;
+  if (e.row >= e.rows)
+    e.row = e.rows - 1;
+  if (e.column >= e.columns)
+    e.column = e.columns - 1;
+  mark = e.length;
+  REQUIRE(send_bytes(&e, "\014\t\t") == 0);
+  REQUIRE(wait_for(&e, "T /approve on", mark) == 0);
+  REQUIRE(send_bytes(&e, "rove \tn\t\033s") == 0);
+  REQUIRE(wait_for(&e, "inside> ", 0) == 0);
+  REQUIRE(send_bytes(&e, "\t\033s") == 0);
+  REQUIRE(wait_for(&e, "update> ", 0) == 0);
+  mark = e.length;
+  REQUIRE(send_bytes(&e, "\024") == 0);
+  REQUIRE(wait_for(&e, "T /stop", mark) == 0);
+  REQUIRE(send_bytes(&e, "\t\033s") == 0);
+  REQUIRE(wait_for(&e, "cleared> ", 0) == 0);
+  REQUIRE(send_bytes(&e, "\t\033s") == 0);
+  REQUIRE(wait_for(&e, "lua completion passed", 0) == 0);
+  REQUIRE(finish(&e) == 0);
+cleanup:
+  close_editor(&e);
+  return failed;
+}
+
 static int terminal(void) {
   struct editor e;
   int failed = 0;
@@ -446,6 +493,8 @@ int main(int argc, char **argv) {
   root = argv[3];
   if (!strcmp(argv[1], "terminal"))
     return terminal();
+  if (!strcmp(argv[1], "completion"))
+    return completion();
   if (!strcmp(argv[1], "readline_edit"))
     return readline_edit();
   if (!strcmp(argv[1], "idle"))

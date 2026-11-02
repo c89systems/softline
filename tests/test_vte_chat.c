@@ -1027,6 +1027,53 @@ cleanup:
   return failed || errors;
 }
 
+static int completion_case(const char *example, const char *theme) {
+  struct chat c;
+  struct snapshot s;
+  int failed = 0;
+  setenv("SOFTLINE_CHAT_APPROVAL_DEMO", "1", 1);
+  setenv("SOFTLINE_CHAT_APPROVAL_MS", "100", 1);
+  REQUIRE(start_chat(&c, example, theme, 24, 10) == 0);
+  send_input(&c, "hello\r");
+  REQUIRE(wait_frame(&c, "Demo queued request #1:", "> \n", -1, 3) == 0);
+  REQUIRE(pause_producer(&c) == 0 && c.worker > 0);
+  send_input(&c, "ordinary-one\rordinary-two\rver");
+  REQUIRE(wait_frame(&c, "T verification", "> ver\n", -1, 2) == 0);
+  s = frame(&c);
+  REQUIRE(row_distance(s.text, "T verification", "\nQ ") >= 0);
+  REQUIRE(row_distance(s.text, "ordinary-two", "\nA ") >= 0);
+  REQUIRE(row_distance(s.text, "\nA ",
+                       strstr(s.text, "Reasoning...") ? "Reasoning..."
+                                                      : "Thinking...") > 0);
+  REQUIRE(coordinated_resize(&c, 52, 18, 1) == 0);
+  REQUIRE(wait_frame(&c, "T verification", "> ver\n", -1, 2) == 0);
+  send_input(&c, "\t");
+  REQUIRE(wait_frame(&c, "ordinary-two", "> verification\n", -1, 2) == 0);
+  s = frame(&c);
+  REQUIRE(!strstr(s.text, "T verification"));
+  REQUIRE(strstr(s.text, "\nA ") &&
+          (strstr(s.text, "Reasoning...") || strstr(s.text, "Thinking...")) &&
+          s.column == 14);
+  send_input(&c, "\033n/app");
+  REQUIRE(wait_frame(&c, "T /approve on", "> /app\n", -1, 2) == 0);
+  REQUIRE(wait_visible(&c, "  /approve off") == 0);
+  send_input(&c, "\t\t");
+  REQUIRE(wait_frame(&c, "T /approve on", "> /approve o\n", -1, 2) == 0);
+  send_input(&c, "f\t");
+  REQUIRE(wait_frame(&c, NULL, "> /approve off\n", -1, 2) == 0);
+  send_input(&c, "\037");
+  REQUIRE(wait_frame(&c, "T /approve off", "> /approve of\n", -1, 2) == 0);
+  REQUIRE(coordinated_resize(&c, 97, 24, 1) == 0);
+  REQUIRE(wait_frame(&c, "T /approve off", "> /approve of\n", -1, 2) == 0);
+cleanup:
+  if (failed) {
+    s = frame(&c);
+    fprintf(stderr, "Completion terminal frame:\n%s\n", s.text);
+  }
+  close_chat(&c);
+  return failed || errors;
+}
+
 int main(int argc, char **argv) {
   const char *themes[] = {"plain", "default", "gruvbox"};
   int theme, height, busy;
@@ -1039,6 +1086,9 @@ int main(int argc, char **argv) {
     return offline_case(argv[2]);
   if (!strcmp(argv[1], "stalled"))
     return stalled_case(argv[2]);
+  if (!strcmp(argv[1], "completion"))
+    return completion_case(argv[2], "plain") ||
+           completion_case(argv[2], "default");
   if (!strcmp(argv[1], "line-keys")) {
     for (theme = 0; theme < 2; ++theme)
       for (busy = 0; busy < 2; ++busy)

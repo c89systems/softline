@@ -2,6 +2,7 @@
 #define SOFTLINE_INTERNAL_H
 
 #include "softline/softline.h"
+#include "softline_completion.h"
 #include "softline_edit.h"
 #include "softline_history.h"
 #include "softline_surface.h"
@@ -154,6 +155,7 @@ typedef struct sl_impl {
   char *image_paste_path_template;
   size_t cursor;
   sl_edit_t edit;
+  sl_completion_list_t completions;
   int preferred_column;
   int preferred_column_width;
   int preferred_column_valid;

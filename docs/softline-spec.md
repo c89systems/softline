@@ -695,25 +695,47 @@ This section is a product and engineering backlog, not a promise that every item
 belongs in softline. Each item should get tests before being considered part of
 the public contract.
 
-### Completion
+### Literal completion
 
-Missing:
+`set_completions()` / `sl_set_completions()` atomically copies a host-provided
+array of `sl_completion_t` entries. `SL_COMPLETION_START` (zero/default) anchors
+at byte zero of the entire draft. `SL_COMPLETION_WORD` also allows anchors after
+ASCII whitespace (space, Tab, LF, CR, vertical Tab and form feed). Punctuation
+alone does not create an anchor. Text is nonempty printable UTF-8 with LF and
+Tab allowed, bounded by `line_max_len`; terminal controls and malformed UTF-8
+are rejected. NULL/count zero clears the list. Invalid entries or copy failure
+preserve the old list. Duplicate strings merge, with word scope taking priority.
+Updates run on the editor owner thread, including ordinary idle/watch callbacks.
 
-- completion callback API
-- completion menus
-- common-prefix insertion
-- completion replacement spans
-- multiline-aware completion display
-- async completion lifecycle
-- completion cancellation
-- completion tests across wrapped prompts and native chat
+Matching is literal and case-sensitive, requires at least one typed byte, and
+uses the cursor position. If phrase prefixes at multiple eligible anchors
+match, the longest prefix selects the replacement span. Tab inserts only the
+common prefix, stopping at a safe UTF-8 cluster boundary; it never chooses an
+arbitrary candidate, cycles choices or appends whitespace. Ambiguous Tab is
+consumed even when no extension is possible. Once a unique completion is fully
+present, or no candidate matches, normal host bindings and queue mappings
+receive Tab. Matching completion precedes both, including custom bindings.
+Reverse search and bracketed paste retain their existing key/literal semantics.
 
-Likely API shape:
+Completion inside text replaces the remaining current whitespace-delimited
+word while preserving subsequent unrelated text. A complete already-present
+phrase suffix is reused. Expansion is one undoable edit, separate from adjacent
+typing, and retains queue/approval identity, holds and order. An expansion over
+the draft limit leaves the draft/cursor unchanged and consumes Tab with a bell.
 
-- register a completion provider per handle
-- pass immutable buffer, cursor, and prompt context to the provider
-- return owned completion candidates plus optional replacement range
-- keep rendering policy in softline rather than forcing callbacks to draw
+A live `T ` preview above the queue/approval/status area displays the matching
+full strings, wrapping at words. At most three candidates and six physical
+preview rows are shown; long candidates end with `...`, and undisplayed matches
+have a count. Available terminal height may reduce or hide this preview while
+retaining input space. It uses the queue theme role and leaves the host's
+reasoning/status message and approval focus unchanged. It follows cursor moves,
+host list changes, undo, suspension and resize. No transcript is retained.
+The C local/remote and Lua chat examples register command completions plus
+`verification` and `next steps` at word boundaries.
+
+Dynamic providers, filesystem completion and asynchronous candidate-fetch
+lifecycle remain future features. Hosts can replace the literal list as their
+own data changes; no provider callback or network request runs on Tab.
 
 ### Hints And Autosuggestions
 

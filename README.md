@@ -40,6 +40,9 @@ Currently implemented:
 
 - Enter submits the current buffer.
 - `Ctrl-J` inserts a newline.
+- Host-supplied literal completions show live previews. Tab expands their common
+  prefix; each word/phrase selects draft-start or whitespace-boundary matching.
+  See `sl_set_completions()` and the [completion contract](docs/softline-spec.md#literal-completion).
 - `Ctrl-D` on an empty buffer returns `NULL`; inside text it deletes forward.
 - `Ctrl-C` remains a terminal interrupt instead of being swallowed.
 - `last_readline_status()` distinguishes submitted text, EOF, cancellation,

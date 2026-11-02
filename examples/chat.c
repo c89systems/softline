@@ -132,6 +132,13 @@ static int run_shell(struct chat_state *state, int preserve_draft) {
              : -1;
 }
 
+static const sl_completion_t chat_completions[] = {
+    {"/status", SL_COMPLETION_START},      {"/approve on", SL_COMPLETION_START},
+    {"/approve off", SL_COMPLETION_START}, {"/steer", SL_COMPLETION_START},
+    {"/resume", SL_COMPLETION_START},      {"/shell", SL_COMPLETION_START},
+    {"/quit", SL_COMPLETION_START},        {"verification", SL_COMPLETION_WORD},
+    {"next steps", SL_COMPLETION_WORD}};
+
 static int sink_to_softline(void *userdata, const char *bytes, size_t length) {
   struct chat_state *state;
   state = (struct chat_state *)userdata;
@@ -998,7 +1005,10 @@ int main(int argc, char **argv) {
     demo_client_destroy(state.remote);
     return 1;
   }
-  if (sl_history_open(state.sl, "softline.examples.chat",
+  if (sl_set_completions(state.sl, chat_completions,
+                         sizeof(chat_completions) /
+                             sizeof(chat_completions[0])) != SL_OK ||
+      sl_history_open(state.sl, "softline.examples.chat",
                       getenv("SOFTLINE_HISTORY_DIR")) != SL_OK ||
       sl_history_set_auto_add(state.sl, 1) != SL_OK) {
     report_failure(&state, "history setup");

@@ -3210,6 +3210,68 @@ static int sl_render_append_queue_panel(sl_t *self, sl_render_t *render,
   return 0;
 }
 
+/* Completion owns neither the reasoning row nor approval focus. */
+static int sl_current_completion(sl_impl_t *impl,
+                                 sl_completion_match_t *match) {
+  const sl_completion_item_t *first;
+  if (impl->history_search_active || impl->bracketed_paste ||
+      !sl_completion_find(&impl->completions, impl->buf, impl->cursor, match))
+    return 0;
+  first = &impl->completions.items[match->preview[0]];
+  match->common =
+      sl_utf8_clamp_cluster_boundary(first->text, first->length, match->common);
+  return match->count > 1 || match->common > impl->cursor - match->start ||
+         (impl->cursor < impl->len &&
+          !sl_completion_space((unsigned char)impl->buf[impl->cursor]));
+}
+
+static int sl_render_append_completions(sl_t *self, sl_render_t *render,
+                                        int width) {
+  sl_impl_t *impl = sl_impl(self);
+  sl_completion_match_t match;
+  char style[32] = "", summary[80];
+  size_t i;
+  int available, before = render->count, at;
+  if (!sl_current_completion(impl, &match))
+    return 0;
+  /* Reserve one input row and two producer rows after existing chrome. */
+  available = sl_terminal_height(impl) - render->count - 3;
+  if (available > 6)
+    available = 6;
+  if (available < 1)
+    return 0;
+  if (impl->prompt_theme != SL_PROMPT_THEME_PLAIN &&
+      sl_theme_color_style(impl->prompt_theme, SL_THEME_COLOR_QUEUE, 0, style,
+                           sizeof(style)) != 0)
+    return -1;
+  if (match.count > 1)
+    --available; /* Keep a row for an undisplayed-match count. */
+  for (i = 0; i < match.count && i < 3 && available > 0; ++i) {
+    int rows = render->count;
+    if (sl_render_queue_text(render,
+                             impl->completions.items[match.preview[i]].text,
+                             width, i ? "  " : "T ", style, available) != 0)
+      return -1;
+    available -= render->count - rows;
+  }
+  if (match.count > i) {
+    (void)snprintf(summary, sizeof(summary), "... %lu more matches",
+                   (unsigned long)(match.count - i));
+    if (sl_render_queue_text(render, summary, width, "  ", style, 1) != 0)
+      return -1;
+  }
+  /* Put the preview above queue/approval/status rows, once their real height
+   * is known. Only bounded preview rows move; the input cursor is untouched. */
+  for (at = before; at < render->count; ++at) {
+    sl_row_t row = render->rows[at];
+    int to = at - before;
+    memmove(render->rows + to + 1, render->rows + to,
+            (size_t)before * sizeof(row));
+    render->rows[to] = row;
+  }
+  return 0;
+}
+
 /* Bounds describe cursor positions owned by this visual row, rather than
  * the content endpoint that can belong to the next soft-wrapped row. A row
  * filled only by a tab continuation may have no addressable position. */
@@ -3273,6 +3335,8 @@ static int sl_render_build(sl_t *self, const char *prompt,
   if (sl_render_append_status_message(self, render, width) != 0)
     return -1;
   if (sl_render_append_statusline(self, render, width) != 0)
+    return -1;
+  if (sl_render_append_completions(self, render, width) != 0)
     return -1;
   /* A search query is persistent chrome, not part of the scrollable result.
    * Keeping it on one bounded row also handles a query as wide as the PTY. */
@@ -6667,6 +6731,37 @@ static int sl_transpose_draft(sl_t *self) {
   return status;
 }
 
+static int sl_complete_draft(sl_t *self) {
+  sl_impl_t *impl = sl_impl(self);
+  sl_completion_match_t match;
+  const char *text;
+  size_t end, prefix, extension;
+  if (!sl_current_completion(impl, &match))
+    return 0;
+  prefix = impl->cursor - match.start;
+  if (match.common < prefix || (match.count > 1 && match.common == prefix))
+    return 1;
+  text = impl->completions.items[match.preview[0]].text;
+  end = impl->cursor;
+  while (end < impl->len && !sl_completion_space((unsigned char)impl->buf[end]))
+    end += sl_utf8_next_cluster_len(impl->buf, impl->len, end);
+  extension = match.common - prefix;
+  /* Reuse an already present phrase suffix, including internal spaces. */
+  if (extension <= impl->len - impl->cursor &&
+      !memcmp(impl->buf + impl->cursor, text + prefix, extension) &&
+      end < impl->cursor + extension)
+    end = impl->cursor + extension;
+  if (sl_buf_replace(self, match.start, end - match.start, text,
+                     match.common) != 0) {
+    sl_prompt_queue_bell(impl);
+    return 1;
+  }
+  impl->cursor = match.start + match.common;
+  impl->preferred_column_valid = 0;
+  impl->edit.yank_valid = 0;
+  return 1;
+}
+
 static char *sl_readline_impl(sl_t *self, const char *prompt,
                               int queue_dispatch, sl_prompt_source_t *source) {
   sl_impl_t *impl;
@@ -6777,6 +6872,7 @@ static char *sl_readline_impl(sl_t *self, const char *prompt,
     int replayed = 0, waiting_edit;
     int deferred_input = 0;
     int binding_done = 0;
+    sl_completion_match_t completion;
     sl_key_action_t action;
     sl_backend_pump(self);
     sl_edit_end(&impl->edit);
@@ -6807,6 +6903,7 @@ static char *sl_readline_impl(sl_t *self, const char *prompt,
         key != SL_KEY_ESCAPE &&
         (impl->bracketed_paste || sl_backend_reading_paste(impl) ||
          !sl_find_key_binding(impl, (sl_key_t)key) || key == SL_KEY_ENTER ||
+         (key == SL_KEY_TAB && sl_current_completion(impl, &completion)) ||
          key == (int)impl->prompt_queue.keys.enqueue_draft ||
          key == (int)impl->prompt_queue.keys.submit_or_promote_newest)) {
       if (!paste_len && key >= 128 && key < 256)
@@ -6985,6 +7082,10 @@ static char *sl_readline_impl(sl_t *self, const char *prompt,
           }
           break;
         }
+      }
+      if (key == SL_KEY_TAB && sl_complete_draft(self)) {
+        impl->prompt_queue.approval_focused = 0;
+        break;
       }
       if (!binding_done &&
           sl_dispatch_key_binding(self, key, &action) != SL_OK) {
@@ -7708,6 +7809,7 @@ static void sl_destroy_method(sl_t *self) {
     free(impl->pending_input);
     free(impl->retained_prompt);
     sl_edit_destroy(&impl->edit);
+    sl_completion_clear(&impl->completions);
     free(impl->buf);
     free(impl);
   }
@@ -7717,6 +7819,37 @@ static void sl_destroy_method(sl_t *self) {
 static void sl_free_string_method(sl_t *self, char *ptr) {
   (void)self;
   free(ptr);
+}
+
+static int sl_set_completions_method(sl_t *self, const sl_completion_t *items,
+                                     size_t count) {
+  sl_impl_t *impl = sl_impl(self);
+  sl_completion_list_t next;
+  size_t i;
+  int status;
+  if (!impl || impl->terminal_active || sl_backend_callback_active(impl) ||
+      (!items && count) || count > (size_t)-1 / sizeof(sl_completion_item_t))
+    return SL_ERROR_INVALID;
+  for (i = 0; i < count; ++i) {
+    if (!items[i].text || !*items[i].text ||
+        strlen(items[i].text) > impl->line_max_len ||
+        (items[i].scope != SL_COMPLETION_START &&
+         items[i].scope != SL_COMPLETION_WORD) ||
+        !sl_quoted_prompt_text_valid(items[i].text)) {
+      sl_set_error(self, "invalid completion text or scope");
+      return SL_ERROR_INVALID;
+    }
+  }
+  status = sl_completion_copy(&next, items, count);
+  if (status != SL_OK) {
+    sl_set_error(self, "could not copy completion list");
+    return status;
+  }
+  sl_completion_clear(&impl->completions);
+  impl->completions = next;
+  if (impl->active_prompt && sl_render_apply(self, impl->active_prompt) != 0)
+    return SL_ERROR_IO;
+  return SL_OK;
 }
 
 static int sl_set_screen_width_method(sl_t *self, int width) {
@@ -8816,6 +8949,7 @@ static sl_t *sl_create_with_config_impl(const sl_config_t *config) {
     return NULL;
   }
   self->readline = sl_readline_method;
+  self->set_completions = sl_set_completions_method;
   self->destroy = sl_destroy_method;
   self->free_string = sl_free_string_method;
   self->history_add = sl_history_add_impl;
@@ -8977,6 +9111,12 @@ char *sl_next_prompt(sl_t *self, const char *prompt,
 void sl_destroy(sl_t *self) {
   if (self && self->destroy)
     self->destroy(self);
+}
+
+int sl_set_completions(sl_t *self, const sl_completion_t *items, size_t count) {
+  if (!self || !self->set_completions)
+    return SL_ERROR_INVALID;
+  return self->set_completions(self, items, count);
 }
 
 void sl_free_string(sl_t *self, char *ptr) {

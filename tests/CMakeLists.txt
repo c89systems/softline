@@ -16,6 +16,12 @@ target_link_libraries(test_softline PRIVATE softline)
 softline_apply_warnings(test_softline)
 softline_local_runtime(test_softline)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  add_executable(test_completion test_completion.c)
+  target_link_libraries(test_completion PRIVATE softline util)
+  softline_apply_warnings(test_completion)
+  softline_local_runtime(test_completion)
+  add_test(NAME softline_completion COMMAND test_completion)
+  set_tests_properties(softline_completion PROPERTIES LABELS "unit;editing;completion;memcheck" TIMEOUT 20)
   add_executable(test_terminal_handoff test_terminal_handoff.c)
   target_link_libraries(test_terminal_handoff PRIVATE softline util)
   softline_apply_warnings(test_terminal_handoff)
@@ -526,6 +532,16 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND TARGET example_chat)
     set_tests_properties(softline_chat_line_keys PROPERTIES
       ENVIRONMENT "${terminal_test_environment}"
       LABELS "integration;example-smoke" TIMEOUT 15)
+    add_test(NAME softline_chat_completion COMMAND "${SOFTLINE_TEST_XVFB_RUN}" -a
+      "$<TARGET_FILE:test_vte_chat>" completion "$<TARGET_FILE:example_chat>")
+    set_tests_properties(softline_chat_completion PROPERTIES
+      ENVIRONMENT "${terminal_test_environment}"
+      LABELS "integration;completion;example-smoke" TIMEOUT 15)
+    add_test(NAME softline_chat_remote_completion COMMAND "${SOFTLINE_TEST_XVFB_RUN}" -a
+      "$<TARGET_FILE:test_vte_chat>" completion "$<TARGET_FILE:example_chat_remote>")
+    set_tests_properties(softline_chat_remote_completion PROPERTIES
+      ENVIRONMENT "${terminal_test_environment};SOFTLINE_CHAT_TEST_OWNER=$<TARGET_FILE:example_queue_owner>"
+      LABELS "integration;completion;remote" TIMEOUT 15)
     foreach(approval_case typing queue edit empty discard idle multiline resize)
       add_test(NAME softline_chat_approval_${approval_case} COMMAND "${SOFTLINE_TEST_XVFB_RUN}" -a
         "$<TARGET_FILE:test_vte_chat>" approval "$<TARGET_FILE:example_chat>" "${approval_case}")
