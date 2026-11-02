@@ -893,19 +893,109 @@ static int remote_terminal_case(unsigned short port) {
   return 0;
 }
 
+static int terminal_disconnect_case(peer_t *p, unsigned short port,
+                                    int saturate) {
+  struct sockaddr_in address;
+  demo_packet_t packet = {0};
+  char text[2048] = {0}, bytes[2048];
+  const char marker[] = "REMOTE_NONREADER ";
+  const char command[] = "stty -icanon -echo; trap '' HUP; echo "
+                         "REMOTE_NONREADER $$; while :; do sleep 60; done\n";
+  size_t used = 0;
+  long shell = 0;
+  double deadline;
+  int fd, i;
+  demo_link_close(&p->link);
+  fd = socket(AF_INET, SOCK_STREAM, 0);
+  memset(&address, 0, sizeof(address));
+  address.sin_family = AF_INET;
+  address.sin_port = htons(port);
+  address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  CHECK(fd >= 0 && !connect(fd, (struct sockaddr *)&address, sizeof(address)) &&
+        !demo_nonblock(fd));
+  demo_link_init(&p->link, fd);
+  demo_put_number(&packet, DEMO_PTY_OPEN);
+  demo_put_number(&packet, 12);
+  demo_put_number(&packet, 80);
+  CHECK(!demo_link_queue(&p->link, &packet) && !flush(p));
+  deadline = now() + 2000;
+  for (;;) {
+    int got = demo_link_read(&p->link, &packet);
+    CHECK(got >= 0);
+    if (got) {
+      unsigned long kind = demo_number(&packet);
+      demo_packet_free(&packet);
+      CHECK(kind == DEMO_PTY_READY);
+      break;
+    }
+    CHECK(!wait_fd(fd, POLLIN, deadline));
+  }
+  demo_put_number(&packet, DEMO_PTY_DATA);
+  demo_put_bytes(&packet, command, sizeof(command) - 1);
+  CHECK(!demo_link_queue(&p->link, &packet) && !flush(p));
+  deadline = now() + 2000;
+  while (!shell) {
+    int got = demo_link_read(&p->link, &packet);
+    CHECK(got >= 0);
+    if (got) {
+      size_t length;
+      const char *data, *at;
+      CHECK(demo_number(&packet) == DEMO_PTY_DATA);
+      data = demo_bytes(&packet, &length);
+      CHECK(!packet.failed && length < sizeof(text) - used);
+      memcpy(text + used, data, length);
+      used += length;
+      text[used] = 0;
+      at = text;
+      while ((at = strstr(at, marker)) != NULL) {
+        if (strchr(at, '\n') &&
+            sscanf(at + sizeof(marker) - 1, "%ld", &shell) == 1)
+          break;
+        at += sizeof(marker) - 1;
+      }
+      demo_packet_free(&packet);
+    } else
+      CHECK(!wait_fd(fd, POLLIN, deadline));
+  }
+  CHECK(shell > 0);
+  if (saturate) {
+    memset(bytes, 'x', sizeof(bytes));
+    for (i = 0; i < 16; ++i) {
+      struct pollfd observation;
+      demo_put_number(&packet, DEMO_PTY_DATA);
+      demo_put_bytes(&packet, bytes, sizeof(bytes));
+      CHECK(!demo_link_queue(&p->link, &packet) && !flush(p));
+      /* Let the real PTY apply backpressure and observe that the session
+       * stays alive until the frontend, rather than the owner, closes it. */
+      observation.fd = fd;
+      observation.events = POLLIN;
+      observation.revents = 0;
+      CHECK(poll(&observation, 1, 20) >= 0 && kill((pid_t)shell, 0) == 0);
+    }
+  }
+  demo_link_close(&p->link);
+  deadline = now() + 700;
+  while (kill((pid_t)shell, 0) == 0 && now() < deadline)
+    (void)poll(NULL, 0, 5);
+  CHECK(kill((pid_t)shell, 0) < 0 && errno == ESRCH);
+  return 0;
+}
+
 int main(int argc, char **argv) {
   int startup[2], status, result, port;
   FILE *output;
   char line[128];
   pid_t child;
   peer_t *p;
+  int terminal_only = argc == 3 && !strcmp(argv[1], "disconnect");
+  const char *owner_path = terminal_only ? argv[2] : argc == 2 ? argv[1] : NULL;
   if (argc == 2 && !strcmp(argv[1], "closed-peer"))
     return closed_peer();
-  CHECK(argc == 2 && !framing() && !closed_peer());
+  CHECK(owner_path && !framing() && !closed_peer());
   child = fork();
   CHECK(child >= 0);
   if (!child) {
-    execl(argv[1], argv[1], "invalid-port", (char *)NULL);
+    execl(owner_path, owner_path, "invalid-port", (char *)NULL);
     _exit(127);
   }
   CHECK(waitpid(child, &status, 0) == child && WIFEXITED(status) &&
@@ -922,7 +1012,7 @@ int main(int argc, char **argv) {
     setenv("SHELL", "/bin/sh", 1);
     setenv("ENV", "", 1);
     setenv("PS1", "REMOTE_READY> ", 1);
-    execl(argv[1], argv[1], "0", (char *)NULL);
+    execl(owner_path, owner_path, "0", (char *)NULL);
     _exit(127);
   }
   close(startup[1]);
@@ -933,21 +1023,26 @@ int main(int argc, char **argv) {
   CHECK(p);
   demo_link_init(&p->link, -1);
   signal(SIGPIPE, SIG_IGN);
-  result = large_owner_case(p, (unsigned short)port);
-  if (!result)
-    result = owner_cases(p, (unsigned short)port);
-  if (!result)
-    result = frontend_case(p, (unsigned short)port);
-  if (!result)
-    result = live_case(p, (unsigned short)port);
-  if (!result)
-    result = shell_case(p, (unsigned short)port);
-  if (!result)
-    result = completion_shell_case(p, (unsigned short)port);
-  if (!result)
-    result = command_barrier(p, (unsigned short)port, child);
-  if (!result)
-    result = remote_terminal_case((unsigned short)port);
+  if (terminal_only)
+    result = terminal_disconnect_case(p, (unsigned short)port, 0) ||
+             terminal_disconnect_case(p, (unsigned short)port, 1);
+  else {
+    result = large_owner_case(p, (unsigned short)port);
+    if (!result)
+      result = owner_cases(p, (unsigned short)port);
+    if (!result)
+      result = frontend_case(p, (unsigned short)port);
+    if (!result)
+      result = live_case(p, (unsigned short)port);
+    if (!result)
+      result = shell_case(p, (unsigned short)port);
+    if (!result)
+      result = completion_shell_case(p, (unsigned short)port);
+    if (!result)
+      result = command_barrier(p, (unsigned short)port, child);
+    if (!result)
+      result = remote_terminal_case((unsigned short)port);
+  }
   demo_link_close(&p->link);
   free(p);
   kill(child, SIGTERM);

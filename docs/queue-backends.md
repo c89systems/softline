@@ -212,6 +212,9 @@ locally without waiting for the owner. The demo transport remains loopback-only
 and unauthenticated; it is not a remote-access service. Local chat uses the local
 PTY adapter; direct foreground shell execution has been removed. See the
 [terminal adapter contract](terminal-handoff-design.md).
+The owner detects peer closure even while PTY input is backpressured; ending a
+dedicated demo PTY connection discards queued input rather than retaining it
+after frontend exit. This does not change accepted queue work or its lifetime.
 Ctrl-D on an empty editor detaches; accepted work and holds belong to the owner.
 The `run-chat-without-delay` variants also work in remote mode: the frontend
 requests zero producer delay when it attaches to the owner.

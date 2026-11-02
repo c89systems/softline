@@ -1,3 +1,9 @@
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE 1
+#endif
+#if defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)
+#define _DARWIN_C_SOURCE 1
+#endif
 #define _POSIX_C_SOURCE 200809L
 #include "chat_demo_data.h"
 #include "queue_demo_terminal.h"
@@ -6,6 +12,9 @@
 #include <errno.h>
 #include <limits.h>
 #include <netinet/tcp.h>
+#if defined(__APPLE__)
+#include <netinet/tcp_fsm.h>
+#endif
 #include <poll.h>
 #include <signal.h>
 #include <stdio.h>
@@ -65,6 +74,26 @@ static double milliseconds(void) {
   struct timespec ts;
   (void)clock_gettime(CLOCK_MONOTONIC, &ts);
   return (double)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+/* FIN can sit behind unread payload while the PTY stops accepting input.
+ * Observe transport lifetime independently, without consuming/dropping data.
+ * The existing PTY/reaping tick bounds this check while reads are paused. */
+static int terminal_peer_closed(int fd) {
+#if defined(__APPLE__)
+  struct tcp_connection_info info;
+  enum {
+    option = TCP_CONNECTION_INFO,
+    closed = TCPS_CLOSED,
+    ended = TCPS_CLOSE_WAIT
+  };
+#else
+  struct tcp_info info;
+  enum { option = TCP_INFO, closed = TCP_CLOSE, ended = TCP_CLOSE_WAIT };
+#endif
+  socklen_t length = sizeof(info);
+  memset(&info, 0, sizeof(info));
+  return getsockopt(fd, IPPROTO_TCP, option, &info, &length) ||
+         info.tcpi_state == closed || info.tcpi_state == ended;
 }
 static char *duplicate(const char *text) {
   size_t n = strlen(text) + 1;
@@ -868,6 +897,9 @@ int main(int argc, char **argv) {
     ready = poll(fds, 4, due <= now ? 0 : (int)(due - now) + 1);
     if (ready < 0 && errno != EINTR)
       break;
+    if (o->terminal && o->terminal->input_len &&
+        terminal_peer_closed(o->link.fd))
+      disconnect(o);
     if (fds[0].revents & POLLIN) {
       int fd = accept(listener, NULL, NULL);
       if (fd >= 0) {

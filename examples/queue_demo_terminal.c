@@ -37,6 +37,7 @@ static int remote_callback(void *context, sl_terminal_event_t *e) {
   remote_terminal_t *r = context;
   demo_packet_t p = {0};
   int status;
+  struct linger discard = {1, 0};
   switch (e->operation) {
   case SL_TERMINAL_OPEN:
     r->rows = e->rows;
@@ -44,6 +45,11 @@ static int remote_callback(void *context, sl_terminal_event_t *e) {
     r->deadline = terminal_time() + 3000;
     r->link.fd = socket(AF_INET, SOCK_STREAM, 0);
     if (r->link.fd < 0 || demo_nonblock(r->link.fd))
+      return SL_ERROR_IO;
+    /* A fresh, dedicated PTY connection must not retain queued input after
+     * cancellation or frontend death. Normal EOF has already been drained. */
+    if (setsockopt(r->link.fd, SOL_SOCKET, SO_LINGER, &discard,
+                   sizeof(discard)))
       return SL_ERROR_IO;
     status =
         connect(r->link.fd, (struct sockaddr *)&r->address, sizeof(r->address));

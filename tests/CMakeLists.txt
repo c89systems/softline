@@ -35,6 +35,8 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     softline_apply_warnings(test_queue_tcp)
     softline_local_runtime(test_queue_tcp)
     add_test(NAME softline_queue_tcp COMMAND test_queue_tcp "$<TARGET_FILE:example_queue_owner>")
+    add_test(NAME softline_queue_terminal_disconnect COMMAND test_queue_tcp disconnect "$<TARGET_FILE:example_queue_owner>")
+    set_tests_properties(softline_queue_terminal_disconnect PROPERTIES LABELS "integration;terminal;queue;memcheck" TIMEOUT 10)
     add_test(NAME softline_queue_transport_closed_peer COMMAND test_queue_tcp closed-peer)
     set_tests_properties(softline_queue_transport_closed_peer PROPERTIES
       LABELS "unit;queue;memcheck" TIMEOUT 5)
