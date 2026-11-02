@@ -35,6 +35,7 @@ typedef struct softline_lua_handle {
   int policy_callback_ref;
   sl_queue_backend_t backend_callbacks;
   int backend_callback_active;
+  int terminal_callback_active;
   int policy_callback_active;
   int idle_callback_active;
   int idle_callback_failed;
@@ -60,6 +61,8 @@ static softline_lua_handle_t *softline_lua_check(lua_State *L, int index) {
                 "closed softline handle");
   luaL_argcheck(L, !handle->backend_callback_active, index,
                 "cannot reenter softline from a backend callback");
+  luaL_argcheck(L, !handle->terminal_callback_active, index,
+                "cannot reenter softline from a terminal callback");
   return handle;
 }
 
@@ -74,6 +77,7 @@ static int softline_lua_status(lua_State *L, int status) {
 }
 
 #include "softline_queue_backend_lua.h"
+#include "softline_terminal_lua.h"
 
 static int softline_lua_find_key_ref(softline_lua_handle_t *handle,
                                      sl_key_t key) {
@@ -461,7 +465,7 @@ static int softline_lua_gc(lua_State *L) {
   handle = (softline_lua_handle_t *)luaL_checkudata(L, 1, SOFTLINE_LUA_HANDLE);
   if (handle->backend_callback_active || handle->policy_callback_active ||
       handle->idle_callback_active || handle->watch_callback_active ||
-      handle->history_callback_active)
+      handle->history_callback_active || handle->terminal_callback_active)
     return 0;
   for (i = 0; i < SOFTLINE_LUA_MAX_KEY_BINDINGS; i++) {
     if (handle->key_bindings[i].ref != LUA_NOREF) {
@@ -497,7 +501,7 @@ static int softline_lua_close(lua_State *L) {
   handle = (softline_lua_handle_t *)luaL_checkudata(L, 1, SOFTLINE_LUA_HANDLE);
   if (handle->backend_callback_active || handle->policy_callback_active ||
       handle->idle_callback_active || handle->watch_callback_active ||
-      handle->history_callback_active)
+      handle->history_callback_active || handle->terminal_callback_active)
     return luaL_error(L, "cannot close softline handle from its callback");
   return softline_lua_gc(L);
 }
@@ -2002,8 +2006,11 @@ static const luaL_Reg softline_lua_methods[] = {
     {"close", softline_lua_close},
     {NULL, NULL}};
 
-static const luaL_Reg softline_lua_functions[] = {{"new", softline_lua_new},
-                                                  {NULL, NULL}};
+static const luaL_Reg softline_lua_functions[] = {
+    {"new", softline_lua_new},
+    {"terminal_handoff", softline_lua_terminal_handoff},
+    {"terminal_local", softline_lua_terminal_local},
+    {NULL, NULL}};
 
 int luaopen_softline(lua_State *L) {
   luaL_newmetatable(L, SOFTLINE_LUA_HANDLE);
@@ -2016,6 +2023,18 @@ int luaopen_softline(lua_State *L) {
 
   lua_newtable(L);
   luaL_setfuncs(L, softline_lua_functions, 0);
+  lua_pushinteger(L, SL_TERMINAL_OPEN);
+  lua_setfield(L, -2, "TERMINAL_OPEN");
+  lua_pushinteger(L, SL_TERMINAL_STEP);
+  lua_setfield(L, -2, "TERMINAL_STEP");
+  lua_pushinteger(L, SL_TERMINAL_READ);
+  lua_setfield(L, -2, "TERMINAL_READ");
+  lua_pushinteger(L, SL_TERMINAL_WRITE);
+  lua_setfield(L, -2, "TERMINAL_WRITE");
+  lua_pushinteger(L, SL_TERMINAL_RESIZE);
+  lua_setfield(L, -2, "TERMINAL_RESIZE");
+  lua_pushinteger(L, SL_TERMINAL_CLOSE);
+  lua_setfield(L, -2, "TERMINAL_CLOSE");
   lua_pushinteger(L, SL_READLINE_NONE);
   lua_setfield(L, -2, "READLINE_NONE");
   lua_pushinteger(L, SL_READLINE_SUBMITTED);

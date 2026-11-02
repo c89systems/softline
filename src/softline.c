@@ -5321,6 +5321,7 @@ static ssize_t sl_read_input_byte(sl_t *self, char *ch, int timeout_ms) {
     return -1;
   if (sl_pending_input_take(impl, ch) == 1)
     return 1;
+  sl_terminal_reap(impl);
   count = 1;
   fds[0].fd = impl->input_fd;
   fds[0].events = POLLIN;
@@ -5351,7 +5352,8 @@ static ssize_t sl_read_input_byte(sl_t *self, char *ch, int timeout_ms) {
         sl_prompt_approval_index(impl, 0) >= 0)))
     poll_timeout_ms = 0;
   if (poll_timeout_ms < 0 &&
-      (impl->idle_callback || sl_surface_is_native(impl->output_surface) ||
+      (impl->terminal_children || impl->idle_callback ||
+       sl_surface_is_native(impl->output_surface) ||
        (impl->statusline.enabled && impl->statusline.spinner &&
         impl->statusline.busy)))
     poll_timeout_ms = SL_UI_TICK_CADENCE_MS;
@@ -7649,14 +7651,18 @@ static void sl_destroy_method(sl_t *self) {
                  "cannot destroy softline handle from a backend callback");
     return;
   }
-  if (impl && (impl->watch_callback_depth != 0 || impl->history_busy)) {
+  if (impl && (impl->terminal_active || impl->watch_callback_depth != 0 ||
+               impl->history_busy)) {
     sl_set_error(self,
-                 impl->history_busy
+                 impl->terminal_active
+                     ? "cannot destroy softline handle from a terminal callback"
+                 : impl->history_busy
                      ? "cannot destroy softline handle from a history callback"
                      : "cannot destroy softline handle from a watch callback");
     return;
   }
   if (impl) {
+    sl_terminal_cleanup(impl);
     sl_backend_destroy(self);
     if (sl_surface_is_native(impl->output_surface))
       (void)sl_native_session_close(self);

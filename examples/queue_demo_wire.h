@@ -25,7 +25,12 @@ enum demo_message {
   DEMO_SHELL,
   DEMO_QUIT,
   DEMO_IDLE,
-  DEMO_SHELL_BEGIN
+  DEMO_SHELL_BEGIN,
+  DEMO_PTY_OPEN,
+  DEMO_PTY_READY,
+  DEMO_PTY_DATA,
+  DEMO_PTY_RESIZE,
+  DEMO_PTY_EXIT
 };
 typedef struct demo_packet {
   unsigned char *data;
@@ -38,11 +43,13 @@ typedef struct demo_link {
   size_t header_length;
   demo_packet_t input;
   demo_packet_t output[DEMO_OUT_MAX];
-  size_t count, queued_bytes;
+  size_t count, queued_bytes, input_limit;
 } demo_link_t;
 void demo_packet_free(demo_packet_t *packet);
 void demo_put_number(demo_packet_t *packet, unsigned long number);
 void demo_put_string(demo_packet_t *packet, const char *text);
+void demo_put_bytes(demo_packet_t *packet, const char *bytes, size_t length);
+const char *demo_bytes(demo_packet_t *packet, size_t *length);
 unsigned long demo_number(demo_packet_t *packet);
 const char *demo_string(demo_packet_t *packet);
 void demo_put_request(demo_packet_t *packet, const sl_queue_request_t *request);

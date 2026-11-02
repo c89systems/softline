@@ -73,6 +73,8 @@ sl_set_status_message_prefix
 sl_set_status_message_colors
 sl_submit
 sl_suspend
+sl_terminal_handoff
+sl_terminal_local
 sl_watch_add
 sl_watch_clear
 sl_watch_modify

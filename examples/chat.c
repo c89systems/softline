@@ -110,28 +110,23 @@ static int sync_queue_readiness(struct chat_state *state, int at_seam) {
   return 0;
 }
 
-/* Run only in the idle owner loop, after next_prompt() has returned. Ending
- * the session releases termios and the scroll region; beginning a new one
- * discards the old prompt frame and probes the shell's final cursor position.
- * system() handles parent SIGINT/SIGQUIT while the interactive shell runs. */
+/* Both local and remote sessions use the same Softline PTY relay. */
 static int run_shell(struct chat_state *state, int preserve_draft) {
-  int status;
-  if (sl_output_stream_end(state->sl) != SL_OK)
+  int status, exit_status = -1;
+  char message[128] = {0};
+  status = state->remote
+               ? demo_client_terminal(state->remote, state->sl, &exit_status)
+               : sl_terminal_local(state->sl, NULL, &exit_status);
+  if (exit_status > 0 && status != SL_TERMINAL_ESCAPED)
+    (void)snprintf(message, sizeof(message),
+                   "shell exited unsuccessfully (exit %d)\n", exit_status);
+  else if (status < 0)
+    (void)snprintf(message, sizeof(message), "shell handoff failed (%d)\n",
+                   status);
+  if (*message &&
+      sl_output_stream_write(state->sl, message, strlen(message)) != SL_OK)
     return -1;
-  /* Quoted expansion treats SHELL as one executable, without parsing its
-   * contents as shell syntax. The POSIX shell supplies the unset/empty default.
-   */
-  status = system("exec \"${SHELL:-/bin/sh}\" -i");
-  if (status == -1)
-    perror("could not start shell");
-  else if (WIFEXITED(status) && WEXITSTATUS(status) != 0)
-    fprintf(stderr, "shell exited unsuccessfully (exit %d)\n",
-            WEXITSTATUS(status));
-  else if (WIFSIGNALED(status))
-    fprintf(stderr, "shell exited unsuccessfully (signal %d)\n",
-            WTERMSIG(status));
   return sync_geometry(state) == 0 &&
-                 sl_output_stream_begin(state->sl) == SL_OK &&
                  (preserve_draft || set_chat_message(state->sl, NULL) == SL_OK)
              ? 0
              : -1;

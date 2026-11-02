@@ -58,6 +58,23 @@ void demo_put_number(demo_packet_t *packet, unsigned long number) {
   (void)snprintf(text, sizeof(text), "%lu", number);
   demo_put_string(packet, text);
 }
+void demo_put_bytes(demo_packet_t *packet, const char *bytes, size_t length) {
+  if (packet->failed || length > 4096 || reserve(packet, length)) {
+    packet->failed = 1;
+    return;
+  }
+  memcpy(packet->data + packet->length, bytes, length);
+  packet->length += length;
+}
+const char *demo_bytes(demo_packet_t *packet, size_t *length) {
+  *length = packet->length - packet->offset;
+  if (*length > 4096) {
+    packet->failed = 1;
+    return NULL;
+  }
+  packet->offset = packet->length;
+  return (const char *)packet->data + packet->length - *length;
+}
 const char *demo_string(demo_packet_t *packet) {
   uint32_t size;
   const char *text;
@@ -208,6 +225,7 @@ int demo_nonblock(int fd) {
 void demo_link_init(demo_link_t *link, int fd) {
   memset(link, 0, sizeof(*link));
   link->fd = fd;
+  link->input_limit = DEMO_FRAME_MAX;
 }
 void demo_link_close(demo_link_t *link) {
   size_t i;
@@ -290,7 +308,8 @@ int demo_link_read(demo_link_t *link, demo_packet_t *packet) {
         uint32_t length;
         memcpy(&length, link->header, 4);
         length = ntohl(length);
-        if (!length || length > DEMO_FRAME_MAX || reserve(&link->input, length))
+        if (!length || length > link->input_limit ||
+            reserve(&link->input, length))
           return -1;
         link->input.capacity = length;
       }

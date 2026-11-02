@@ -411,6 +411,26 @@ cleanup:
   return failed;
 }
 
+static int terminal(void) {
+  struct editor e;
+  int failed = 0;
+  size_t mark;
+  REQUIRE(start(&e, "tests/lua-fixtures/terminal.lua", NULL, NULL) == 0);
+  REQUIRE(wait_for(&e, "terminal> ", 0) == 0);
+  REQUIRE(send_bytes(&e, "\033e\033s") == 0);
+  REQUIRE(wait_for(&e, "TERMINAL-READY", 0) == 0);
+  mark = e.length;
+  REQUIRE(send_bytes(&e, "~.") == 0);
+  REQUIRE(wait_for(&e, "TERMINAL-RESUMED", mark) == 0);
+  REQUIRE(wait_for(&e, "\033[?2004h", mark) == 0);
+  REQUIRE(send_bytes(&e, "\033s") == 0);
+  REQUIRE(wait_for(&e, "lua terminal relay passed", mark) == 0);
+  REQUIRE(finish(&e) == 0);
+cleanup:
+  close_editor(&e);
+  return failed;
+}
+
 int main(int argc, char **argv) {
   if (argc == 7 && !strcmp(argv[1], "store")) {
     if (strcmp(argv[2], "c") && strcmp(argv[2], "lua"))
@@ -424,6 +444,8 @@ int main(int argc, char **argv) {
     return 2;
   executable = argv[2];
   root = argv[3];
+  if (!strcmp(argv[1], "terminal"))
+    return terminal();
   if (!strcmp(argv[1], "readline_edit"))
     return readline_edit();
   if (!strcmp(argv[1], "idle"))

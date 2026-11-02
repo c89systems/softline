@@ -129,7 +129,7 @@ endif()
 
 add_library(sl_lib_obj OBJECT src/softline.c src/softline_surface.c
   src/softline_clipboard.c src/softline_history.c src/softline_edit.c
-  src/softline_queue_backend.c)
+  src/softline_queue_backend.c src/softline_terminal.c src/softline_pty.c)
 set_target_properties(sl_lib_obj PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(sl_lib_obj
   PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src

@@ -201,10 +201,17 @@ owner leaves lost outcomes unknown rather than executing them again.
 
 Alt-S preserves the draft and requests shell handoff at the next response seam
 (immediately when idle). The frontend closes its subscription before running
-the shell, so the owner continues producing and executing accepted work without
+the remote PTY shell, so the owner continues producing and executing accepted work without
 socket backpressure from an unread frontend. On return it resynchronizes queue
 state and joins future output at a response seam. Missed output is discarded,
 never buffered or replayed. Local C/Lua Alt-S remains between operations.
+The remote shell runs in a fresh PTY created by the owner, using its environment
+and working directory; the frontend uses
+the same byte relay as the local adapter. Enter then `~.` terminates handoff
+locally without waiting for the owner. The demo transport remains loopback-only
+and unauthenticated; it is not a remote-access service. Local chat uses the local
+PTY adapter; direct foreground shell execution has been removed. See the
+[terminal adapter contract](terminal-handoff-design.md).
 Ctrl-D on an empty editor detaches; accepted work and holds belong to the owner.
 The `run-chat-without-delay` variants also work in remote mode: the frontend
 requests zero producer delay when it attaches to the owner.

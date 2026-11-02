@@ -245,22 +245,27 @@ queue. The C and Lua terminal tests gate their simulated workers with an
 inherited `SOFTLINE_CHAT_GATE_FD` (3..9, one newline-terminated token per turn),
 so boundary assertions do not depend on sleeps.
 
-Alt-S opens the same shell between turns while preserving the current draft,
+Alt-S opens a new PTY session between turns while preserving the current draft,
 cursor, undo, history search and queued-entry editing state. Exit the shell to
 resume editing; nothing is submitted or added to history by the shortcut.
-The command forms still return to an empty prompt.
+The command forms still return to an empty prompt. Local C/Lua chat uses the
+local PTY adapter; remote chat opens its PTY in the backend. Both use the same
+Softline byte relay. Enter then `~.` terminates handoff locally, including when
+the shell or transport hangs; `~~` at the start of a line sends a literal tilde.
 
-The examples end the output session before launching the shell, restoring
-terminal input and the full scroll region. After the shell exits, they begin a
+The relay ends the output session before opening the adapter, releases the
+scroll region, and owns local raw input while forwarding PTY bytes unchanged.
+After the shell exits, it restores terminal modes and begins a
 new session on the same handle: the prompt is built afresh at the current
 terminal size, the output cursor is probed again, and history, queue and
 settings survive. An unfinished external line restarts quote separation;
 otherwise known spacing remains.
 Clearing or resizing inside the shell is allowed. No
 transcript is replayed. A failed shell launch or nonzero exit is reported and
-returns to chat. Applications can use this same `output_stream_end()` / child
-process / `output_stream_begin()` sequence outside an active editor callback;
-shell execution belongs to the application.
+returns to chat. Applications call `sl_terminal_local()` for the built-in local
+adapter or `sl_terminal_handoff()` with a nonblocking host adapter for another
+PTY transport, outside active editor callbacks. The host chooses the shell,
+authentication and protocol. See [the terminal adapter contract](docs/terminal-handoff-design.md).
 
 To bind another key, return `SL_KEY_ACTION_SUSPEND` from its callback.
 `readline()` or `next_prompt()` returns NULL with `SL_READLINE_SUSPENDED`.

@@ -1,8 +1,8 @@
 # Local and remote PTY handoff
 
-Status: agreed behavior and proposed adapter boundary; not implemented. The
-current examples launch a local shell directly. A remote queue connection does
-not currently provide a remote shell.
+Status: implemented by `sl_terminal_handoff()` and the local PTY adapter
+`sl_terminal_local()`. Local C/Lua chat uses the local adapter. Remote C chat
+uses a backend PTY over the demo transport, independently of frontend rendering.
 
 ## Behavior
 
@@ -34,7 +34,7 @@ adapters supply the same operations and lifecycle:
 | Operation | Required behavior |
 | --- | --- |
 | Open | Start a new session with the current rows and columns; report ready, pending or failed. |
-| Readiness | Supply pollable descriptor interests and any next deadline, including during opening and shutdown. |
+| Readiness | STEP services ready events and supplies one pollable descriptor, interests, next deadline and readiness; multiplex other sources behind that descriptor. |
 | Read | Produce available PTY output bytes, would-block, EOF or failure. |
 | Write | Accept input bytes, allowing partial progress and would-block. |
 | Resize | Accept the latest rows and columns without waiting for peer acknowledgment. |
@@ -57,7 +57,8 @@ open. Inactivity alone is not an error.
 Use the existing suspension and output-session lifecycle. Do not add a shell
 method to the public receiver merely to select an adapter. C and Lua hosts must
 be able to select local or remote sessions with the same behavior. Callback
-names and declarations are not a shipped API in this design document.
+operations are declared in `sl_terminal_event_t` and `sl_terminal_operation_t`.
+The public receiver layout is unchanged.
 
 ## Terminal and output ownership
 
@@ -77,6 +78,10 @@ Only bounded transport/parser chunks and pending partial writes are retained.
 Backpressure stops further reads in the affected direction without preventing
 local escape handling. Do not accumulate a complete session or spool output.
 Cancellation must not wait to flush pending output.
+The relay bounds each direction to a 4096-byte chunk. If input exceeds the
+pending-input limit, end the session with `SL_ERROR_FULL`; never silently drop
+ordinary keystrokes or grow an unbounded input queue. It continues scanning the
+current input chunk for an escape before reporting overflow.
 
 Other producers must not write to the terminal during handoff. For the remote
 queue demo, retain detachment at a response seam, continued backend execution,
@@ -107,7 +112,7 @@ nonblocking callback contract remain usable. It does not guarantee that a
 disconnected remote process has terminated. Other SSH escape commands are not
 part of this feature.
 
-## Required proof before completion
+## Verification contract
 
 Register compiled unit and real PTY integration tests with bounded timeouts.
 Use deterministic adapter fixtures and readiness barriers, not long sleeps.

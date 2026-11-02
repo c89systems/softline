@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "chat_demo_data.h"
+#include "queue_demo_terminal.h"
 #include "queue_demo_wire.h"
 #include <arpa/inet.h>
 #include <errno.h>
@@ -34,6 +35,7 @@ typedef struct item {
   int direct_start;
 } item_t;
 typedef struct owner {
+  demo_terminal_server_t *terminal, *closed_terminals;
   demo_link_t link;
   item_t items[DEMO_ITEM_MAX];
   client_t clients[CLIENT_MAX];
@@ -72,6 +74,15 @@ static char *duplicate(const char *text) {
   return copy;
 }
 static void disconnect(owner_t *o) {
+  if (o->terminal) {
+    sl_terminal_event_t event;
+    memset(&event, 0, sizeof(event));
+    event.operation = SL_TERMINAL_CLOSE;
+    (void)sl_pty_callback(&o->terminal->pty, &event);
+    o->terminal->next = o->closed_terminals;
+    o->closed_terminals = o->terminal;
+    o->terminal = NULL;
+  }
   demo_link_close(&o->link);
   o->client = NULL;
   o->gated = o->shell_pending = o->shell_requested = 0;
@@ -531,7 +542,25 @@ static void input(owner_t *o) {
       break;
     }
     kind = demo_number(&p);
-    if (kind == DEMO_HELLO) {
+    if (kind == DEMO_PTY_OPEN && !o->client && !o->terminal) {
+      o->link.input_limit = 8192;
+      o->terminal = calloc(1, sizeof(*o->terminal));
+      if (!o->terminal) {
+        demo_packet_free(&p);
+        disconnect(o);
+        break;
+      }
+      o->terminal->pty.fd = -1;
+      o->terminal->pty.exec_fd = -1;
+      o->terminal->pty.shell = getenv("SHELL");
+      if (!o->terminal->pty.shell || !*o->terminal->pty.shell)
+        o->terminal->pty.shell = "/bin/sh";
+      if (demo_terminal_server_input(o->terminal, &o->link, kind, &p))
+        disconnect(o);
+    } else if (o->terminal) {
+      if (demo_terminal_server_input(o->terminal, &o->link, kind, &p))
+        disconnect(o);
+    } else if (kind == DEMO_HELLO) {
       const char *name = demo_string(&p);
       unsigned long delay_us = demo_number(&p);
       unsigned long request_high = demo_number(&p);
@@ -565,6 +594,8 @@ static void input(owner_t *o) {
     } else
       disconnect(o);
     demo_packet_free(&p);
+    if (o->terminal && o->terminal->input_len)
+      break;
   }
 }
 
@@ -805,23 +836,36 @@ int main(int argc, char **argv) {
   printf("LISTEN 127.0.0.1 %u\n", (unsigned)ntohs(address.sin_port));
   fflush(stdout);
   while (!quitting) {
-    struct pollfd fds[3];
+    struct pollfd fds[4];
     double now = milliseconds(), due = now + 60000;
     int ready;
     if (o->active && !o->waiting_gate && !producer_paused)
       due = o->next_piece;
     if (o->demo_enabled && o->next_injection < due)
       due = o->next_injection;
+    if ((o->terminal || o->closed_terminals) && due > now + 20)
+      due = now + 20;
     fds[0].fd = listener;
     fds[0].events = POLLIN;
     fds[0].revents = 0;
     fds[1].fd = o->link.fd;
-    fds[1].events = POLLIN | (o->link.count ? POLLOUT : 0);
+    fds[1].events = ((!o->terminal || !o->terminal->input_len) ? POLLIN : 0) |
+                    (o->link.count ? POLLOUT : 0);
     fds[1].revents = 0;
     fds[2].fd = o->waiting_gate ? o->gate_fd : -1;
     fds[2].events = POLLIN;
     fds[2].revents = 0;
-    ready = poll(fds, 3, due <= now ? 0 : (int)(due - now) + 1);
+    fds[3].fd = o->terminal && !o->terminal->eof
+                    ? (o->terminal->pty.exec_fd >= 0 ? o->terminal->pty.exec_fd
+                       : o->terminal->pty.eof_deadline ? -1
+                                                       : o->terminal->pty.fd)
+                    : -1;
+    fds[3].events = (o->link.count < 2 ? POLLIN : 0) |
+                    (o->terminal && o->terminal->input_len ? POLLOUT : 0);
+    if (!fds[3].events)
+      fds[3].fd = -1;
+    fds[3].revents = 0;
+    ready = poll(fds, 4, due <= now ? 0 : (int)(due - now) + 1);
     if (ready < 0 && errno != EINTR)
       break;
     if (fds[0].revents & POLLIN) {
@@ -853,6 +897,19 @@ int main(int argc, char **argv) {
       }
     }
     now = milliseconds();
+    if (o->terminal && demo_terminal_server_pump(o->terminal, &o->link))
+      disconnect(o);
+    {
+      demo_terminal_server_t **at = &o->closed_terminals;
+      while (*at) {
+        demo_terminal_server_t *s = *at;
+        if (sl_pty_reap(&s->pty)) {
+          *at = s->next;
+          free(s);
+        } else
+          at = &s->next;
+      }
+    }
     pump(o, now);
     if (o->demo_enabled && now >= o->next_injection) {
       schedule_injection(o, now);
@@ -861,6 +918,21 @@ int main(int argc, char **argv) {
     }
   }
   disconnect(o);
+  {
+    int remaining = 100;
+    struct timespec delay;
+    delay.tv_sec = 0;
+    delay.tv_nsec = 1000000;
+    while (o->closed_terminals) {
+      demo_terminal_server_t *s = o->closed_terminals;
+      if (!sl_pty_reap(&s->pty) && remaining-- > 0) {
+        (void)nanosleep(&delay, NULL);
+        continue;
+      }
+      o->closed_terminals = s->next;
+      free(s);
+    }
+  }
   close(listener);
   while (o->count) {
     free((void *)o->items[--o->count].value.text);

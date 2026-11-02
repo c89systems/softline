@@ -1,5 +1,6 @@
 #define _DEFAULT_SOURCE
 #include "queue_demo_client.h"
+#include "queue_demo_terminal.h"
 #include "queue_demo_wire.h"
 #include <arpa/inet.h>
 #include <errno.h>
@@ -560,6 +561,15 @@ static int framing(void) {
         demo_link_read(&link, &received) == 1);
   CHECK(received.length == 4 && !memcmp(received.data, "test", 4));
   demo_packet_free(&received);
+  demo_put_number(&packet, DEMO_PTY_DATA);
+  demo_put_bytes(&packet, "\000\033\377", 3);
+  CHECK(demo_number(&packet) == DEMO_PTY_DATA);
+  {
+    size_t bytes;
+    const char *data = demo_bytes(&packet, &bytes);
+    CHECK(!packet.failed && bytes == 3 && !memcmp(data, "\000\033\377", 3));
+  }
+  demo_packet_free(&packet);
   for (i = 0; i < DEMO_OUT_MAX; ++i) {
     demo_put_string(&packet, "bounded");
     CHECK(!demo_link_queue(&link, &packet));
@@ -567,7 +577,8 @@ static int framing(void) {
   demo_put_string(&packet, "overflow");
   CHECK(demo_link_queue(&link, &packet) == -1);
   demo_packet_free(&packet);
-  length = htonl(DEMO_FRAME_MAX + 1);
+  link.input_limit = 8192;
+  length = htonl(8193);
   CHECK(write(pair[1], &length, 4) == 4 &&
         demo_link_read(&link, &received) == -1);
   demo_link_close(&link);
@@ -820,6 +831,68 @@ static int completion_shell_case(peer_t *p, unsigned short port) {
   return 0;
 }
 
+static int remote_terminal_case(unsigned short port) {
+  int master, slave, status, sent = 0, binary = 0;
+  pid_t frontend;
+  struct winsize size;
+  struct pollfd wait;
+  char bytes[2048];
+  size_t used = 0;
+  const char expected[] = "REMOTE_BINARY_\000BYTE";
+  memset(&size, 0, sizeof(size));
+  size.ws_row = 12;
+  size.ws_col = 80;
+  CHECK(!openpty(&master, &slave, NULL, NULL, &size));
+  frontend = fork();
+  CHECK(frontend >= 0);
+  if (!frontend) {
+    sl_config_t config;
+    sl_t *editor;
+    struct sockaddr_in address;
+    int exit_status = -1, result;
+    alarm(3);
+    close(master);
+    sl_config_init(&config);
+    config.input_fd = config.output_fd = slave;
+    editor = sl_create_with_config(&config);
+    memset(&address, 0, sizeof(address));
+    address.sin_family = AF_INET;
+    address.sin_port = htons(port);
+    address.sin_addr.s_addr = htonl(0x7f000001UL);
+    result = editor ? demo_terminal_remote(editor, &address, &exit_status)
+                    : SL_ERROR;
+    sl_destroy(editor);
+    close(slave);
+    _exit(result == SL_OK && exit_status == 7 ? 0 : 1);
+  }
+  close(slave);
+  wait.fd = master;
+  wait.events = POLLIN;
+  wait.revents = 0;
+  while (used < sizeof(bytes) - 1 && poll(&wait, 1, 3500) > 0) {
+    ssize_t got = read(master, bytes + used, sizeof(bytes) - used - 1);
+    size_t i;
+    if (got <= 0)
+      break;
+    used += (size_t)got;
+    bytes[used] = 0;
+    if (!sent && strstr(bytes, "REMOTE_READY> ")) {
+      const char command[] = "printf 'REMOTE_BINARY_\\000BYTE\\n'; exit 7\n";
+      if (write(master, command, sizeof(command) - 1) !=
+          (ssize_t)sizeof(command) - 1)
+        break;
+      sent = 1;
+    }
+    for (i = 0; i + sizeof(expected) - 1 <= used; ++i)
+      if (!memcmp(bytes + i, expected, sizeof(expected) - 1))
+        binary = 1;
+  }
+  close(master);
+  CHECK(waitpid(frontend, &status, 0) == frontend && WIFEXITED(status) &&
+        !WEXITSTATUS(status) && sent && binary);
+  return 0;
+}
+
 int main(int argc, char **argv) {
   int startup[2], status, result, port;
   FILE *output;
@@ -846,6 +919,9 @@ int main(int argc, char **argv) {
     close(startup[1]);
     setenv("SOFTLINE_CHAT_APPROVAL_DEMO", "0", 1);
     setenv("SOFTLINE_CHAT_TEST_SIGNALS", "1", 1);
+    setenv("SHELL", "/bin/sh", 1);
+    setenv("ENV", "", 1);
+    setenv("PS1", "REMOTE_READY> ", 1);
     execl(argv[1], argv[1], "0", (char *)NULL);
     _exit(127);
   }
@@ -870,6 +946,8 @@ int main(int argc, char **argv) {
     result = completion_shell_case(p, (unsigned short)port);
   if (!result)
     result = command_barrier(p, (unsigned short)port, child);
+  if (!result)
+    result = remote_terminal_case((unsigned short)port);
   demo_link_close(&p->link);
   free(p);
   kill(child, SIGTERM);

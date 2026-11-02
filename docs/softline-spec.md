@@ -416,15 +416,15 @@ link libmdf or own its document lifecycle.
 The C and Lua chat examples support exact `!sh` and `/shell` submissions
 without arguments on interactive terminals, only between operations. Enter or
 idle Alt-Enter launches `$SHELL -i`, falling back to `/bin/sh -i` when unset or
-empty. Busy submissions and attempts to queue or steer these commands are
-rejected while leaving the draft editable. Argument-bearing text remains an
+empty. Busy submissions remain editable in the queue until the whole turn ends;
+steering intent cannot waive the command's execution hold. Argument-bearing text remains an
 ordinary chat turn. The application closes its idle output session, runs the
-shell with ordinary terminal input and full scrolling, then begins a fresh
+shell through the local PTY adapter with full scrolling, then begins a fresh
 session at its final cursor and current geometry. Clear and resize inside the
 shell are allowed. History, queue and configuration survive on the same handle;
 transcript replay is unnecessary. Failed launches and nonzero exits report an
 error and return to chat. This uses existing output-session APIs and adds no
-library shell-execution API or ABI change.
+receiver shell method or receiver ABI change.
 
 Alt-S uses the same between-operation shell handoff without submitting the
 draft. A key callback returns `SL_KEY_ACTION_SUSPEND`; the editor returns NULL
@@ -448,9 +448,11 @@ readline returns. This method is part of the unreleased ABI 4 layout.
 The generic action and status extend existing
 enums without changing the public receiver/configuration layouts or ABI.
 
-The planned shared local/remote PTY adapter and locally handled escape from a
-hung session are specified in [the terminal handoff design](terminal-handoff-design.md).
-That extension is not implemented by the current local shell path.
+The shared local/remote PTY adapter and locally handled escape from a hung
+session are specified in [the terminal handoff design](terminal-handoff-design.md).
+`sl_terminal_handoff()` runs any host-supplied nonblocking adapter;
+`sl_terminal_local()` supplies the local PTY adapter. Enter followed by `~.`
+returns to the preserved editor even when the shell or transport is hung.
 
 Host buffer replacements and insertions during suspension are journaled like
 active edits, including while the output session is closed. No-op or rejected

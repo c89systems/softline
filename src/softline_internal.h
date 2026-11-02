@@ -122,6 +122,8 @@ typedef struct sl_history_search {
 } sl_history_search_t;
 
 typedef struct sl_impl {
+  struct sl_pty *terminal_children;
+  int terminal_active;
   int input_fd;
   int output_fd;
   int screen_width;
@@ -233,6 +235,9 @@ typedef struct sl_impl {
   sl_key_binding_t key_bindings[SL_MAX_KEY_BINDINGS];
   char error[SL_ERROR_LEN];
 } sl_impl_t;
+
+void sl_terminal_reap(sl_impl_t *impl);
+void sl_terminal_cleanup(sl_impl_t *impl);
 
 /* Internal editor/cache operations shared with the transport-independent queue
  * adapter. These are not application queue admission or consumption seams. */

@@ -90,19 +90,17 @@ local function handle_command(line)
   return true
 end
 
--- Only the idle owner loop may hand the terminal to another process. End the
--- session to release input/scrolling, then begin a fresh frame at the shell's
--- final cursor position (including after clear or resize). Keep the handle,
--- history and queue. Quote SHELL as one executable, never as shell commands.
+-- The local PTY adapter uses the same relay as remote adapters. Softline owns
+-- terminal release/restoration and preserves the suspended editor.
 local function run_shell(preserve_draft)
-  assert(sl:output_stream_end())
   stream_open = false
-  local ok, reason, status = os.execute('exec "${SHELL:-/bin/sh}" -i')
-  if not ok then
-    io.stderr:write("shell exited unsuccessfully (", tostring(reason), " ", tostring(status), ")\n")
-  end
-  assert(sl:output_stream_begin())
+  local ok, status, escaped = softline.terminal_local(sl)
   stream_open = true
+  if not ok then
+    assert(sl:output_stream_write("shell handoff failed (" .. tostring(status) .. ")\n"))
+  elseif status > 0 and not escaped then
+    assert(sl:output_stream_write("shell exited unsuccessfully (exit " .. tostring(status) .. ")\n"))
+  end
   if not preserve_draft then
     assert(sl:set_status_message_prefix(""))
     assert(sl:set_status_message(" "))

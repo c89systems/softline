@@ -49,6 +49,76 @@ typedef struct sl_watch_event {
 typedef int (*sl_watch_callback_t)(sl_t *self, const sl_watch_event_t *event,
                                    void *userdata);
 
+/** Operation supplied to a nonblocking terminal-session adapter. */
+typedef enum sl_terminal_operation {
+  /** Start a new session at rows/columns; CLOSE follows even on failure. */
+  SL_TERMINAL_OPEN = 1,
+  /** Service events and supply the next fd/interests/timeout and ready state.
+   */
+  SL_TERMINAL_STEP,
+  /** Fill data up to length; SL_OK with transferred=0 means EOF. */
+  SL_TERMINAL_READ,
+  /** Consume data up to length; report partial progress in transferred. */
+  SL_TERMINAL_WRITE,
+  /** Apply the latest rows/columns without waiting for acknowledgment. */
+  SL_TERMINAL_RESIZE,
+  /** Cancel/release once, without waiting for peer acknowledgment or exit. */
+  SL_TERMINAL_CLOSE
+} sl_terminal_operation_t;
+
+/** Mutable, callback-scoped terminal I/O request. */
+typedef struct sl_terminal_event {
+  /** Requested operation. */
+  sl_terminal_operation_t operation;
+  /** Ready SL_WATCH_* bits for STEP; zero for an initial/deadline step. */
+  unsigned int events;
+  /** Next pollable descriptor, or -1 for deadline/input-only waiting. */
+  int fd;
+  /** Next SL_WATCH_READ/WRITE interests. */
+  unsigned int interests;
+  /** Maximum time until next STEP, -1 for no adapter deadline. */
+  int timeout_ms;
+  /** STEP sets one when READ/WRITE may be called, zero while opening. */
+  int ready;
+  /** Current physical terminal rows. */
+  unsigned int rows;
+  /** Current physical terminal columns. */
+  unsigned int columns;
+  /** Borrowed byte buffer; WRITE callbacks must not modify it. */
+  char *data;
+  /** Available READ capacity or WRITE byte count. */
+  size_t length;
+  /** READ/WRITE sets bytes transferred, never exceeding length. */
+  size_t transferred;
+} sl_terminal_event_t;
+
+/** Owner-thread adapter callback. Return SL_OK or an SL_ERROR_* value.
+ * READ/WRITE return SL_ERROR_NOT_READY for would-block. All callbacks must
+ * return promptly, must not reenter Softline, and borrow event/data only for
+ * the call. STEP must arrange readiness/deadlines for pending transport work.
+ * The context is borrowed until the exactly-once CLOSE callback returns. */
+typedef int (*sl_terminal_callback_t)(void *context,
+                                      sl_terminal_event_t *event);
+
+/** Successful local termination of a terminal relay by beginning-of-line ~. */
+#define SL_TERMINAL_ESCAPED 1
+
+/** Run a local/remote PTY byte relay between editor calls. End/begin an open
+ * output session automatically; preserve the editor and never store transcript.
+ * Enter then ~. escapes locally, ~~ sends a literal tilde. Return SL_OK on EOF,
+ * SL_TERMINAL_ESCAPED on escape, or an SL_ERROR_* value. Adapter callbacks must
+ * not block. Bounded input overflow fails explicitly instead of growing memory.
+ * Pending output is discarded on cancellation/failure. No receiver ABI change.
+ */
+int sl_terminal_handoff(sl_t *self, sl_terminal_callback_t callback,
+                        void *context);
+
+/** Run the built-in local PTY adapter through sl_terminal_handoff(). shell is
+ * one executable path (NULL uses SHELL or /bin/sh), invoked with -i. Optional
+ * exit_status receives the shell exit code, 128+signal, or -1 if unavailable.
+ * The handle owns eventual nonblocking child reaping after cancellation. */
+int sl_terminal_local(sl_t *self, const char *shell, int *exit_status);
+
 /**
  * Idle hook invoked while sl_readline() is active and no input byte is ready.
  *

@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "queue_demo_client.h"
+#include "queue_demo_terminal.h"
 #include "queue_demo_wire.h"
 #include <arpa/inet.h>
 #include <errno.h>
@@ -29,6 +30,9 @@ struct demo_client {
   char name[64];
   sl_queue_entry_t entries[DEMO_ITEM_MAX];
 };
+int demo_client_terminal(demo_client_t *c, sl_t *editor, int *exit_status) {
+  return demo_terminal_remote(editor, &c->address, exit_status);
+}
 static int wake(demo_client_t *c) {
   char byte = 'w';
   ssize_t n;

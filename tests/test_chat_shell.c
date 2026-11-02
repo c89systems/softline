@@ -14,6 +14,8 @@ static int fixture_shell(int argc, char **argv) {
   for (index = 1; index < argc; ++index)
     printf(" %s", argv[index]);
   puts(" cooked foreground");
+  printf("SHELL_PARENT %ld\n", (long)getppid());
+  printf("SHELL_PROCESS %ld\n", (long)getpid());
   fflush(stdout);
   while (fgets(line, sizeof(line), stdin)) {
     line[strcspn(line, "\r\n")] = 0;
@@ -25,7 +27,14 @@ static int fixture_shell(int argc, char **argv) {
       printf("SHELL_SIZE %u %u\n", size.ws_row, size.ws_col);
     } else if (!strcmp(line, "exit"))
       return 0;
-    else if (!strcmp(line, "fail"))
+    else if (!strcmp(line, "hang")) {
+      signal(SIGINT, SIG_IGN);
+      signal(SIGHUP, SIG_IGN);
+      puts("SHELL_HUNG");
+      fflush(stdout);
+      for (;;)
+        pause();
+    } else if (!strcmp(line, "fail"))
       return 7;
     else if (!strcmp(line, "partial")) {
       fputs("SHELL_PARTIAL", stdout);
@@ -142,6 +151,64 @@ static int preserve_draft(const char *shell, const char *history_path) {
   REQUIRE(wait_for(&e, c_chat ? "Operation cancelled" : "[operation] cancelled",
                    0) == 0);
   REQUIRE(prompt(&e, 0) == 0);
+  REQUIRE(quit(&e) == 0);
+cleanup:
+  close_editor(&e);
+  return failed;
+}
+static int escape_hung_shell(const char *shell) {
+  struct editor e;
+  int failed = 0;
+  size_t mark;
+  char parent[64];
+  const char *process;
+  pid_t shell_pid;
+  double escaped;
+  REQUIRE(setenv("SHELL", shell, 1) == 0);
+  REQUIRE(start(&e, "examples/chat.lua", NULL, NULL) == 0);
+  REQUIRE(prompt(&e, 0) == 0);
+  REQUIRE(
+      send_bytes(
+          &e,
+          "\033[200~preserved\nsecond tail\033[201~\002\002\002\002\033s") ==
+      0);
+  REQUIRE(wait_for(&e, "SHELL_READY -i cooked foreground", 0) == 0);
+  snprintf(parent, sizeof(parent), "SHELL_PARENT %ld",
+           (long)(remote_owner ? remote_owner_pid : e.child));
+  REQUIRE(wait_for(&e, parent, 0) == 0);
+  REQUIRE(wait_for(&e, "SHELL_PROCESS ", 0) == 0);
+  process = strstr(e.bytes, "SHELL_PROCESS ");
+  escaped = now();
+  while (!strchr(process, '\n') && now() - escaped < 1.0)
+    REQUIRE(pump(&e, 10) == 0);
+  REQUIRE(strchr(process, '\n') != NULL);
+  shell_pid = (pid_t)strtol(process + strlen("SHELL_PROCESS "), NULL, 10);
+  REQUIRE(shell_pid > 0);
+  mark = e.length;
+  REQUIRE(send_bytes(&e, "hang\n") == 0);
+  REQUIRE(wait_for(&e, "SHELL_HUNG", mark) == 0);
+  mark = e.length;
+  escaped = now();
+  REQUIRE(send_bytes(&e, "\r~.") == 0);
+  REQUIRE(prompt(&e, mark) == 0 && now() - escaped < 1.0);
+  REQUIRE(contains(&e, "preserved", mark) && contains(&e, "second tail", mark));
+  while (kill(shell_pid, 0) == 0 && now() - escaped < 1.0)
+    REQUIRE(pump(&e, 10) == 0);
+  REQUIRE(kill(shell_pid, 0) == -1 && errno == ESRCH);
+  mark = e.length;
+  REQUIRE(send_bytes(&e, "X") == 0);
+  REQUIRE(wait_cursor(&e, "Xtail", mark, e.rows - 1, 10) == 0);
+  REQUIRE(send_bytes(&e, "\037\033n") == 0);
+  if (remote_owner) {
+    mark = e.length;
+    REQUIRE(send_bytes(&e, "connection draft\033s") == 0);
+    REQUIRE(wait_for(&e, "SHELL_READY", mark) == 0);
+    mark = e.length;
+    stop_remote_owner();
+    REQUIRE(prompt(&e, mark) == 0);
+    REQUIRE(contains(&e, "connection draft", mark));
+    REQUIRE(send_bytes(&e, "\033n") == 0);
+  }
   REQUIRE(quit(&e) == 0);
 cleanup:
   close_editor(&e);
@@ -286,7 +353,8 @@ static int fallback(const char *shell) {
   settle(&e, .3);
   if (!shell || strcmp(shell, "/bin/bash")) {
     REQUIRE(tcgetattr(e.master, &attrs) == 0);
-    REQUIRE(attrs.c_lflag & ICANON);
+    REQUIRE(!(attrs.c_lflag &
+              ICANON)); /* The outer terminal belongs to the byte relay. */
   }
   REQUIRE(send_bytes(&e, "printf 'REAL_SHELL_READY\\n'\n") == 0);
   REQUIRE(wait_for(&e, "REAL_SHELL_READY\r\n", mark) == 0);
@@ -572,6 +640,8 @@ int main(int argc, char **argv) {
   remove_files(history_dir);
   setenv("SOFTLINE_CHAT_OPERATION_STEP_MS", "500", 1);
   if (preserve_draft(shell, history_path))
+    goto cleanup;
+  if (escape_hung_shell(shell))
     goto cleanup;
   remove_files(history_dir);
   if (exercise(shell) || fallback(NULL) || fallback("") ||

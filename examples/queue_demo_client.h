@@ -20,6 +20,7 @@ void demo_client_options(demo_client_t *client, unsigned int delay_us,
 int demo_client_idle(demo_client_t *client);
 void demo_client_pause(demo_client_t *client);
 int demo_client_shell_begin(demo_client_t *client);
+int demo_client_terminal(demo_client_t *client, sl_t *editor, int *exit_status);
 int demo_client_service(demo_client_t *client, int timeout_ms);
 demo_client_t *demo_client_create(const char *host, unsigned short port);
 const sl_queue_backend_t *demo_client_backend(demo_client_t *client);

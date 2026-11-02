@@ -777,3 +777,47 @@ calling coroutine, including when the constructor's coroutine has been
 collected. Callback/context references are owned by the receiver and ordinary
 reference cycles remain collectible. Accepted offers enter auto-add history
 once, in the coroutine applying the result, without replacing a newer draft.
+
+## PTY terminal handoff
+
+`softline.terminal_local(sl[, shell])` opens a fresh local PTY and invokes one
+shell executable with `-i` (default `$SHELL`, falling back to `/bin/sh`). It uses
+`sl_terminal_local()` through the same relay as remote adapters. Call between
+editor calls after suspension, outside key/watch/idle callbacks. An existing
+output session ends and restarts automatically. The result is `true, exit_status,
+escaped`, or `nil, error_code`. The exit status is -1 while unavailable, otherwise
+an exit code or 128+signal. `escaped` reports local escape with Enter then `~.`.
+The handle owns eventual nonblocking reaping of cancelled local children.
+
+`softline.terminal_handoff(sl, callback)` runs a host-selected adapter, returning
+`true, escaped` or `nil, error_code`. A callback exception is raised only after
+terminal restoration and the close callback. The function keeps the callback
+rooted during handoff. Reentry, including `sl:close()`, is forbidden. Neither
+function adds a receiver method or changes the receiver ABI.
+
+The callback takes one event table, borrows it for that invocation, and returns
+a result table. `operation` is one of `softline.TERMINAL_OPEN`,
+`softline.TERMINAL_STEP`, `softline.TERMINAL_READ`, `softline.TERMINAL_WRITE`,
+`softline.TERMINAL_RESIZE`, or `softline.TERMINAL_CLOSE`. All callbacks return
+promptly. Optional result `status` defaults to `softline.OK`; use
+`softline.ERROR_NOT_READY` for read/write would-block, or another error code on
+failure. The remaining fields follow the C `sl_terminal_event_t` contract:
+
+- OPEN/RESIZE receive current `rows` and `columns`.
+- STEP receives ready `events` bits. Return `ready` (boolean), `fd` (default -1),
+  `interests` (WATCH_READ/WRITE bits, default 0), and `timeout_ms` (default -1).
+  Service transport/control frames here; provide deadlines while opening.
+- READ receives capacity in `length`. Return a binary `data` string no longer
+  than that capacity; an empty string is EOF.
+- WRITE receives a binary `data` string and `length`. Return `transferred`,
+  allowing partial progress; zero progress requires ERROR_NOT_READY.
+- CLOSE runs exactly once after OPEN, including failure. Cancel/release without
+  waiting for a child or peer response. The host owns adapter resources.
+
+The host owns transport, authentication and framing. PTY output goes directly
+through the real terminal without interpretation, transcript buffering or replay.
+The relay retains at most bounded chunks, forwards size changes, and restores
+local terminal modes and the suspended draft/cursor/undo/queue holds on return.
+Enter then `~.` works even while setup or transport I/O is stalled; `~~` at the
+start of a line sends one literal tilde. Oversized pending input fails explicitly
+instead of silently dropping bytes. See [the full contract](../docs/terminal-handoff-design.md).
