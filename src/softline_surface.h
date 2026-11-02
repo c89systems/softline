@@ -35,6 +35,8 @@ int sl_surface_validate(sl_surface_t *surface, const char *bytes, size_t length,
                         size_t *accepted);
 int sl_surface_complete(const sl_surface_t *surface);
 void sl_surface_reset_partial(sl_surface_t *surface);
+void sl_surface_set_osc8(sl_surface_t *surface, int enabled);
+int sl_surface_hyperlink_active(const sl_surface_t *surface);
 int sl_surface_matches(const sl_surface_t *surface, int width, int height);
 /* While the hardware cursor belongs to the producer, writes need no cursor
  * command. Observe its position before moving away; frame commands release it.

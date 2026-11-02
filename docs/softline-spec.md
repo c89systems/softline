@@ -612,7 +612,7 @@ error, and handle teardown. If the terminal does not answer the probe, output
 uses the compatible clear-and-redraw path.
 
 After a TTY live session, finite `print_above()` output continues in native
-terminal scrollback. Producer output accepts printable UTF-8 and ANSI SGR
+terminal scrollback. Producer output accepts printable UTF-8, ANSI SGR and opt-in OSC 8
 bytes without cell reserialization.
 
 ## Current History Behavior
@@ -694,6 +694,49 @@ database consumer, or a curses-style screen abstraction.
 This section is a product and engineering backlog, not a promise that every item
 belongs in softline. Each item should get tests before being considered part of
 the public contract.
+
+### OSC 8 hyperlinks
+
+Validated producer output (`output_stream_write()` and native finite output)
+rejects OSC controls by default. `sl_osc8_mode_t` selects `SL_OSC8_OFF`,
+`SL_OSC8_ON` or `SL_OSC8_AUTO` through `sl_config_t.osc8_mode` or
+`sl_set_osc8_mode()` / `set_osc8_mode()`. Set policy between output streams;
+an open stream, partial control or retained producer link returns
+`SL_ERROR_NOT_READY`. Invalid modes return `SL_ERROR_INVALID` without changes.
+
+`sl_get_osc8_info()` / `get_osc8_info()` returns cached `sl_osc8_info_t` fields:
+`mode`, `detected` and `enabled`. Detection recognizes known output-terminal
+environments conservatively; it is a hint, not proof of support. `enabled` is
+the effective validated-feed policy and is the value to give a renderer such
+as libmdf's `options.osc8`. OFF always disables acceptance, ON explicitly
+overrides detection, and AUTO requires a recognized TTY on `output_fd`.
+Unknown terminals, redirection, `TERM=dumb`, and unverified tmux/screen paths
+remain disabled under AUTO. Detection runs at construction or a policy setter,
+using environment variables and `isatty()` only. The getter is cached; no
+terminal query, input read, timeout or feed round trip is added.
+
+Enabled feeds accept only `OSC 8 ; params ; URI ST`, with BEL or ESC-backslash
+as the terminator, and an empty URI to close. Other OSC commands remain
+rejected. Parameters are printable ASCII, and URIs are printable valid UTF-8;
+embedded controls, C1 characters, malformed UTF-8 and oversized controls are
+rejected before that control reaches the terminal. `SL_OSC8_MAX_BYTES` is 8192,
+including opener and terminator. Controls and UTF-8 may span arbitrary writes;
+only a bounded incomplete control or character is held. Labels stream directly
+and are never retained for transcript replay. Ending on an incomplete control
+returns an error, allowing the caller to finish it or destroy the handle.
+
+Native writes retain only active hyperlink metadata, close the hardware link
+before returning to editor UI, and reopen it for the next producer fragment.
+The URI and `id` parameters survive fragment boundaries. Queue, approval,
+reasoning, status, input and ghost text are outside producer links. Quoted user
+prompts close the producer link as a new output record. Redirected feeds retain
+raw producer controls and close any unfinished link when the stream ends.
+Ordinary finite `print_above()` without a native surface retains its existing
+raw host-output behavior; this policy is for validated feeds.
+
+Local and remote C chat use AUTO and pass `enabled` to their test-only libmdf
+renderer. `make run-chat OSC8=on` overrides detection; `OSC8=off` disables links.
+No libmdf dependency is introduced into the library.
 
 ### Literal completion
 

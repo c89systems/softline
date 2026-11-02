@@ -778,6 +778,22 @@ collected. Callback/context references are owned by the receiver and ordinary
 reference cycles remain collectible. Accepted offers enter auto-add history
 once, in the coroutine applying the result, without replacing a newer draft.
 
+## OSC 8 hyperlinks
+
+The `osc8_mode` configuration field controls hyperlinks.
+`softline.new({osc8_mode = softline.OSC8_AUTO})` opts into conservative passive
+terminal detection. The default is `softline.OSC8_OFF`; `softline.OSC8_ON`
+explicitly overrides detection. `sl:set_osc8_mode(mode)` updates policy between
+streams. `sl:get_osc8_info()` returns `{mode, detected, enabled}`. Give `enabled`
+to the host renderer's hyperlink option; `detected` is a cached environment
+hint, not a terminal probe. AUTO remains off for unknown terminals, redirection
+and unverified multiplexers. Enabled streams accept bounded OSC 8 controls
+with BEL or ESC-backslash termination, including fragmented writes, while
+other OSC commands remain rejected. `softline.OSC8_MAX_BYTES` bounds each
+complete control, including its opener and terminator. Native links cannot
+leak into editor UI.
+See the [feed contract](../docs/softline-spec.md#osc-8-hyperlinks).
+
 ## Literal completion
 
 `sl:set_completions(items)` replaces the handle-owned copied list. A bare string

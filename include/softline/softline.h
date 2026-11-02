@@ -116,6 +116,29 @@ typedef struct sl_completion {
   sl_completion_scope_t scope;
 } sl_completion_t;
 
+/** Policy for OSC 8 hyperlinks in validated producer output. */
+typedef enum sl_osc8_mode {
+  /** Default: reject OSC 8. */
+  SL_OSC8_OFF = 0,
+  /** Explicit host override, including redirected output. */
+  SL_OSC8_ON = 1,
+  /** Enable only for a passively recognized output terminal. */
+  SL_OSC8_AUTO = 2
+} sl_osc8_mode_t;
+
+/** Cached terminal detection and effective hyperlink policy. */
+typedef struct sl_osc8_info {
+  /** Configured policy. */
+  sl_osc8_mode_t mode;
+  /** Known terminal environment on output_fd; not a probe. */
+  int detected;
+  /** Whether validated feed accepts OSC 8 now. */
+  int enabled;
+} sl_osc8_info_t;
+
+/** Maximum complete OSC 8 control length, including opener and terminator. */
+#define SL_OSC8_MAX_BYTES 8192
+
 /** Successful local termination of a terminal relay by beginning-of-line ~. */
 #define SL_TERMINAL_ESCAPED 1
 
@@ -858,6 +881,8 @@ typedef struct sl_config {
   const sl_queue_backend_t *queue_backend;
   /** Borrowed backend callback context, released only after editor teardown. */
   void *queue_backend_context;
+  /** OSC 8 policy; default OFF. See sl_get_osc8_info(). */
+  sl_osc8_mode_t osc8_mode;
 } sl_config_t;
 
 /**
@@ -1133,7 +1158,8 @@ struct sl {
   /** Forward exactly length bytes into the open session. Complete parsed
    * input is visible before return; a write boundary adds no newline or
    * document boundary. bytes may be NULL only when
-   * length is zero. Input must be printable UTF-8, LF/CR/Tab, or ANSI SGR;
+   * length is zero. Input must be printable UTF-8, LF/CR/Tab, ANSI SGR, or
+   * OSC 8 when enabled by set_osc8_mode();
    * unsupported terminal controls fail with SL_ERROR_INVALID. Malformed UTF-8
    * also fails. Native LF positioning follows the output TTY's OPOST/ONLCR
    * settings without altering producer bytes. Kernel tab expansion (TAB3 or
@@ -1260,6 +1286,10 @@ struct sl {
   /** Replace the handle's copied completion list; see sl_set_completions(). */
   int (*set_completions)(sl_t *self, const sl_completion_t *items,
                          size_t count);
+  /** Set hyperlink policy between streams; see sl_set_osc8_mode(). */
+  int (*set_osc8_mode)(sl_t *self, sl_osc8_mode_t mode);
+  /** Read cached hyperlink policy/detection; see sl_get_osc8_info(). */
+  int (*get_osc8_info)(const sl_t *self, sl_osc8_info_t *info);
 };
 
 /**
@@ -1272,7 +1302,8 @@ struct sl {
  * defaults to a capacity of 64 and three previews when enabled. The prompt
  * theme is SL_PROMPT_THEME_DEFAULT, the status line and spinner are disabled,
  * busy is false, the idle status marker is '+', and clear_prompt_on_exit is
- * zero. X11 image paste is enabled and uses the XDG cache directory.
+ * zero. X11 image paste is enabled and uses the XDG cache directory. OSC 8
+ * hyperlinks are disabled (SL_OSC8_OFF).
  */
 void sl_config_init(sl_config_t *config);
 
@@ -1702,37 +1733,36 @@ int sl_output_stream_reconcile(sl_t *self);
 
 /** Forward length bytes immediately to the live output session. Zero length
  * is a no-op; no newline or response boundary is implied. Valid bytes are
- * printable UTF-8, LF/CR/Tab, and ANSI SGR; malformed or unsupported control
- * sequences report SL_ERROR_INVALID. A failed write may have emitted a prefix,
- * while a successful write has emitted all complete input units. Native LF
- * positioning follows the output TTY's OPOST/ONLCR settings; producer bytes
- * are unchanged. Kernel tab expansion (TAB3 or OXTABS) is temporarily disabled
- * while Softline owns raw mode and restored on exit; OPOST/ONLCR are preserved
- * and tabs reach the terminal unchanged. Native writes after raw-mode release
- * disable expansion for the write and restore it before returning, without
- * flushing pending input. Feed calls add no intentional delay and never
- * request or wait for terminal cursor replies, including on resize. Cursor
- * advances use local scalar cell widths shared with prompt layout, without
- * retaining producer text, glyph spans or grapheme tails. Terminal Unicode
- * versions and cluster shaping can differ from the Unicode 16.0 accounting.
- * Wrapping remains
- * producer/terminal-owned. A physical resize can race the VT write and
- * misplace even ASCII output; this is an accepted concurrency limit.
- * A retained frame resized without an input-owned observation, including after
- * readline returns, uses a delta estimate. Earlier hard-ended ASCII reflow or
- * unknown terminal history can misplace continuation even after resize settles.
- * The active input loop observes resize before dispatching producer watches.
- * Synchronous producers use sl_output_stream_reconcile() after resize settles
- * and before the next feed. Feeds never observe input or model transcript text.
- * Width reflow of an unfinished Unicode/tab line
- * can misplace continuation, including CR tails; its tracked
- * column is retained and clamped only if offscreen. No grapheme buffering or
- * renderer-specific wrapping is used. At a known ASCII right edge with an
- * active prompt, a later printable continuation uses CR and IND after the
- * cursor handoff. This hard row boundary can remain split after width growth,
- * and a Unicode cluster split there may lose its attachment. At the bottom
- * output margin, native reflow differs between terminals; width growth may
- * leave a continuation on a separate row. A last-column report cannot
+ * printable UTF-8, LF/CR/Tab, ANSI SGR, and opt-in OSC 8; malformed or
+ * unsupported control sequences report SL_ERROR_INVALID. A failed write may
+ * have emitted a prefix, while a successful write has emitted all complete
+ * input units. Native LF positioning follows the output TTY's OPOST/ONLCR
+ * settings; producer bytes are unchanged. Kernel tab expansion (TAB3 or OXTABS)
+ * is temporarily disabled while Softline owns raw mode and restored on exit;
+ * OPOST/ONLCR are preserved and tabs reach the terminal unchanged. Native
+ * writes after raw-mode release disable expansion for the write and restore it
+ * before returning, without flushing pending input. Feed calls add no
+ * intentional delay and never request or wait for terminal cursor replies,
+ * including on resize. Cursor advances use local scalar cell widths shared with
+ * prompt layout, without retaining producer text, glyph spans or grapheme
+ * tails. Terminal Unicode versions and cluster shaping can differ from the
+ * Unicode 16.0 accounting. Wrapping remains producer/terminal-owned. A physical
+ * resize can race the VT write and misplace even ASCII output; this is an
+ * accepted concurrency limit. A retained frame resized without an input-owned
+ * observation, including after readline returns, uses a delta estimate. Earlier
+ * hard-ended ASCII reflow or unknown terminal history can misplace continuation
+ * even after resize settles. The active input loop observes resize before
+ * dispatching producer watches. Synchronous producers use
+ * sl_output_stream_reconcile() after resize settles and before the next feed.
+ * Feeds never observe input or model transcript text. Width reflow of an
+ * unfinished Unicode/tab line can misplace continuation, including CR tails;
+ * its tracked column is retained and clamped only if offscreen. No grapheme
+ * buffering or renderer-specific wrapping is used. At a known ASCII right edge
+ * with an active prompt, a later printable continuation uses CR and IND after
+ * the cursor handoff. This hard row boundary can remain split after width
+ * growth, and a Unicode cluster split there may lose its attachment. At the
+ * bottom output margin, native reflow differs between terminals; width growth
+ * may leave a continuation on a separate row. A last-column report cannot
  * distinguish Unicode pending wrap from a cursor before the final cell;
  * continuation can overwrite that cell. These are intentional opaque-feed
  * limits. Transcript cells are never reconstructed, cleared or replayed to
@@ -1784,6 +1814,23 @@ int sl_set_quoted_prompt_style(sl_t *self, const sl_quote_style_t *style);
  * No whitespace is automatically appended.
  */
 int sl_set_completions(sl_t *self, const sl_completion_t *items, size_t count);
+
+/** Set OSC 8 policy on the owner thread between output streams. Refused with
+ * SL_ERROR_NOT_READY while a stream, partial control or producer link is open.
+ * Refreshes passive detection from output_fd and the terminal environment.
+ * ON overrides detection; AUTO stays disabled for unknown, redirected and
+ * unverified multiplexer paths. No terminal query or input wait is performed.
+ */
+int sl_set_osc8_mode(sl_t *self, sl_osc8_mode_t mode);
+
+/** Return cached detection and effective feed policy without terminal I/O.
+ * detected means a recognized environment, not guaranteed terminal support.
+ * Pass enabled to a renderer's hyperlink option. Only OSC 8 is enabled: other
+ * OSC controls remain rejected. Native feed links cannot leak into editor UI.
+ * Complete controls are bounded by SL_OSC8_MAX_BYTES; incomplete controls alone
+ * may be retained across writes. Producer text is never buffered for replay.
+ */
+int sl_get_osc8_info(const sl_t *self, sl_osc8_info_t *info);
 
 /** Return the status of the most recent readline() call on this handle. */
 sl_readline_status_t sl_last_readline_status(const sl_t *self);

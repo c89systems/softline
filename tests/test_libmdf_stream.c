@@ -23,6 +23,7 @@ struct markdown_source {
 
 struct renderer_stream {
   int write_fd;
+  int osc8;
   struct markdown_source source;
   size_t feeds;
   size_t sink_writes;
@@ -115,6 +116,7 @@ static void *render_markdown(void *userdata) {
   renderer = NULL;
   mdf_options_init(&options);
   options.ansi_mode = MDF_ANSI_ON;
+  options.osc8 = stream->osc8;
   options.boring = 1;
   options.width = 72;
   stream->status = mdf_create(MDF_FORMAT_ANSI, &options, &renderer);
@@ -293,9 +295,14 @@ failed:
   return 1;
 }
 
-int main(void) {
-  static const char markdown[] = "# hello\n\nworld\n";
-  static const char expected[] = "# hello\n\nworld\n";
+int main(int argc, char **argv) {
+  const char *markdown = argc > 1
+                             ? "before [label](https://example.org/) after\n"
+                             : "# hello\n\nworld\n";
+  const char *expected =
+      argc > 1 ? "before \033]8;;https://example.org/\033\\label\033]8;;\033\\ "
+                 "after\n"
+               : "# hello\n\nworld\n";
   int rendered_pipe[2];
   int output_pipe[2];
   pthread_t renderer_thread;
@@ -304,6 +311,7 @@ int main(void) {
   struct softline_pull pull;
   struct output_check output;
   sl_config_t config;
+  sl_osc8_info_t info;
   sl_t *softline;
   int status;
   int renderer_started;
@@ -328,15 +336,16 @@ int main(void) {
   }
   renderer.write_fd = rendered_pipe[1];
   renderer.source.text = markdown;
-  renderer.source.length = sizeof(markdown) - 1;
+  renderer.source.length = strlen(markdown);
   renderer.source.max_chunk = 2;
   renderer.first_sink_source_offset = (size_t)-1;
   pull.read_fd = rendered_pipe[0];
   output.read_fd = output_pipe[0];
   output.expected = expected;
-  output.expected_length = sizeof(expected) - 1;
+  output.expected_length = strlen(expected);
   sl_config_init(&config);
   config.output_fd = output_pipe[1];
+  config.osc8_mode = argc > 1 ? SL_OSC8_ON : SL_OSC8_OFF;
   softline = sl_create_with_config(&config);
   if (softline == NULL) {
     (void)close(rendered_pipe[0]);
@@ -346,6 +355,9 @@ int main(void) {
     fprintf(stderr, "libmdf streaming test: softline creation failed\n");
     return 1;
   }
+  if (sl_get_osc8_info(softline, &info) != SL_OK)
+    return 1;
+  renderer.osc8 = info.enabled;
   if (pthread_create(&output_thread, NULL, check_output, &output) != 0) {
     softline->destroy(softline);
     (void)close(rendered_pipe[0]);

@@ -44,6 +44,10 @@ Currently implemented:
   the suggestion and cycles matches; each word/phrase selects draft-start or
   whitespace-boundary matching.
   See `sl_set_completions()` and the [completion contract](docs/softline-spec.md#literal-completion).
+- OSC 8 feed hyperlinks are opt-in: OFF by default, ON by host choice, or AUTO
+  with conservative passive detection. `sl_get_osc8_info()` exposes the effective
+  policy for renderers. C chat uses AUTO; try `make run-chat OSC8=on`.
+  See the [hyperlink contract](docs/softline-spec.md#osc-8-hyperlinks).
 - `Ctrl-D` on an empty buffer returns `NULL`; inside text it deletes forward.
 - `Ctrl-C` remains a terminal interrupt instead of being swallowed.
 - `last_readline_status()` distinguishes submitted text, EOF, cancellation,

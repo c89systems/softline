@@ -1051,6 +1051,7 @@ static int sl_output_surface_reconcile(sl_t *self, int prompt_top) {
     impl->output_surface = sl_surface_create_native(
         impl->output_fd, width, prompt_top, row, col,
         impl->native_cursor_valid ? impl->native_history_rows : -1);
+    sl_surface_set_osc8(impl->output_surface, impl->osc8.enabled);
     if (!impl->output_surface && !was_raw)
       sl_disable_raw(self);
     return impl->output_surface ? 0 : -1;
@@ -4767,6 +4768,7 @@ static int sl_output_stream_begin_method(sl_t *self) {
     impl->output_surface = NULL;
     previous_surface = NULL;
     impl->output_surface = sl_surface_create_validator();
+    sl_surface_set_osc8(impl->output_surface, impl->osc8.enabled);
     if (!impl->output_surface) {
       sl_set_error(self, "failed to create live output validator");
       goto failed;
@@ -4820,12 +4822,19 @@ static void sl_output_track_tail(sl_impl_t *impl, const char *bytes,
   for (i = 0; i < length; i++) {
     unsigned char byte = (unsigned char)bytes[i];
     if (impl->output_ansi_state == 1) {
-      impl->output_ansi_state = byte == '[' ? 2 : 0;
+      impl->output_ansi_state = byte == '[' ? 2 : byte == ']' ? 3 : 0;
       continue;
     }
     if (impl->output_ansi_state == 2) {
       if (byte >= 0x40 && byte <= 0x7e)
         impl->output_ansi_state = 0;
+      continue;
+    }
+    if (impl->output_ansi_state >= 3) {
+      if (byte == 7 || (impl->output_ansi_state == 4 && byte == '\\'))
+        impl->output_ansi_state = 0;
+      else
+        impl->output_ansi_state = byte == 0x1b ? 4 : 3;
       continue;
     }
     if (byte == 0x1b)
@@ -4918,15 +4927,10 @@ static int sl_output_write_validated(sl_t *self, const char *bytes,
   ready_len = 0;
   for (i = 0; i < length; i++) {
     size_t accepted;
-    if (ready_len > sizeof(ready) - sizeof(impl->output_pending)) {
-      if (sl_output_flush_redirected(self, ready, ready_len) != SL_OK)
-        return SL_ERROR_IO;
-      ready_len = 0;
-    }
-
     result = sl_surface_validate(impl->output_surface, bytes + i, 1, &accepted);
     if (result != 0) {
       impl->output_pending_len = 0;
+      sl_surface_reset_partial(impl->output_surface);
       if (sl_output_flush_redirected(self, ready, ready_len) != SL_OK)
         return SL_ERROR_IO;
       sl_set_error(
@@ -4950,6 +4954,14 @@ static int sl_output_write_validated(sl_t *self, const char *bytes,
         if (sl_output_flush_redirected(self, ready, ready_len) != SL_OK)
           return SL_ERROR_IO;
         ready_len = 0;
+      }
+      if (impl->output_pending_len > sizeof(ready)) {
+        result = sl_output_flush_redirected(self, impl->output_pending,
+                                            impl->output_pending_len);
+        impl->output_pending_len = 0;
+        if (result != SL_OK)
+          return result;
+        continue;
       }
       memcpy(ready + ready_len, impl->output_pending, impl->output_pending_len);
       ready_len += impl->output_pending_len;
@@ -5167,6 +5179,12 @@ static int sl_output_stream_write_quoted_prompt_impl(sl_t *self,
     sl_set_error(self, "failed to style quoted prompt");
     return SL_ERROR;
   }
+  /* A quoted user prompt is a distinct output record, never a producer link. */
+  if (sl_surface_hyperlink_active(impl->output_surface)) {
+    result = sl_output_stream_write_method(self, "\033]8;;\033\\", 7);
+    if (result != SL_OK)
+      return result;
+  }
   memset(&output, 0, sizeof(output));
   output.owner = self;
   preceding_breaks = impl->output_trailing_newlines;
@@ -5309,6 +5327,9 @@ static int sl_output_stream_end_method(sl_t *self) {
     return SL_ERROR_IO;
   }
   if (!isatty(impl->input_fd) || !isatty(impl->output_fd)) {
+    if (sl_surface_hyperlink_active(impl->output_surface) &&
+        sl_output_stream_write_method(self, "\033]8;;\033\\", 7) != SL_OK)
+      return SL_ERROR_IO;
     sl_surface_destroy(impl->output_surface);
     impl->output_surface = NULL;
   }
@@ -7918,6 +7939,58 @@ static void sl_free_string_method(sl_t *self, char *ptr) {
   free(ptr);
 }
 
+static int sl_osc8_detect(int fd) {
+  const char *term = getenv("TERM"), *program = getenv("TERM_PROGRAM");
+  const char *vte = getenv("VTE_VERSION"), *mux = getenv("TMUX");
+  const char *screen = getenv("STY"), *windows = getenv("WT_SESSION");
+  char *end;
+  long version;
+  if (!isatty(fd) || !term || !strcmp(term, "dumb") || (mux && *mux) ||
+      (screen && *screen) || !strncmp(term, "screen", 6) ||
+      !strncmp(term, "tmux", 4))
+    return 0;
+  if ((program &&
+       (!strcmp(program, "iTerm.app") || !strcmp(program, "WezTerm") ||
+        !strcmp(program, "vscode"))) ||
+      !strcmp(term, "xterm-kitty") || (windows && *windows))
+    return 1;
+  if (!vte || *vte < '0' || *vte > '9')
+    return 0;
+  errno = 0;
+  version = strtol(vte, &end, 10);
+  return !errno && !*end && version >= 5000;
+}
+
+static int sl_set_osc8_mode_method(sl_t *self, sl_osc8_mode_t mode) {
+  sl_impl_t *impl = sl_impl(self);
+  if (!impl || mode < SL_OSC8_OFF || mode > SL_OSC8_AUTO) {
+    sl_set_error(self, "OSC 8 mode must be OFF, ON or AUTO");
+    return SL_ERROR_INVALID;
+  }
+  if (impl->output_stream_active ||
+      (impl->output_surface &&
+       (!sl_surface_complete(impl->output_surface) ||
+        sl_surface_hyperlink_active(impl->output_surface)))) {
+    sl_set_error(self, "change OSC 8 mode between streams with no partial "
+                       "control or producer link");
+    return SL_ERROR_NOT_READY;
+  }
+  impl->osc8.mode = mode;
+  impl->osc8.detected = sl_osc8_detect(impl->output_fd);
+  impl->osc8.enabled =
+      mode == SL_OSC8_ON || (mode == SL_OSC8_AUTO && impl->osc8.detected);
+  sl_surface_set_osc8(impl->output_surface, impl->osc8.enabled);
+  return SL_OK;
+}
+
+static int sl_get_osc8_info_method(const sl_t *self, sl_osc8_info_t *info) {
+  const sl_impl_t *impl = sl_impl_const(self);
+  if (!impl || !info)
+    return SL_ERROR_INVALID;
+  *info = impl->osc8;
+  return SL_OK;
+}
+
 static int sl_set_completions_method(sl_t *self, const sl_completion_t *items,
                                      size_t count) {
   sl_impl_t *impl = sl_impl(self);
@@ -9013,6 +9086,7 @@ void sl_config_init(sl_config_t *config) {
   config->image_paste_path_template = NULL;
   config->queue_backend = NULL;
   config->queue_backend_context = NULL;
+  config->osc8_mode = SL_OSC8_OFF;
 }
 
 static sl_t *sl_create_with_config_impl(const sl_config_t *config) {
@@ -9024,6 +9098,7 @@ static sl_t *sl_create_with_config_impl(const sl_config_t *config) {
     config = &local;
   }
   if (config->history_max_len < 0 || config->screen_width < 0 ||
+      config->osc8_mode < SL_OSC8_OFF || config->osc8_mode > SL_OSC8_AUTO ||
       (!config->queue_backend && config->queue_backend_context) ||
       config->live_scroll_region < 0 || config->clear_prompt_on_exit < 0 ||
       config->disable_image_paste < 0 ||
@@ -9048,6 +9123,8 @@ static sl_t *sl_create_with_config_impl(const sl_config_t *config) {
   }
   self->readline = sl_readline_method;
   self->set_completions = sl_set_completions_method;
+  self->set_osc8_mode = sl_set_osc8_mode_method;
+  self->get_osc8_info = sl_get_osc8_info_method;
   self->destroy = sl_destroy_method;
   self->free_string = sl_free_string_method;
   self->history_add = sl_history_add_impl;
@@ -9142,6 +9219,7 @@ static sl_t *sl_create_with_config_impl(const sl_config_t *config) {
   self->queue_backend_recover = sl_queue_backend_recover_impl;
   impl->input_fd = config->input_fd >= 0 ? config->input_fd : STDIN_FILENO;
   impl->output_fd = config->output_fd >= 0 ? config->output_fd : STDOUT_FILENO;
+  (void)sl_set_osc8_mode_method(self, config->osc8_mode);
   impl->screen_width = config->screen_width;
   impl->line_max_len = config->line_max_len;
   impl->live_scroll_region = config->live_scroll_region;
@@ -9215,6 +9293,18 @@ int sl_set_completions(sl_t *self, const sl_completion_t *items, size_t count) {
   if (!self || !self->set_completions)
     return SL_ERROR_INVALID;
   return self->set_completions(self, items, count);
+}
+
+int sl_set_osc8_mode(sl_t *self, sl_osc8_mode_t mode) {
+  if (!self || !self->set_osc8_mode)
+    return SL_ERROR_INVALID;
+  return self->set_osc8_mode(self, mode);
+}
+
+int sl_get_osc8_info(const sl_t *self, sl_osc8_info_t *info) {
+  if (!self || !self->get_osc8_info)
+    return SL_ERROR_INVALID;
+  return self->get_osc8_info(self, info);
 }
 
 void sl_free_string(sl_t *self, char *ptr) {

@@ -137,8 +137,9 @@ typedef struct sl_impl {
   int output_write_active;
   int output_trailing_newlines;
   int output_ansi_state;
-  /* Hold at most ESC [, 128 CSI bytes, and a terminator across writes. */
-  char output_pending[132];
+  sl_osc8_info_t osc8;
+  /* One bounded incomplete control/UTF-8 unit; never producer text. */
+  char output_pending[SL_OSC8_MAX_BYTES];
   size_t output_pending_len;
   sl_surface_t *output_surface;
   int cursor_position_probe;

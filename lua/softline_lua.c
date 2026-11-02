@@ -283,7 +283,8 @@ static const char *const softline_lua_config_fields[] = {
     "history_max_len",
     "line_max_len",
     "queue_backend",
-    "queue_backend_context"};
+    "queue_backend_context",
+    "osc8_mode"};
 
 static void softline_lua_config(lua_State *L, int index, sl_config_t *config,
                                 int *rooted_template, int *backend,
@@ -370,6 +371,14 @@ static void softline_lua_config(lua_State *L, int index, sl_config_t *config,
   lua_getfield(L, index, "prompt_theme");
   if (!lua_isnil(L, -1))
     config->prompt_theme = (sl_prompt_theme_t)luaL_checkinteger(L, -1);
+  lua_pop(L, 1);
+  lua_getfield(L, index, "osc8_mode");
+  if (!lua_isnil(L, -1)) {
+    lua_Integer mode = luaL_checkinteger(L, -1);
+    luaL_argcheck(L, mode >= SL_OSC8_OFF && mode <= SL_OSC8_AUTO, index,
+                  "osc8_mode must be OSC8_OFF, OSC8_ON or OSC8_AUTO");
+    config->osc8_mode = (sl_osc8_mode_t)mode;
+  }
   lua_pop(L, 1);
   lua_getfield(L, index, "statusline");
   if (!lua_isnil(L, -1))
@@ -865,6 +874,33 @@ static int softline_lua_set_image_paste_path_template(lua_State *L) {
   }
   return softline_lua_status(
       L, sl_set_image_paste_path_template(handle->sl, path_template));
+}
+
+/** Lua editor:set_osc8_mode(mode): update policy between output streams. */
+static int softline_lua_set_osc8_mode(lua_State *L) {
+  softline_lua_handle_t *handle = softline_lua_check(L, 1);
+  lua_Integer mode = luaL_checkinteger(L, 2);
+  if (mode < SL_OSC8_OFF || mode > SL_OSC8_AUTO)
+    return softline_lua_status(L, SL_ERROR_INVALID);
+  return softline_lua_status(
+      L, sl_set_osc8_mode(handle->sl, (sl_osc8_mode_t)mode));
+}
+
+/** Lua editor:get_osc8_info(): cached mode, detected and enabled fields. */
+static int softline_lua_get_osc8_info(lua_State *L) {
+  softline_lua_handle_t *handle = softline_lua_check(L, 1);
+  sl_osc8_info_t info;
+  int result = sl_get_osc8_info(handle->sl, &info);
+  if (result != SL_OK)
+    return softline_lua_status(L, result);
+  lua_newtable(L);
+  lua_pushinteger(L, info.mode);
+  lua_setfield(L, -2, "mode");
+  lua_pushboolean(L, info.detected);
+  lua_setfield(L, -2, "detected");
+  lua_pushboolean(L, info.enabled);
+  lua_setfield(L, -2, "enabled");
+  return 1;
 }
 
 /** Lua editor:set_completions(items): copy literal strings or text/scope
@@ -1978,6 +2014,8 @@ static const luaL_Reg softline_lua_methods[] = {
     {"history_set_auto_add", softline_lua_history_set_auto_add},
     {"set_screen_width", softline_lua_set_screen_width},
     {"set_completions", softline_lua_set_completions},
+    {"set_osc8_mode", softline_lua_set_osc8_mode},
+    {"get_osc8_info", softline_lua_get_osc8_info},
     {"set_live_scroll_region", softline_lua_set_live_scroll_region},
     {"set_image_paste_path_template",
      softline_lua_set_image_paste_path_template},
@@ -2264,6 +2302,14 @@ int luaopen_softline(lua_State *L) {
   lua_setfield(L, -2, "KEY_BACKSPACE");
   lua_pushinteger(L, SL_KEY_TAB);
   lua_setfield(L, -2, "KEY_TAB");
+  lua_pushinteger(L, SL_OSC8_OFF);
+  lua_setfield(L, -2, "OSC8_OFF");
+  lua_pushinteger(L, SL_OSC8_ON);
+  lua_setfield(L, -2, "OSC8_ON");
+  lua_pushinteger(L, SL_OSC8_AUTO);
+  lua_setfield(L, -2, "OSC8_AUTO");
+  lua_pushinteger(L, SL_OSC8_MAX_BYTES);
+  lua_setfield(L, -2, "OSC8_MAX_BYTES");
   lua_pushinteger(L, SL_COMPLETION_START);
   lua_setfield(L, -2, "COMPLETION_START");
   lua_pushinteger(L, SL_COMPLETION_WORD);

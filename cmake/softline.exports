@@ -62,6 +62,8 @@ sl_set_prompt_theme
 sl_set_quoted_prompt_prefix
 sl_set_quoted_prompt_style
 sl_set_completions
+sl_set_osc8_mode
+sl_get_osc8_info
 sl_set_screen_width
 sl_set_status_busy
 sl_set_status_element

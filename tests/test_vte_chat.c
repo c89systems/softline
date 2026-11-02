@@ -1045,8 +1045,12 @@ static int completion_case(const char *example, const char *theme) {
   setenv("SOFTLINE_CHAT_APPROVAL_MS", "100", 1);
   REQUIRE(start_chat(&c, example, theme, 24, 10) == 0);
   REQUIRE(wait_frame(&c, "Completion demo:", "> \n", 0, 2) == 0);
-  send_input(&c, "hel");
+  send_input(&c, "h");
   REQUIRE(wait_frame(&c, NULL, "> hello world\n", 0, 2) == 0);
+  REQUIRE(wait_column(&c, 3) == 0);
+  send_input(&c, "el");
+  REQUIRE(wait_frame(&c, NULL, "> hello world\n", 0, 2) == 0);
+  REQUIRE(wait_column(&c, 5) == 0);
   s = frame(&c);
   REQUIRE(s.column == 5 && !strstr(s.text, "T hello"));
   send_input(&c, "\t");

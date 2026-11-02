@@ -177,11 +177,15 @@ static int chat_margin_left(int columns) { return columns >= 5 ? 2 : 0; }
 static int new_renderer(struct chat_state *state, mdf **out) {
   mdf_options options;
   mdf_sink sink;
+  sl_osc8_info_t links;
+  if (sl_get_osc8_info(state->sl, &links) != SL_OK)
+    return -1;
   mdf_options_init(&options);
   options.output_fd = STDOUT_FILENO;
   options.width = state->columns;
   options.margin_left = chat_margin_left(state->columns);
   options.boring = !state->interactive;
+  options.osc8 = links.enabled;
   if (mdf_create(MDF_FORMAT_ANSI, &options, out) != MDF_OK)
     return -1;
   sink.userdata = state;
@@ -1006,6 +1010,27 @@ int main(int argc, char **argv) {
     demo_client_destroy(state.remote);
     return 1;
   }
+  {
+    const char *links = getenv("SOFTLINE_OSC8");
+    sl_osc8_mode_t mode = SL_OSC8_AUTO;
+    if (links && *links) {
+      if (!strcmp(links, "on"))
+        mode = SL_OSC8_ON;
+      else if (!strcmp(links, "off"))
+        mode = SL_OSC8_OFF;
+      else if (strcmp(links, "auto")) {
+        fprintf(stderr, "SOFTLINE_OSC8 must be off, on or auto\n");
+        sl_destroy(state.sl);
+        demo_client_destroy(state.remote);
+        return 1;
+      }
+    }
+    if (sl_set_osc8_mode(state.sl, mode) != SL_OK) {
+      sl_destroy(state.sl);
+      demo_client_destroy(state.remote);
+      return 1;
+    }
+  }
   if (sl_set_completions(state.sl, chat_completions,
                          sizeof(chat_completions) /
                              sizeof(chat_completions[0])) != SL_OK) {
@@ -1094,7 +1119,8 @@ int main(int argc, char **argv) {
             "Completion demo: type `h` for a dim suggestion; Tab accepts, "
             "more Tabs cycle. Backspace restarts matching. "
             "Try `say ver` + Tab on any line; Ctrl-J adds a line; "
-            "`/q` + Tab completes `/quit`.") != 0) {
+            "`/q` + Tab completes `/quit`. "
+            "[Hyperlink demo](https://pkt.systems).") != 0) {
       report_failure(&state, "completion demo output");
       exit_code = 1;
       goto cleanup;

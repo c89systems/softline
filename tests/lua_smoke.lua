@@ -39,6 +39,8 @@ local prompt_methods = {
   "queue_keys",
   "set_prompt_theme",
   "set_completions",
+  "set_osc8_mode",
+  "get_osc8_info",
   "set_quoted_prompt_prefix",
   "set_quoted_prompt_style",
   "set_statusline",
