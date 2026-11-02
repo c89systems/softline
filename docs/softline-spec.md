@@ -764,12 +764,14 @@ is invoked by rendering or a producer feed. Asynchronous resolution is not part
 of this interface; hosts provide a synchronous snapshot of their current data.
 
 Softline owns that snapshot while the token is active, including through typing,
-Backspace, ambiguous matches and Tab cycling. A typed whitespace character,
-bracketed paste, deleting the trigger, moving outside the token, submission,
+Backspace, Undo, ambiguous matches and Tab cycling. Whitespace inserted by
+ordinary editing (including yank or host insertion), bracketed paste,
+deleting the trigger, moving outside the token, submission,
 queueing, replacing the draft or replacing registrations ends the activation.
-Accepted candidates may themselves contain spaces; those inserted spaces do
-not end a Tab cycle. Other editing/navigation ends the Tab cycle and rematches
-the current prefix against the cached snapshot, without calling the provider.
+Accepted candidates and restored undo text may themselves contain spaces;
+those spaces do not end the activation. Other editing/navigation ends the Tab
+cycle and rematches the current prefix against the cached snapshot, without
+calling the provider.
 
 Matching is literal and case-sensitive. The first match appears as a dim inline
 suffix. Tab accepts that full candidate; further Tabs cycle the originally

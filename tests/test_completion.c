@@ -259,6 +259,10 @@ static int update_provider(sl_t *sl, sl_key_t key, void *userdata,
   if (data->kind == 10 &&
       (sl_set_cursor(sl, 0) != SL_OK || sl_insert(sl, "X") != SL_OK))
     return SL_ERROR;
+  if (data->kind == 11 && sl_insert(sl, " ") != SL_OK)
+    return SL_ERROR;
+  if (data->kind == 11 && strcmp(sl_buffer(sl), "a "))
+    return SL_ERROR;
   ++data->generation;
   *action = SL_KEY_ACTION_HANDLED;
   return SL_OK;
@@ -291,7 +295,11 @@ static int provider_cases(int native) {
       {'@', 1, 7, 1, 0, 1, "\033e\t\r\033s", "alpha.txt"},
       {'@', 1, 8, 1, 1, 1, "@a\t\024\t\r", "#"},
       {'@', 1, 9, 1, 1, 1, "@a\t\r", "@a#"},
-      {'@', 1, 10, 1, 0, 1, "@al\024\r", "Xal"}};
+      {'@', 1, 10, 1, 0, 1, "@al\024\r", "Xal"},
+      {'@', 1, 11, 2, 0, 1, "@a\024@b\t\r", "a beta.txt"},
+      {'/', 0, 12, 1, 0, 1, "/c\177\024\037\t\r", "/command1"},
+      {'@', 1, 13, 2, 0, 1, " \001\013@a\031@b\t\r", "a beta.txt"},
+      {'/', 0, 14, 1, 0, 1, "/\t\024\037\t\r", "/command1"}};
   size_t i;
   for (i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
     int master, slave, wake[2];

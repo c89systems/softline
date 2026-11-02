@@ -1204,12 +1204,36 @@ static int sl_buf_reserve(sl_t *self, size_t need) {
   return 0;
 }
 
+static void sl_completion_changed(sl_impl_t *impl, size_t at, size_t removed,
+                                  size_t inserted, int undo) {
+  sl_completion_state_t *state = &impl->completion;
+  size_t i;
+  int same_trigger;
+  if (!state->active || state->finishing || state->cycle.updating)
+    return;
+  same_trigger = undo && at == state->start && inserted && at < impl->len &&
+                 impl->buf[at] == state->provider.trigger;
+  if ((!same_trigger && at <= state->start) || at > state->end ||
+      removed > state->end - at) {
+    sl_completion_reset(state);
+    return;
+  }
+  state->end = state->end - removed + inserted;
+  /* Accepted phrases and restored undo bytes may contain existing spaces.
+   * Ordinary insertion/yank creates a new token boundary instead. */
+  if (!undo)
+    for (i = at; i < at + inserted; ++i)
+      if (sl_completion_space((unsigned char)impl->buf[i])) {
+        if (i < state->end)
+          state->end = i;
+        break;
+      }
+}
+
 static int sl_buf_replace(sl_t *self, size_t at, size_t removed,
                           const char *text, size_t inserted) {
   sl_impl_t *impl = sl_impl(self);
   size_t len;
-  size_t completion_end = 0;
-  int update_completion = 0;
   if (!impl || at > impl->len || removed > impl->len - at ||
       inserted > impl->line_max_len - (impl->len - removed)) {
     sl_set_error(self, "edit exceeds the line limit");
@@ -1219,16 +1243,6 @@ static int sl_buf_replace(sl_t *self, size_t at, size_t removed,
     return 0;
   if (!impl->completion.cycle.updating)
     sl_completion_cycle_clear(&impl->completion.cycle);
-  if (impl->completion.active && !impl->completion.finishing) {
-    if (!impl->completion.cycle.updating) {
-      if (at > impl->completion.start && at <= impl->completion.end &&
-          removed <= impl->completion.end - at) {
-        completion_end = impl->completion.end - removed + inserted;
-        update_completion = 1;
-      } else
-        sl_completion_reset(&impl->completion);
-    }
-  }
   if (removed == inserted && !memcmp(impl->buf + at, text, inserted))
     return 0;
   len = impl->len - removed + inserted;
@@ -1246,8 +1260,7 @@ static int sl_buf_replace(sl_t *self, size_t at, size_t removed,
     memmove(impl->buf + at, text, inserted);
   impl->len = len;
   impl->buf[len] = '\0';
-  if (update_completion)
-    impl->completion.end = completion_end;
+  sl_completion_changed(impl, at, removed, inserted, 0);
   impl->edit.changed = 1;
   impl->preferred_column_valid = 0;
   return 0;
@@ -1308,6 +1321,8 @@ static int sl_buf_insert_cstr(sl_t *self, const char *text) {
   if (sl_buf_insert(self, impl->cursor, text, n) != 0)
     return SL_ERROR;
   impl->cursor += n;
+  if (impl->completion.active && impl->cursor > impl->completion.end)
+    return sl_completion_finish(self);
   return SL_OK;
 }
 
@@ -7550,14 +7565,19 @@ static char *sl_readline_impl(sl_t *self, const char *prompt,
         if (sl_buf_insert(self, impl->cursor, "\n", 1) == 0)
           impl->cursor++;
         break;
-      case SL_KEY_CTRL_UNDERSCORE:
-        if (sl_edit_undo(&impl->edit, impl->buf, impl->cap, &impl->len,
-                         &impl->cursor) < 0) {
+      case SL_KEY_CTRL_UNDERSCORE: {
+        sl_edit_change_t change;
+        int undone = sl_edit_undo(&impl->edit, impl->buf, impl->cap, &impl->len,
+                                  &impl->cursor, &change);
+        if (undone < 0) {
           sl_set_error(self, "invalid draft undo state");
           failed = 1;
           done = 1;
-        }
+        } else if (undone)
+          sl_completion_changed(impl, change.at, change.removed,
+                                change.inserted, 1);
         break;
+      }
       case SL_KEY_CTRL_Y:
       case SL_KEY_ALT_Y:
         if (sl_yank_draft(self, key == SL_KEY_ALT_Y) != 0) {

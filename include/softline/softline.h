@@ -1824,16 +1824,17 @@ int sl_set_quoted_prompt_style(sl_t *self, const sl_quote_style_t *style);
  * zero clears them; invalid fields, duplicate triggers or copy failure keep
  * the previous registry. Registration changes end the current completion.
  * Each activation copies one callback-produced list, reused through typing,
- * Backspace and Tab cycling until whitespace is typed, the trigger is deleted,
- * the cursor leaves its token, or the draft is submitted/replaced/queued.
- * Candidates include the trigger and contain printable UTF-8, LF/Tab, bounded
- * by line_max_len. The first match is a dim inline ghost; Tab accepts it and
- * repeated Tabs cycle the original matches. Editing/navigation resets that
- * cycle but retains the activation list inside its token. Enter submits actual
- * text, never the ghost. strip_trigger is undoable and applied on normal exit
- * or submission; replacing/discarding the draft needs no extra deletion.
- * Failed providers are not retried until another activation. A fully present
- * unique match or no match lets Tab reach ordinary host/queue handling. */
+ * Backspace, Undo and Tab cycling until ordinary edits insert whitespace, the
+ * trigger is deleted, the cursor leaves its token, or the draft is
+ * submitted/replaced/queued. Candidates include the trigger and contain
+ * printable UTF-8, LF/Tab, bounded by line_max_len. The first match is a dim
+ * inline ghost; Tab accepts it and repeated Tabs cycle the original matches.
+ * Editing/navigation resets that cycle but retains the activation list inside
+ * its token. Enter submits actual text, never the ghost. strip_trigger is
+ * undoable and applied on normal exit or submission; replacing/discarding the
+ * draft needs no extra deletion. Failed providers are not retried until another
+ * activation. A fully present unique match or no match lets Tab reach ordinary
+ * host/queue handling. */
 int sl_set_completion_providers(sl_t *self,
                                 const sl_completion_provider_t *providers,
                                 size_t count);

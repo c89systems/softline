@@ -32,10 +32,12 @@ static int invalid_ranges(void) {
     edit.enabled = 1;
     CHECK(sl_edit_record(&edit, cases[index].at, "old", cases[index].removed,
                          cases[index].inserted, cases[index].cursor) == 0);
-    CHECK(sl_edit_undo(&edit, buffer, cases[index].cap, &len, &cursor) == -1);
+    CHECK(sl_edit_undo(&edit, buffer, cases[index].cap, &len, &cursor, NULL) ==
+          -1);
     CHECK(len == cases[index].len && cursor == 1 &&
           !memcmp(buffer, before, sizeof(buffer)));
-    CHECK(sl_edit_undo(&edit, buffer, sizeof(buffer), &len, &cursor) == 0);
+    CHECK(sl_edit_undo(&edit, buffer, sizeof(buffer), &len, &cursor, NULL) ==
+          0);
     sl_edit_destroy(&edit);
   }
   return 0;
@@ -51,10 +53,51 @@ static int group_atomicity(void) {
   CHECK(sl_edit_record(&edit, 3, "", 0, 1, 0) == 0);
   CHECK(sl_edit_record(&edit, 0, "", 0, 1, 0) == 0);
   sl_edit_end(&edit);
-  CHECK(sl_edit_undo(&edit, buffer, sizeof(buffer), &len, &cursor) == -1);
+  CHECK(sl_edit_undo(&edit, buffer, sizeof(buffer), &len, &cursor, NULL) == -1);
   CHECK(!strcmp(buffer, "XY") && len == 2 && cursor == 2);
   sl_edit_destroy(&edit);
   return 0;
 }
 
-int main(void) { return invalid_ranges() || group_atomicity(); }
+static int changed_range(void) {
+  sl_edit_t edit;
+  sl_edit_change_t change;
+  char buffer[32];
+  size_t len, cursor;
+  memset(&edit, 0, sizeof(edit));
+  edit.enabled = 1;
+  CHECK(sl_edit_record(&edit, 1, "c", 1, 0, 2) == 0);
+  strcpy(buffer, "/");
+  len = cursor = 1;
+  CHECK(sl_edit_undo(&edit, buffer, sizeof(buffer), &len, &cursor, &change) ==
+        1);
+  CHECK(!strcmp(buffer, "/c") && cursor == 2 && change.at == 1 &&
+        !change.removed && change.inserted == 1);
+  sl_edit_begin(&edit, SL_EDIT_OTHER);
+  CHECK(sl_edit_record(&edit, 3, "d", 1, 2, 4) == 0);
+  CHECK(sl_edit_record(&edit, 0, "a", 1, 0, 0) == 0);
+  sl_edit_end(&edit);
+  strcpy(buffer, "bcXY");
+  len = 4;
+  cursor = 0;
+  CHECK(sl_edit_undo(&edit, buffer, sizeof(buffer), &len, &cursor, &change) ==
+        1);
+  CHECK(!strcmp(buffer, "abcd") && change.at == 0 && change.removed == 4 &&
+        change.inserted == 4);
+  sl_edit_begin(&edit, SL_EDIT_OTHER);
+  CHECK(sl_edit_record(&edit, 1, "b", 1, 0, 2) == 0);
+  CHECK(sl_edit_record(&edit, 2, "d", 1, 0, 3) == 0);
+  sl_edit_end(&edit);
+  strcpy(buffer, "ace");
+  len = cursor = 3;
+  CHECK(sl_edit_undo(&edit, buffer, sizeof(buffer), &len, &cursor, &change) ==
+        1);
+  CHECK(!strcmp(buffer, "abcde") && change.at == 1 && change.removed == 1 &&
+        change.inserted == 3);
+  sl_edit_destroy(&edit);
+  return 0;
+}
+
+int main(void) {
+  return invalid_ranges() || group_atomicity() || changed_range();
+}

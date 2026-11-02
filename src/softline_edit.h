@@ -18,6 +18,11 @@ typedef struct sl_kill_entry {
   char *text;
   size_t len;
 } sl_kill_entry_t;
+/* One bounding replacement describing an entire undo group. Outside this
+ * range, the before/after draft bytes are unchanged. */
+typedef struct sl_edit_change {
+  size_t at, removed, inserted;
+} sl_edit_change_t;
 /* Draft edits only. No producer bytes enter the journal or kill ring. */
 typedef struct sl_edit {
   struct sl_undo_entry *undo;
@@ -41,7 +46,7 @@ int sl_edit_record(sl_edit_t *edit, size_t at, const char *old, size_t old_len,
  * journal without changing the draft if its ranges no longer fit the buffer.
  */
 int sl_edit_undo(sl_edit_t *edit, char *buf, size_t cap, size_t *len,
-                 size_t *cursor);
+                 size_t *cursor, sl_edit_change_t *change);
 /* Prepare before editing; commit takes ownership only after deletion succeeds.
  */
 char *sl_edit_prepare_kill(sl_edit_t *edit, const char *text, size_t len,

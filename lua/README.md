@@ -814,11 +814,12 @@ assert(sl:set_completion_providers({
 
 The callback runs once per active token and returns the host's current snapshot.
 It may read the editor but must not mutate/close it or yield. Softline copies the
-strings, caches them through typing/Backspace, and shows the first match as a
+strings, caches them through typing/Backspace/Undo, and shows the first match as a
 dimmed inline ghost. Tab accepts it; repeated Tabs cycle the original matches.
 Other edits or movement reset cycling while retaining the snapshot inside its
-token. Whitespace, deleting the trigger, leaving the token, queueing/submitting
-or replacing the draft ends completion. `strip_trigger` then removes the marker
+token. Whitespace inserted by ordinary editing/yank, deleting the trigger,
+leaving the token, queueing/submitting or replacing the draft ends completion.
+`strip_trigger` then removes the marker
 as an undoable edit. Enter submits actual text, never a ghost. Errors, invalid
 UTF-8/NUL/control-bearing candidates or callback exceptions discard the list,
 preserve typed text including its marker and suppress retries for that token.
