@@ -16,6 +16,13 @@ local themes = {
 }
 assert(themes[theme_name], "invalid SOFTLINE_PROMPT_THEME: " .. theme_name)
 assert(sl:set_prompt_theme(themes[theme_name]))
+assert(dofile((arg[0]:match("^(.*[/])") or "") .. "completion.lua")(sl, false))
+local interactive = os.execute("test -t 0 && test -t 1")
+if interactive == true or interactive == 0 then
+  print("Completion demo: type h for a dim suggestion; Tab accepts, more Tabs cycle. Backspace restarts matching.")
+  print("  Try say ver + Tab on any line; Ctrl-J adds a line; /q + Tab completes /quit.")
+  print("  / resolves commands; @ lists one directory at a time (except .git). Tab accepts; Enter or a separating space removes @.")
+end
 
 while true do
   local line, status = sl:readline("softline> ")

@@ -11,7 +11,7 @@ description = {
       softline is a C89/POSIX multiline prompt editor. This rock provides a
       thin Lua 5.5 C module facade over the installed libsoftline public API.
    ]],
-   homepage = "https://github.com/sa6mwa/softline",
+   homepage = "https://github.com/c89systems/softline",
    license = "MIT",
 }
 build = {

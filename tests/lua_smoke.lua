@@ -6,6 +6,25 @@ local function assert_eq(actual, expected, label)
   end
 end
 
+do
+  local weak = setmetatable({}, {__mode="v"})
+  local function make_cycle()
+    local editor = assert(softline.new())
+    assert(editor:set_completion_providers({{trigger="/", complete=function()
+      assert(editor:buffer() ~= nil)
+      return {"/quit"}
+    end, expand=function()
+      assert(editor:buffer() ~= nil)
+      return {}
+    end}}))
+    return editor
+  end
+  weak[1] = make_cycle()
+  collectgarbage("collect")
+  collectgarbage("collect")
+  assert(weak[1] == nil, "completion callbacks must not root their editor")
+end
+
 local prompt_methods = {
   "next_prompt",
   "set_live_scroll_region",
@@ -38,6 +57,9 @@ local prompt_methods = {
   "set_queue_keys",
   "queue_keys",
   "set_prompt_theme",
+  "set_completion_providers",
+  "set_osc8_mode",
+  "get_osc8_info",
   "set_quoted_prompt_prefix",
   "set_quoted_prompt_style",
   "set_statusline",
@@ -59,6 +81,20 @@ for _, field in ipairs({ "bounded", "screen_x", "screen_y", "screen_height",
 end
 local ok, message = pcall(softline.new, { [1] = true })
 assert(not ok and message:find("configuration field names must be strings", 1, true))
+
+do
+  local large = assert(softline.new({ prompt_queue = true }))
+  local draft = string.rep("a\n", 65535) .. "é"
+  assert(#draft == 131072)
+  assert(large:set_buffer(draft))
+  assert_eq(large:buffer(), draft, "128 KiB default draft")
+  assert(not large:set_buffer(draft .. "x"))
+  assert_eq(large:buffer(), draft, "oversize replacement leaves draft intact")
+  local id = assert(large:queue_append(draft, true))
+  assert(large:queue_approve(id))
+  assert_eq(large:queue_take(1), draft, "128 KiB queue round-trip")
+  large:close()
+end
 
 local sl = assert(softline.new({ line_max_len = 32 }))
 assert(sl:set_image_paste_path_template("{{xdg_cache_home}}/softline/*"))

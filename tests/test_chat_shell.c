@@ -1,5 +1,7 @@
+#define _XOPEN_SOURCE 700
 #include "console_pty.h"
 #include <dirent.h>
+#include <fcntl.h>
 #include <sys/stat.h>
 
 static int fixture_shell(int argc, char **argv) {
@@ -14,6 +16,8 @@ static int fixture_shell(int argc, char **argv) {
   for (index = 1; index < argc; ++index)
     printf(" %s", argv[index]);
   puts(" cooked foreground");
+  printf("SHELL_PARENT %ld\n", (long)getppid());
+  printf("SHELL_PROCESS %ld\n", (long)getpid());
   fflush(stdout);
   while (fgets(line, sizeof(line), stdin)) {
     line[strcspn(line, "\r\n")] = 0;
@@ -25,7 +29,14 @@ static int fixture_shell(int argc, char **argv) {
       printf("SHELL_SIZE %u %u\n", size.ws_row, size.ws_col);
     } else if (!strcmp(line, "exit"))
       return 0;
-    else if (!strcmp(line, "fail"))
+    else if (!strcmp(line, "hang")) {
+      signal(SIGINT, SIG_IGN);
+      signal(SIGHUP, SIG_IGN);
+      puts("SHELL_HUNG");
+      fflush(stdout);
+      for (;;)
+        pause();
+    } else if (!strcmp(line, "fail"))
       return 7;
     else if (!strcmp(line, "partial")) {
       fputs("SHELL_PARTIAL", stdout);
@@ -134,6 +145,10 @@ static int preserve_draft(const char *shell, const char *history_path) {
   }
   REQUIRE(send_bytes(&e, "!\r") == 0);
   REQUIRE(wait_records(&e, history_path, "draft first\\nsecond !tail\n") == 0);
+  /* Remote history records admission. Wait for actual execution before
+   * asserting cancellation of a running operation. */
+  if (remote_owner)
+    REQUIRE(wait_for(&e, "Thinking...", 0) == 0);
   REQUIRE(send_bytes(&e, "\003") == 0);
   REQUIRE(wait_for(&e, c_chat ? "Operation cancelled" : "[operation] cancelled",
                    0) == 0);
@@ -141,6 +156,121 @@ static int preserve_draft(const char *shell, const char *history_path) {
   REQUIRE(quit(&e) == 0);
 cleanup:
   close_editor(&e);
+  return failed;
+}
+static int escape_hung_shell(const char *shell) {
+  struct editor e;
+  int failed = 0;
+  size_t mark;
+  char parent[64];
+  const char *process;
+  pid_t shell_pid;
+  double escaped;
+  REQUIRE(setenv("SHELL", shell, 1) == 0);
+  REQUIRE(start(&e, "examples/chat.lua", NULL, NULL) == 0);
+  REQUIRE(prompt(&e, 0) == 0);
+  REQUIRE(
+      send_bytes(
+          &e,
+          "\033[200~preserved\nsecond tail\033[201~\002\002\002\002\033s") ==
+      0);
+  REQUIRE(wait_for(&e, "SHELL_READY -i cooked foreground", 0) == 0);
+  snprintf(parent, sizeof(parent), "SHELL_PARENT %ld",
+           (long)(remote_owner ? remote_owner_pid : e.child));
+  REQUIRE(wait_for(&e, parent, 0) == 0);
+  REQUIRE(wait_for(&e, "SHELL_PROCESS ", 0) == 0);
+  process = strstr(e.bytes, "SHELL_PROCESS ");
+  escaped = now();
+  while (!strchr(process, '\n') && now() - escaped < 1.0)
+    REQUIRE(pump(&e, 10) == 0);
+  REQUIRE(strchr(process, '\n') != NULL);
+  shell_pid = (pid_t)strtol(process + strlen("SHELL_PROCESS "), NULL, 10);
+  REQUIRE(shell_pid > 0);
+  mark = e.length;
+  REQUIRE(send_bytes(&e, "hang\n") == 0);
+  REQUIRE(wait_for(&e, "SHELL_HUNG", mark) == 0);
+  mark = e.length;
+  escaped = now();
+  REQUIRE(send_bytes(&e, "\r~.") == 0);
+  REQUIRE(prompt(&e, mark) == 0 && now() - escaped < 1.0);
+  REQUIRE(contains(&e, "preserved", mark) && contains(&e, "second tail", mark));
+  while (kill(shell_pid, 0) == 0 && now() - escaped < 1.0)
+    REQUIRE(pump(&e, 10) == 0);
+  REQUIRE(kill(shell_pid, 0) == -1 && errno == ESRCH);
+  mark = e.length;
+  REQUIRE(send_bytes(&e, "X") == 0);
+  REQUIRE(wait_cursor(&e, "Xtail", mark, e.rows - 1, 10) == 0);
+  REQUIRE(send_bytes(&e, "\037\033n") == 0);
+  if (remote_owner) {
+    mark = e.length;
+    REQUIRE(send_bytes(&e, "connection draft\033s") == 0);
+    REQUIRE(wait_for(&e, "SHELL_READY", mark) == 0);
+    mark = e.length;
+    stop_remote_owner();
+    REQUIRE(prompt(&e, mark) == 0);
+    REQUIRE(contains(&e, "connection draft", mark));
+    REQUIRE(send_bytes(&e, "\033n") == 0);
+  }
+  REQUIRE(quit(&e) == 0);
+cleanup:
+  close_editor(&e);
+  return failed;
+}
+static int terminal_failure(void) {
+  struct editor *probe = calloc(1, sizeof(*probe));
+  int fd = -1, failed = 1, status = 0;
+  struct termios attrs;
+  char bytes[2048];
+  char *path;
+  double until;
+  pid_t exited = 0;
+  if (!probe)
+    return 1;
+  probe->child = probe->master = -1;
+  test_no_flow = 1;
+  if (start(probe, "examples/chat.lua", NULL, NULL) || prompt(probe, 0) ||
+      send_bytes(probe, "\033s") || wait_for(probe, "SHELL_READY", 0))
+    goto cleanup;
+  path = ptsname(probe->master);
+  if (!path || (fd = open(path, O_WRONLY | O_NOCTTY | O_NONBLOCK)) < 0)
+    goto cleanup;
+  memset(bytes, 'x', sizeof(bytes));
+  if (tcflow(fd, TCOOFF))
+    goto cleanup;
+  while (write(fd, bytes, sizeof(bytes)) > 0) {
+  }
+  if (errno != EAGAIN && errno != EWOULDBLOCK)
+    goto cleanup;
+  if (send_bytes(probe, "~."))
+    goto cleanup;
+  /* Keep output unread: even fatal error reporting must not undo the relay's
+   * bounded cancellation. */
+  until = now() + 1.0;
+  do {
+    exited = waitpid(probe->child, &status, WNOHANG);
+    if (exited)
+      break;
+    (void)poll(NULL, 0, 5);
+  } while (now() < until);
+  if (exited != probe->child)
+    goto cleanup;
+  probe->child = -1;
+  if (!WIFEXITED(status) || WEXITSTATUS(status) != 1 ||
+      tcgetattr(probe->master, &attrs) || !(attrs.c_lflag & ICANON) ||
+      !(attrs.c_lflag & ECHO))
+    goto cleanup;
+  failed = 0;
+cleanup:
+  if (fd >= 0) {
+    (void)tcflow(fd, TCOON);
+    close(fd);
+  }
+  test_no_flow = 0;
+  if (failed)
+    fprintf(stderr, "Chat blocked after terminal saturation\n%.2000s\n",
+            probe->bytes);
+  close_editor(probe);
+  free(probe);
   return failed;
 }
 static int exercise(const char *shell) {
@@ -153,6 +283,8 @@ static int exercise(const char *shell) {
   const char *position;
   if (setenv("SHELL", shell, 1))
     return 1;
+  if (remote_owner)
+    setenv("SOFTLINE_CHAT_CHAR_MS", "2", 1);
   REQUIRE(start(&e, "examples/chat.lua", NULL, NULL) == 0);
   REQUIRE(prompt(&e, 0) == 0);
   mark = e.length;
@@ -220,9 +352,27 @@ static int exercise(const char *shell) {
   REQUIRE(wait_for(&e, c_chat ? "Thinking..." : "[operation] processing input.",
                    mark) == 0);
   mark = e.length;
-  REQUIRE(send_bytes(&e, "\033s") == 0);
-  REQUIRE(wait_for(&e, "Shell is available only between turns.", mark) == 0);
-  REQUIRE(!contains(&e, "SHELL_READY", mark));
+  if (remote_owner) {
+    REQUIRE(send_bytes(&e, "\033[200~preserved draft\nsecond tail\033[201~"
+                           "\002\002\002\002\033s") == 0);
+    REQUIRE(wait_for(&e, "SHELL_READY", mark) == 0);
+    REQUIRE(e.top == 0 && e.bottom == e.rows - 1);
+    mark = e.length;
+    REQUIRE(send_bytes(&e, "exit\n") == 0);
+    REQUIRE(prompt(&e, mark) == 0);
+    REQUIRE(wait_for(&e, "> preserved draft", mark) == 0);
+    mark = e.length;
+    REQUIRE(send_bytes(&e, "X") == 0);
+    REQUIRE(wait_cursor(&e, "Xtail", mark, e.rows - 1, 10) == 0);
+    mark = e.length;
+    REQUIRE(send_bytes(&e, "\037") == 0);
+    REQUIRE(wait_cursor(&e, "tail", mark, e.rows - 1, 9) == 0);
+    REQUIRE(send_bytes(&e, "\033n") == 0);
+  } else {
+    REQUIRE(send_bytes(&e, "\033s") == 0);
+    REQUIRE(wait_for(&e, "Shell is available only between turns.", mark) == 0);
+    REQUIRE(!contains(&e, "SHELL_READY", mark));
+  }
   mark = e.length;
   REQUIRE(send_bytes(&e, "\025queued\r") == 0);
   REQUIRE(wait_for(&e, "Q 1. queued", mark) == 0);
@@ -262,7 +412,8 @@ static int fallback(const char *shell) {
   settle(&e, .3);
   if (!shell || strcmp(shell, "/bin/bash")) {
     REQUIRE(tcgetattr(e.master, &attrs) == 0);
-    REQUIRE(attrs.c_lflag & ICANON);
+    REQUIRE(!(attrs.c_lflag &
+              ICANON)); /* The outer terminal belongs to the byte relay. */
   }
   REQUIRE(send_bytes(&e, "printf 'REAL_SHELL_READY\\n'\n") == 0);
   REQUIRE(wait_for(&e, "REAL_SHELL_READY\r\n", mark) == 0);
@@ -360,6 +511,140 @@ static void remove_files(const char *directory) {
   }
   closedir(dir);
 }
+static int control_exit(struct editor *e) {
+  double deadline = now() + 1;
+  int status;
+  struct termios attributes;
+  do {
+    if (waitpid(e->child, &status, WNOHANG) == e->child) {
+      e->child = -1;
+      settle(e, .03);
+      return !WIFEXITED(status) || WEXITSTATUS(status) ||
+             (c_chat && !contains(e, "Goodbye.", 0)) ||
+             tcgetattr(e->master, &attributes) ||
+             !(attributes.c_lflag & ICANON) || !(attributes.c_lflag & ECHO) ||
+             e->top || e->bottom != e->rows - 1;
+    }
+    if (pump(e, 10) < 0)
+      return 1;
+  } while (now() < deadline);
+  return 1;
+}
+
+static int connection_controls(int quiet) {
+  static const int states[] = {2, 4, 3, 1, 5, 0};
+  static const char *keys[] = {"/quit\r", "/quit\033\r", "/quit\033[13;5u",
+                               "draft to discard\033q", "\004"};
+  const char *owner = remote_owner;
+  struct editor *probe = calloc(1, sizeof(*probe));
+  size_t state, key, mark;
+  double deadline;
+  int failed = 1, row, column;
+  if (!probe)
+    return 1;
+  probe->child = probe->master = -1;
+  setenv("SOFTLINE_CHAT_RECONNECT_MS", "50", 1);
+  setenv("SOFTLINE_CHAT_APPROVAL_DEMO", "0", 1);
+  for (state = c_chat ? 0 : 5; state < (quiet ? 1 : 6); ++state) {
+    for (key = 0; key < (quiet ? 1 : 5); ++key) {
+      /* Ctrl-Enter is a remote frontend command binding; local queue
+       * profiles expose Enter and Alt-Enter as their submission keys. */
+      if (!states[state] && key == 2)
+        continue;
+      if (states[state] == 5 && key < 3)
+        continue; /* Pending edit input belongs to the edited entry. */
+      remote_owner = states[state] ? owner : NULL;
+      if (states[state] == 4)
+        setenv("SOFTLINE_CHAT_TEST_STALL_HELLO", "1", 1);
+      else
+        unsetenv("SOFTLINE_CHAT_TEST_STALL_HELLO");
+      if (states[state] == 2)
+        setenv("SOFTLINE_CHAT_TEST_OFFLINE", "1", 1);
+      else
+        unsetenv("SOFTLINE_CHAT_TEST_OFFLINE");
+      if (start_remote_owner())
+        goto cleanup;
+      if (start(probe, "examples/chat.lua", NULL, NULL))
+        goto cleanup;
+      deadline = now() + 1;
+      do {
+        if (contains(probe, "\033[?2004h", 0))
+          break;
+        if (pump(probe, 10))
+          goto cleanup;
+      } while (now() < deadline);
+      if (!contains(probe, "\033[?2004h", 0))
+        goto cleanup;
+      settle(probe, .12);
+      if (states[state] == 1 || states[state] == 3 || states[state] == 5 ||
+          (!states[state] && key >= 3)) {
+        if (send_bytes(probe, "work\r") ||
+            wait_for(probe,
+                     c_chat ? "Thinking..." : "[operation] processing input.",
+                     0))
+          goto cleanup;
+      }
+      if (states[state] == 3) {
+        stop_remote_owner();
+        if (wait_for(probe, "Disconnected;", 0))
+          goto cleanup;
+        settle(probe, .06);
+      }
+      if (states[state] == 2 || states[state] == 3) {
+        mark = probe->length;
+        if (send_bytes(probe, "preserved draft\033s"))
+          goto cleanup;
+        settle(probe, .08);
+        if (waitpid(probe->child, NULL, WNOHANG) != 0 ||
+            !contains(probe, "preserved draft", mark) ||
+            send_bytes(probe, "\033n"))
+          goto cleanup;
+      }
+      if (states[state] == 5) {
+        if (send_bytes(probe, "queued prompt\r") ||
+            wait_for(probe, "Q 1. queued prompt", 0) ||
+            kill(remote_owner_pid, SIGSTOP) || send_bytes(probe, "\033e") ||
+            wait_for(probe, "P 1 pending", 0))
+          goto cleanup;
+      }
+      if (quiet) {
+        if (send_bytes(probe, "first\012second\001\033[C"))
+          goto cleanup;
+        settle(probe, .12);
+        mark = probe->length;
+        row = probe->row;
+        column = probe->column;
+        settle(probe, .35);
+        if (probe->length != mark || probe->row != row ||
+            probe->column != column) {
+          fprintf(stderr, "Unchanged offline frame wrote %lu terminal bytes\n",
+                  (unsigned long)(probe->length - mark));
+          goto cleanup;
+        }
+        if (send_bytes(probe, "\033q") || control_exit(probe))
+          goto cleanup;
+      } else if (send_bytes(probe, keys[key]) || control_exit(probe))
+        goto cleanup;
+      if (remote_owner_pid > 0 && kill(remote_owner_pid, 0))
+        goto cleanup;
+      close_editor(probe);
+    }
+  }
+  failed = 0;
+cleanup:
+  if (failed)
+    fprintf(stderr,
+            "Chat connection control failed: state=%d key=%lu\n%.2000s\n",
+            state < 6 ? states[state] : -1, (unsigned long)key, probe->bytes);
+  close_editor(probe);
+  remote_owner = owner;
+  unsetenv("SOFTLINE_CHAT_TEST_STALL_HELLO");
+  unsetenv("SOFTLINE_CHAT_RECONNECT_MS");
+  unsetenv("SOFTLINE_CHAT_TEST_OFFLINE");
+  free(probe);
+  return failed;
+}
+
 int main(int argc, char **argv) {
   char directory[4096] = {0}, shell[4096] = {0}, history_dir[4096] = {0},
        history_path[4096] = {0}, file[4096];
@@ -368,9 +653,17 @@ int main(int argc, char **argv) {
   int failed = 1, count = 0;
   if (argc == 2 && !strcmp(argv[1], "-i"))
     return fixture_shell(argc, argv);
-  if (argc != 7 || (strcmp(argv[1], "c") && strcmp(argv[1], "lua")))
+  if ((argc != 7 && argc != 8) ||
+      (strcmp(argv[1], "c") && strcmp(argv[1], "lua") &&
+       strcmp(argv[1], "remote") && strcmp(argv[1], "quiet") &&
+       strcmp(argv[1], "controls") && strcmp(argv[1], "lua-controls") &&
+       strcmp(argv[1], "pressure") && strcmp(argv[1], "lua-pressure")))
     return 2;
-  c_chat = !strcmp(argv[1], "c");
+  c_chat = strcmp(argv[1], "lua") != 0 &&
+           strcmp(argv[1], "lua-controls") != 0 &&
+           strcmp(argv[1], "lua-pressure") != 0;
+  if (argc == 8)
+    remote_owner = argv[7];
   executable = argv[2];
   root = argv[3];
   test_rows = 24;
@@ -399,11 +692,24 @@ int main(int argc, char **argv) {
   setenv("SHELL", shell, 1);
   setenv("SOFTLINE_PROMPT_THEME", "plain", 1);
   setenv("SOFTLINE_CHAT_CHAR_MS", "50", 1);
+  if (!strcmp(argv[1], "pressure") || !strcmp(argv[1], "lua-pressure")) {
+    failed = terminal_failure();
+    goto cleanup;
+  }
+  if (!strcmp(argv[1], "quiet") || !strcmp(argv[1], "controls") ||
+      !strcmp(argv[1], "lua-controls")) {
+    failed = connection_controls(!strcmp(argv[1], "quiet"));
+    goto cleanup;
+  }
   if (busy_history(history_path))
     goto cleanup;
   remove_files(history_dir);
   setenv("SOFTLINE_CHAT_OPERATION_STEP_MS", "500", 1);
   if (preserve_draft(shell, history_path))
+    goto cleanup;
+  if (escape_hung_shell(shell))
+    goto cleanup;
+  if (terminal_failure())
     goto cleanup;
   remove_files(history_dir);
   if (exercise(shell) || fallback(NULL) || fallback("") ||

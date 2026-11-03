@@ -42,8 +42,8 @@ done
 build -Wl,--dynamic-linker,/opt/private/ld.so; verify 'non-system ELF interpreter'
 build "-Wl,--dynamic-linker,$CPKT_SYSROOT/lib/ld-linux-x86-64.so.2"; verify 'forbidden local/cache path'
 mkdir -p "$work/stage/sdk/lib"
-member=sdk/lib/libsoftline.so.3
-build -shared -fPIC -Wl,-soname,libsoftline.so.3; verify
+member=sdk/lib/libsoftline.so.4
+build -shared -fPIC -Wl,-soname,libsoftline.so.4; verify
 build -shared -fPIC -Wl,-soname,libsoftline.so.9; verify 'incorrect softline SONAME'
 member=sdk/bin/no-extension
 build -shared -fPIC -Wl,-soname,/opt/private/libfoo.so; verify 'forbidden ELF dependency/SONAME'

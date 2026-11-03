@@ -49,6 +49,156 @@ typedef struct sl_watch_event {
 typedef int (*sl_watch_callback_t)(sl_t *self, const sl_watch_event_t *event,
                                    void *userdata);
 
+/** Operation supplied to a nonblocking terminal-session adapter. */
+typedef enum sl_terminal_operation {
+  /** Start a new session at rows/columns; CLOSE follows even on failure. */
+  SL_TERMINAL_OPEN = 1,
+  /** Service events and supply the next fd/interests/timeout and ready state.
+   */
+  SL_TERMINAL_STEP,
+  /** Fill data up to length; SL_OK with transferred=0 means EOF. */
+  SL_TERMINAL_READ,
+  /** Consume data up to length; report partial progress in transferred. */
+  SL_TERMINAL_WRITE,
+  /** Apply the latest rows/columns without waiting for acknowledgment. */
+  SL_TERMINAL_RESIZE,
+  /** Cancel/release once, without waiting for peer acknowledgment or exit. */
+  SL_TERMINAL_CLOSE
+} sl_terminal_operation_t;
+
+/** Mutable, callback-scoped terminal I/O request. */
+typedef struct sl_terminal_event {
+  /** Requested operation. */
+  sl_terminal_operation_t operation;
+  /** Ready SL_WATCH_* bits for STEP; zero for an initial/deadline step. */
+  unsigned int events;
+  /** Next pollable descriptor, or -1 for deadline/input-only waiting. */
+  int fd;
+  /** Next SL_WATCH_READ/WRITE interests. */
+  unsigned int interests;
+  /** Maximum milliseconds until next STEP, -1 for no adapter deadline. */
+  int timeout_ms;
+  /** STEP sets one when READ/WRITE may be called, zero while opening. */
+  int ready;
+  /** Current physical terminal rows. */
+  unsigned int rows;
+  /** Current physical terminal columns. */
+  unsigned int columns;
+  /** Borrowed byte buffer; WRITE callbacks must not modify it. */
+  char *data;
+  /** Available READ capacity or WRITE byte count. */
+  size_t length;
+  /** READ/WRITE sets bytes transferred, never exceeding length. */
+  size_t transferred;
+} sl_terminal_event_t;
+
+/** Owner-thread adapter callback. Return SL_OK or an SL_ERROR_* value.
+ * READ/WRITE return SL_ERROR_NOT_READY for would-block. All callbacks must
+ * return promptly, must not reenter Softline, and borrow event/data only for
+ * the call. STEP must arrange readiness/deadlines for pending transport work.
+ * The context is borrowed until the exactly-once CLOSE callback returns. */
+typedef int (*sl_terminal_callback_t)(void *context,
+                                      sl_terminal_event_t *event);
+
+/** Eligible start positions for one literal completion. */
+typedef enum sl_completion_scope {
+  /** Only byte zero of the entire draft; the default value. */
+  SL_COMPLETION_START = 0,
+  /** Byte zero or immediately after ASCII whitespace, including Tab and LF. */
+  SL_COMPLETION_WORD = 1
+} sl_completion_scope_t;
+
+/** Copy a full candidate, including its trigger, into this activation's list.
+ * Call synchronously within the provider; strings are copied during emit().
+ * Return SL_OK or an error. Providers must stop emitting on error. */
+typedef int (*sl_completion_emit_t)(const char *text, void *context);
+
+/** Resolve a trigger once on the editor owner thread. Emit candidates in Tab
+ * cycling order and return SL_OK or an error. Read editor state but do not
+ * mutate/destroy the handle or retain emit/context. No provider runs from a
+ * feed or renderer. Failure discards the list, preserving the draft. */
+typedef int (*sl_completion_callback_t)(sl_t *self, char trigger,
+                                        sl_completion_emit_t emit,
+                                        void *context, void *userdata);
+
+/** Continue an already completed candidate before Tab rotates. completed
+ * includes the trigger. It may also be a completed ancestor of a partially
+ * typed child. Emit full strings strictly extending it, or emit no strings to
+ * retain normal rotation/host Tab handling. Results, including empty/failed
+ * attempts, are cached per prefix until activation ends. Parent lists remain
+ * available after Backspace; visited continuations do not interrupt a resumed
+ * parent cycle. Type further into their prefix to reuse their cached lists.
+ * Failure discards only this continuation list.
+ * Same owner-thread and lifetime rules as the initial callback apply. */
+typedef int (*sl_completion_expand_callback_t)(sl_t *self,
+                                               const char *completed,
+                                               sl_completion_emit_t emit,
+                                               void *context, void *userdata);
+
+/** One host-supplied completion trigger registration. */
+typedef struct sl_completion_provider {
+  /** Printable non-whitespace ASCII introductory character, e.g. '/' or '@'. */
+  char trigger;
+  /** Eligible positions; default is draft start only. */
+  sl_completion_scope_t scope;
+  /** Remove the trigger when completion exits or the prompt is submitted. */
+  int strip_trigger;
+  /** Synchronous callback called once per active token. */
+  sl_completion_callback_t callback;
+  /** Borrowed host context, valid until registrations are replaced. */
+  void *userdata;
+  /** Optional lazy continuation callback, cached per completed string. */
+  sl_completion_expand_callback_t expand;
+} sl_completion_provider_t;
+
+/** Policy for OSC 8 hyperlinks in validated producer output. */
+typedef enum sl_osc8_mode {
+  /** Default: reject OSC 8. */
+  SL_OSC8_OFF = 0,
+  /** Explicit host override, including redirected output. */
+  SL_OSC8_ON = 1,
+  /** Enable only for a passively recognized output terminal. */
+  SL_OSC8_AUTO = 2
+} sl_osc8_mode_t;
+
+/** Cached terminal detection and effective hyperlink policy. */
+typedef struct sl_osc8_info {
+  /** Configured policy. */
+  sl_osc8_mode_t mode;
+  /** Known terminal environment on output_fd; not a probe. */
+  int detected;
+  /** Whether validated feed accepts OSC 8 now. */
+  int enabled;
+} sl_osc8_info_t;
+
+/** Maximum complete OSC 8 control length, including opener and terminator. */
+#define SL_OSC8_MAX_BYTES 8192
+
+/** Successful local termination of a terminal relay by beginning-of-line ~. */
+#define SL_TERMINAL_ESCAPED 1
+
+/** Run a local/remote PTY byte relay between editor calls. End/begin an open
+ * output session automatically; preserve the editor and never store transcript.
+ * Enter then ~. escapes locally, ~~ sends a literal tilde. Return SL_OK on EOF,
+ * SL_TERMINAL_ESCAPED on escape, or an SL_ERROR_* value. Adapter callbacks must
+ * not block. Bounded input overflow fails explicitly instead of growing memory.
+ * Pending output is discarded on cancellation/failure. This free function adds
+ * no shell-control method to the receiver.
+ * If terminal output prevents teardown/reacquisition, return SL_ERROR_IO with
+ * input modes released and the output session closed. The editor continuation
+ * remains intact; reopen with sl_output_stream_begin() when output is writable.
+ */
+int sl_terminal_handoff(sl_t *self, sl_terminal_callback_t callback,
+                        void *context);
+
+/** Run the built-in local PTY adapter through sl_terminal_handoff(). shell is
+ * one executable path (NULL uses SHELL or /bin/sh), invoked with -i. Optional
+ * exit_status receives the shell exit code, 128+signal, or -1 if unavailable.
+ * After shell exit, drain currently available output up to 64 KiB; background
+ * jobs retaining the PTY slave do not keep this handoff open.
+ * The handle owns eventual nonblocking child reaping after cancellation. */
+int sl_terminal_local(sl_t *self, const char *shell, int *exit_status);
+
 /**
  * Idle hook invoked while sl_readline() is active and no input byte is ready.
  *
@@ -257,7 +407,13 @@ typedef enum sl_status {
   /** Terminal, file, or descriptor I/O failed. */
   SL_ERROR_IO = -4,
   /** A bounded prompt queue has no room for another entry. */
-  SL_ERROR_FULL = -5
+  SL_ERROR_FULL = -5,
+  /** The selected backend does not support this operation. */
+  SL_ERROR_UNSUPPORTED = -6,
+  /** An expected queue/item revision no longer matches. */
+  SL_ERROR_CONFLICT = -7,
+  /** The backend is disconnected, unsynchronized or awaiting a result. */
+  SL_ERROR_NOT_READY = -8
 } sl_status_t;
 
 /** Classification of the most recent sl_readline() result. */
@@ -375,6 +531,214 @@ typedef struct sl_prompt_queue_keys {
   /** Submit a nonempty draft, or promote the newest queue entry when empty. */
   sl_key_t submit_or_promote_newest;
 } sl_prompt_queue_keys_t;
+
+/** Per-handle outbound request identity. A bridge supplies its durable
+ * namespace when mapping this identity onto a backend transport or journal. */
+typedef unsigned long sl_queue_request_id_t;
+
+/** Operations sent to an application-owned queue. No operation grants the
+ * frontend authority to consume model input. */
+typedef enum sl_queue_operation {
+  /** Accept text with Q/S intent. */
+  SL_QUEUE_OFFER = 0,
+  /** Acquire a revision-checked edit hold. */
+  SL_QUEUE_BEGIN_EDIT = 1,
+  /** Replace text/intent and release the acquired edit hold. */
+  SL_QUEUE_END_EDIT = 2,
+  /** Release an edit hold without replacing accepted text. */
+  SL_QUEUE_ABORT_EDIT = 3,
+  /** Release the item's human approval hold. */
+  SL_QUEUE_APPROVE = 4,
+  /** Withdraw an unclaimed item. */
+  SL_QUEUE_WITHDRAW = 5,
+  /** Change Q/S intent, preserving identity and position. */
+  SL_QUEUE_SET_INTENT = 6,
+  /** Stop automatic backlog delivery. */
+  SL_QUEUE_STOP = 7,
+  /** Explicitly resume the stopped backlog. */
+  SL_QUEUE_RESUME = 8,
+  /** Clear accepted pending items atomically. */
+  SL_QUEUE_CLEAR = 9,
+  /** Change backend auto-approval policy, including already held items. */
+  SL_QUEUE_AUTO_APPROVAL = 10,
+  /** Obtain an ordered bounded snapshot. */
+  SL_QUEUE_SYNCHRONIZE = 11,
+  /** Resolve an earlier request whose outcome is unknown. */
+  SL_QUEUE_RESOLVE = 12
+} sl_queue_operation_t;
+
+/** One borrowed outbound request; pointers remain valid for the callback only.
+ * IDs and revisions are opaque nonempty strings, limited to 127 bytes. Text is
+ * bounded by line_max_len. A successful callback return acknowledges handoff,
+ * not backend admission. Expected revisions are filled from the current mirror
+ * when the corresponding caller field is NULL. */
+typedef struct sl_queue_request {
+  /** Identity assigned by Softline before handoff. */
+  sl_queue_request_id_t request_id;
+  /** Requested backend mutation or inspection. */
+  sl_queue_operation_t operation;
+  /** Target backend item, or NULL for queue-wide operations and offers. */
+  const char *item_id;
+  /** Expected item revision, or NULL when there is no target. */
+  const char *item_revision;
+  /** Expected queue revision, or NULL for initial synchronization. */
+  const char *queue_revision;
+  /** Acquired edit token for END_EDIT/ABORT_EDIT, otherwise NULL. */
+  const char *edit_token;
+  /** Offered/replacement text, otherwise NULL. */
+  const char *text;
+  /** Requested delivery intent; backend classification remains authoritative.
+   */
+  sl_prompt_queue_mode_t mode;
+  /** Offer requires approval, or AUTO_APPROVAL's requested boolean value. */
+  int enabled;
+  /** Earlier per-handle identity for RESOLVE, otherwise zero. */
+  sl_queue_request_id_t target_request_id;
+} sl_queue_request_t;
+
+/** Explicit result of an outbound request. */
+typedef enum sl_queue_result_status {
+  /** Backend durably accepted/applied the operation, or explicitly volatile. */
+  SL_QUEUE_ACCEPTED = 0,
+  /** Backend definitely rejected the operation. */
+  SL_QUEUE_REJECTED = 1,
+  /** Outcome unknown; resolve/retry the original identity, never a new offer.
+   */
+  SL_QUEUE_UNKNOWN = 2
+} sl_queue_result_status_t;
+
+/** Borrowed response. Results retire provisional requests; only ordered updates
+ * change the accepted mirror, so a late result cannot recreate a consumed item.
+ */
+typedef struct sl_queue_result {
+  /** Original request identity. */
+  sl_queue_request_id_t request_id;
+  /** Backend outcome. */
+  sl_queue_result_status_t status;
+  /** Affected backend item, if any. */
+  const char *item_id;
+  /** Accepted item revision, if any. */
+  const char *item_revision;
+  /** Edit token returned by BEGIN_EDIT, otherwise NULL. */
+  const char *edit_token;
+  /** Optional human-readable diagnostic, bounded by line_max_len. */
+  const char *reason;
+} sl_queue_result_t;
+
+/** Borrowed accepted backend entry. The backend owns text, ordering, approval,
+ * edit holds and readiness. Softline copies a bounded presentation mirror. */
+typedef struct sl_queue_entry {
+  /** Stable opaque backend identity. */
+  const char *id;
+  /** Current opaque item revision. */
+  const char *revision;
+  /** Accepted text, limited to line_max_len. */
+  const char *text;
+  /** Accepted Q/S intent. */
+  sl_prompt_queue_mode_t mode;
+  /** Human approval hold. */
+  int held;
+  /** Edit hold; only the holder's attachment receives its token. */
+  int edit_held;
+  /** Holder's opaque edit token, or NULL for another attachment's hold. */
+  const char *edit_token;
+  /** Backend-reported readiness, never a frontend execution grant. */
+  int ready;
+  /** Backend-reported stopped state for this item. */
+  int stopped;
+  /** Nonzero for an opaque host action, zero for model input. */
+  int action;
+} sl_queue_entry_t;
+
+/** Ordered changes in one backend subscription. */
+typedef enum sl_queue_change_kind {
+  /** Replace the bounded view, including the first subscription snapshot. */
+  SL_QUEUE_SNAPSHOT = 0,
+  /** Insert/update one entry at index in the bounded ordered view. */
+  SL_QUEUE_UPSERT = 1,
+  /** Remove one entry by backend identity, including claim/consumption. */
+  SL_QUEUE_REMOVE = 2,
+  /** Update queue-wide state without changing entries. */
+  SL_QUEUE_STATE = 3,
+  /** Lose transport authority; preserve mirror, draft and outstanding outcomes.
+   */
+  SL_QUEUE_DISCONNECTED = 4
+} sl_queue_change_kind_t;
+
+/** Borrowed owner-thread update. Non-snapshot updates must chain their previous
+ * revision to the current mirror. A gap preserves the view and schedules one
+ * explicit resynchronization request at the next native dispatch boundary.
+ * Snapshots belong to the same ordered subscription, not the response stream.
+ */
+typedef struct sl_queue_change {
+  /** Snapshot, delta, state transition or disconnect. */
+  sl_queue_change_kind_t kind;
+  /** Previous queue revision for deltas, otherwise NULL. */
+  const char *previous_revision;
+  /** New queue revision, except for disconnect. */
+  const char *revision;
+  /** Bounded entries for a snapshot, or the single UPSERT entry. */
+  const sl_queue_entry_t *entries;
+  /** Snapshot entry count, one for UPSERT, zero otherwise. */
+  size_t count;
+  /** Ordered UPSERT position; existing entries cannot move. */
+  size_t index;
+  /** Removed backend identity for REMOVE. */
+  const char *item_id;
+  /** Causing request from this attachment, or zero for another origin. */
+  sl_queue_request_id_t request_id;
+  /** Backend's total accepted pending count, possibly larger than the view. */
+  size_t total_count;
+  /** Authoritative backlog stopped state. */
+  int stopped;
+  /** Authoritative auto-approval policy. */
+  int auto_approval;
+} sl_queue_change_t;
+
+/** Constructor-selected backend callbacks. Copy at construction; context stays
+ * borrowed until detach returns during editor destruction. Callbacks run only
+ * on the editor owner thread, never block, reenter Softline or synchronously
+ * apply a result/update. A bridge uses fd watches for deferred inbound work. */
+typedef struct sl_queue_backend {
+  /** Handoff callback; SL_OK means copied/enqueued, not admitted. */
+  int (*request)(void *context, const sl_queue_request_t *request);
+  /** Cancel/unsubscribe frontend observations; never clear/stop the backend. */
+  void (*detach)(void *context);
+  /** Supported operations: bit (1UL << sl_queue_operation_t). */
+  unsigned long capabilities;
+  /** Bound on ordinary retained requests; zero selects 16. Three additional
+   * slots reserve one SYNCHRONIZE, RESOLVE and STOP each, so ordinary pressure
+   * cannot prevent reconciliation or stopping before an edit is released. */
+  size_t max_pending_requests;
+} sl_queue_backend_t;
+
+/** Borrowed backend-mode state, valid until the next result/update/request. */
+typedef struct sl_queue_backend_info {
+  /** Nonzero when the constructor selected a backend. */
+  int enabled;
+  /** Nonzero after a valid snapshot and until disconnect/gap. */
+  int synchronized;
+  /** Current opaque queue revision, or NULL before the initial snapshot. */
+  const char *revision;
+  /** Accepted entries currently mirrored, excluding provisional requests. */
+  size_t visible_count;
+  /** Authoritative total accepted pending count. */
+  size_t total_count;
+  /** Retained requests, including rejected text and unknown outcomes. */
+  size_t pending_count;
+} sl_queue_backend_info_t;
+
+/** Borrowed retained request, valid until the next backend operation. */
+typedef struct sl_queue_pending_info {
+  /** Original request. Strings are owned by the handle. */
+  sl_queue_request_t request;
+  /** Nonzero while waiting for an explicit response. */
+  int pending;
+  /** Last response status when pending is zero. */
+  sl_queue_result_status_t status;
+  /** Optional backend/transport diagnostic. */
+  const char *reason;
+} sl_queue_pending_info_t;
 
 /**
  * Renderer-owned visual treatment for the complete interactive prompt UI.
@@ -502,10 +866,11 @@ typedef struct sl_config {
   int live_scroll_region;
   /** Maximum retained history entries; default is 100. */
   int history_max_len;
-  /** Maximum editable line length in bytes; default is 4096. */
+  /** Maximum complete editable draft in UTF-8 bytes; default is 131072. */
   size_t line_max_len;
-  /** Non-zero enables Tab queueing while the interactive terminal editor is
-   * active. Editing is plain when either input or output is not a TTY. */
+  /** Non-zero enables the interactive prompt queue. The default keymap uses
+   * Tab to enqueue, after matching completion. Editing is plain when either
+   * input or output is not a TTY. */
   int prompt_queue;
   /** Maximum queued prompts; default is 64 when queueing is enabled. */
   int prompt_queue_max_entries;
@@ -550,6 +915,13 @@ typedef struct sl_config {
    * `/tmp/softline/` + `*` + `/image` produces
    * `/tmp/softline/{xid}/image.png`. */
   const char *image_paste_path_template;
+  /** NULL keeps the native local queue. A backend requires prompt_queue=1 and
+   * selects external authority for this handle's entire lifetime. */
+  const sl_queue_backend_t *queue_backend;
+  /** Borrowed backend callback context, released only after editor teardown. */
+  void *queue_backend_context;
+  /** OSC 8 policy; default OFF. See sl_get_osc8_info(). */
+  sl_osc8_mode_t osc8_mode;
 } sl_config_t;
 
 /**
@@ -633,6 +1005,9 @@ struct sl {
   int (*submit)(sl_t *self);
   /** Cancel the active readline() call from a callback or idle hook. */
   int (*cancel)(sl_t *self);
+  /** Suspend the active editor from an owner-thread callback, preserving the
+   * draft/undo and returning SL_READLINE_SUSPENDED without stopping backlog. */
+  int (*suspend)(sl_t *self);
   /** Stream callback output above the active prompt. Ordinary readline clears
    * and redraws by default, or uses an enabled live scroll region after
    * reaching the terminal bottom. Native chat retains its prompt frame and
@@ -822,7 +1197,8 @@ struct sl {
   /** Forward exactly length bytes into the open session. Complete parsed
    * input is visible before return; a write boundary adds no newline or
    * document boundary. bytes may be NULL only when
-   * length is zero. Input must be printable UTF-8, LF/CR/Tab, or ANSI SGR;
+   * length is zero. Input must be printable UTF-8, LF/CR/Tab, ANSI SGR, or
+   * OSC 8 when enabled by set_osc8_mode();
    * unsupported terminal controls fail with SL_ERROR_INVALID. Malformed UTF-8
    * also fails. Native LF positioning follows the output TTY's OPOST/ONLCR
    * settings without altering producer bytes. Kernel tab expansion (TAB3 or
@@ -927,6 +1303,33 @@ struct sl {
    * search to let Enter select an editable match before submission guards run.
    * Read-only; call on the editor-owner thread. */
   int (*history_search_active)(const sl_t *self);
+  /** Hand off a typed backend request; see sl_queue_backend_request(). */
+  int (*queue_backend_request)(sl_t *self, const sl_queue_request_t *request,
+                               sl_queue_request_id_t *out_request_id);
+  /** Apply an asynchronous response on the owner thread. */
+  int (*queue_backend_result)(sl_t *self, const sl_queue_result_t *result);
+  /** Apply a bounded ordered backend observation on the owner thread. */
+  int (*queue_backend_update)(sl_t *self, const sl_queue_change_t *change);
+  /** Inspect backend mode, synchronization and bounded pending counts. */
+  int (*queue_backend_info)(const sl_t *self, sl_queue_backend_info_t *out);
+  /** Inspect one borrowed accepted backend entry in view order. */
+  int (*queue_backend_entry)(const sl_t *self, size_t index,
+                             sl_queue_entry_t *out);
+  /** Inspect retained requests, oldest first. */
+  int (*queue_backend_pending)(const sl_t *self, size_t index,
+                               sl_queue_pending_info_t *out);
+  /** Recover definitely rejected proposal text into an empty draft, without
+   * backend mutation or automatic retry. Unknown outcomes cannot be recovered.
+   */
+  int (*queue_backend_recover)(sl_t *self, sl_queue_request_id_t request_id);
+  /** Replace trigger registrations; see sl_set_completion_providers(). */
+  int (*set_completion_providers)(sl_t *self,
+                                  const sl_completion_provider_t *providers,
+                                  size_t count);
+  /** Set hyperlink policy between streams; see sl_set_osc8_mode(). */
+  int (*set_osc8_mode)(sl_t *self, sl_osc8_mode_t mode);
+  /** Read cached hyperlink policy/detection; see sl_get_osc8_info(). */
+  int (*get_osc8_info)(const sl_t *self, sl_osc8_info_t *info);
 };
 
 /**
@@ -934,12 +1337,13 @@ struct sl {
  * limits.
  *
  * Passing NULL is ignored. Defaults are stdin/stdout file descriptors,
- * ordinary readline rendering, 100 history entries, and a 4096-byte editable
+ * ordinary readline rendering, 100 history entries, and a 128 KiB editable
  * line. Prompt queueing and live scroll regions are disabled; the queue
  * defaults to a capacity of 64 and three previews when enabled. The prompt
  * theme is SL_PROMPT_THEME_DEFAULT, the status line and spinner are disabled,
  * busy is false, the idle status marker is '+', and clear_prompt_on_exit is
- * zero. X11 image paste is enabled and uses the XDG cache directory.
+ * zero. X11 image paste is enabled and uses the XDG cache directory. OSC 8
+ * hyperlinks are disabled (SL_OSC8_OFF).
  */
 void sl_config_init(sl_config_t *config);
 
@@ -968,7 +1372,8 @@ sl_t *sl_create_with_config(const sl_config_t *config);
  * release. Ctrl-C restores terminal state before raising SIGINT. A returning
  * handler leaves an existing native output session available.
  * SL_KEY_ACTION_SUSPEND retains the editor for the next
- * readline()/next_prompt(), before queued delivery. Terminal handoff and
+ * readline()/next_prompt(), before queued delivery, including completion
+ * snapshots/Tab cycles and any unstripped trigger. Terminal handoff and
  * producer coordination belong to the application, outside callbacks, using
  * output_stream_end()/begin().
  */
@@ -984,7 +1389,10 @@ char *sl_readline(sl_t *self, const char *prompt);
  * Otherwise submitted editor text is direct. On interactive handles,
  * next_prompt() retains terminal input ownership between results; sl_destroy()
  * or closing an idle native output session restores the terminal.
- * source may be NULL.
+ * source may be NULL. With a constructor-selected queue backend, accepted work
+ * is never returned as local model input: the editor stays active across
+ * offers and applies deferred backend observations through owner callbacks.
+ * Backend editing requires a TTY; headless hosts use typed backend requests.
  */
 char *sl_next_prompt(sl_t *self, const char *prompt,
                      sl_prompt_source_t *source);
@@ -1089,10 +1497,12 @@ int sl_set_live_scroll_region(sl_t *self, int enabled);
  * A 20-character xid replaces `*`, then `.png` or `.jpeg` is appended. */
 int sl_set_image_paste_path_template(sl_t *self, const char *path_template);
 
-/** Enable/configure Tab queueing for the interactive terminal editor;
+/** Enable/configure native local queueing for the interactive terminal editor;
  * disabling clears the queue. Editing is plain when either input or output is
  * not a TTY. Reducing the capacity below the current queue length returns
- * SL_ERROR_INVALID. */
+ * SL_ERROR_INVALID. Constructor-selected backend handles reject changing queue
+ * enablement/capacity with SL_ERROR_UNSUPPORTED; use their bounded view and
+ * typed requests for backend mutations. */
 int sl_set_prompt_queue(sl_t *self, int enabled, int max_entries,
                         int preview_entries);
 
@@ -1107,19 +1517,22 @@ int sl_prompt_queue_peek(const sl_t *self, size_t index, char **out);
 
 /** Insert text with held 0 or 1 and optionally return its new identity.
  * Index zero is oldest. out_id is zeroed on failure. Auto-approval overrides
- * a requested hold. */
+ * a requested hold. Native local queues only; backend handles use typed OFFER
+ * requests and return SL_ERROR_UNSUPPORTED here. */
 int sl_prompt_queue_insert(sl_t *self, size_t index, const char *text, int held,
                            sl_prompt_id_t *out_id);
 
-/** Append text with held 0 or 1 and optionally return its new identity.
- * out_id is zeroed on failure; held entries require approval. Auto-approval
- * overrides a requested hold. */
+/** Append nonempty text within line_max_len, with held 0 or 1, and optionally
+ * return its new identity. out_id is zeroed on failure; held entries require
+ * approval. Auto-approval overrides a requested hold. Native local queues only;
+ * backend handles use typed OFFER requests. */
 int sl_prompt_queue_append(sl_t *self, const char *text, int held,
                            sl_prompt_id_t *out_id);
 
 /** Inject an ordinary queued message, held unless auto_approval is enabled.
  * Queueing must be enabled. Call on the editor owner thread, including from
- * a watch callback. out_id is optional and zeroed on failure. */
+ * a watch callback. out_id is optional and zeroed on failure. For native local
+ * queues; backend handles receive accepted entries through ordered updates. */
 int sl_inject_queued_prompt(sl_t *self, const char *text,
                             sl_prompt_id_t *out_id);
 /** Inject a steering message with the same approval policy and stable ID.
@@ -1129,15 +1542,18 @@ int sl_inject_steer_prompt(sl_t *self, const char *text,
 /** Set auto_approval for this conversation's entire instance (strict 0 or 1).
  * Initially off. Enabling approves all waiting and edited entries as well as
  * future injections, without changing delivery intent or submitting a draft.
- * Turning it off affects subsequent approval requests only. */
+ * Turning it off affects subsequent approval requests only. Backend handles
+ * use SL_QUEUE_AUTO_APPROVAL and observe the accepted state in updates. */
 int sl_set_auto_approval(sl_t *self, int enabled);
 /** Read auto_approval into out; invalid arguments return SL_ERROR_INVALID. */
 int sl_get_auto_approval(const sl_t *self, int *out);
 
-/** Replace queue index with nonempty text. Index zero is the oldest entry. */
+/** Replace native local queue index with nonempty text within line_max_len.
+ * Index zero is the oldest entry. Backend handles use typed edit requests. */
 int sl_prompt_queue_replace(sl_t *self, size_t index, const char *text);
 
-/** Remove queue index and transfer its softline-allocated text through out. */
+/** Remove native local queue index and transfer its allocated text through out.
+ * Unsupported in backend mode: the backend alone owns execution/delivery. */
 int sl_prompt_queue_take(sl_t *self, size_t index, char **out);
 
 /** Inspect one queued entry's delivery intent. New entries are QUEUED. */
@@ -1169,10 +1585,14 @@ int sl_prompt_queue_info(const sl_t *self, size_t index,
 int sl_prompt_queue_draft_info(const sl_t *self,
                                sl_prompt_queue_entry_info_t *out);
 /** Approve the oldest pending identity; does not force delivery. Later held
- * identities fail with SL_ERROR_INVALID, preserving FIFO approval order. */
+ * identities fail with SL_ERROR_INVALID locally or SL_ERROR_CONFLICT in backend
+ * mode, preserving FIFO approval order. Backend SL_OK means asynchronous
+ * handoff only; approval changes arrive through accepted updates. */
 int sl_prompt_queue_approve(sl_t *self, sl_prompt_id_t id);
 /** Remove an identity or clear its active edit. A held identity must be the
- * oldest pending approval; later held identities fail with SL_ERROR_INVALID. */
+ * oldest pending approval; later held identities fail with SL_ERROR_INVALID
+ * locally or SL_ERROR_CONFLICT in backend mode. Backend SL_OK means withdrawal
+ * handoff only; the backend retains authority over the accepted entry. */
 int sl_prompt_queue_reject(sl_t *self, sl_prompt_id_t id);
 /** Last read/take identity, or zero for direct input, failure or cancellation.
  * IDs are handle-local, monotonic, never reused, and bounded by LONG_MAX. */
@@ -1250,15 +1670,16 @@ int sl_set_status_elements(sl_t *self, const char *const *elements,
 int sl_set_status_element(sl_t *self, size_t index, const char *element);
 
 /** Set the status-line busy state. With the spinner disabled, busy renders x;
- * idle renders the configured marker or a blank reserved slot by default. In
- * the queued-turns profile with queueing enabled, this is the native turn
+ * idle renders the configured marker (default '+'), or a blank slot for '\0'.
+ * In the queued-turns profile with queueing enabled, this is the native turn
  * lifecycle signal: busy retains turns and idle releases one FIFO turn. */
 int sl_set_status_busy(sl_t *self, int busy);
 
 /** Enable or disable the 500ms /-\\| spinner used while status is busy. */
 int sl_set_status_spinner(sl_t *self, int enabled);
 
-/** Set a printable ASCII idle marker, or '\0' for a blank reserved slot. */
+/** Set a printable ASCII idle marker (default '+'), or '\0' for a blank slot.
+ */
 int sl_set_status_idle_marker(sl_t *self, char marker);
 
 /** Register or clear an idle callback for this handle. */
@@ -1288,11 +1709,13 @@ int sl_watch_clear(sl_t *self);
 int sl_bind_key(sl_t *self, sl_key_t key, sl_key_callback_t callback,
                 void *userdata);
 
-/** Insert text bytes at the active cursor position during readline(),
- * callbacks, or tests. */
+/** Insert text bytes at the active cursor on the editor-owner thread. During
+ * active or suspended editing, mutations retain undo support. Matching spaces
+ * can continue completion phrases; a separating space ends the activation. */
 int sl_insert(sl_t *self, const char *text);
 
-/** Replace the active buffer with text bytes and move the cursor to the end. */
+/** Replace the active buffer with text bytes and move the cursor to the end.
+ * Undoable during active/suspended editing; ends any completion activation. */
 int sl_set_buffer(sl_t *self, const char *text);
 
 /** Return the active buffer, owned by the handle until it is changed or
@@ -1302,8 +1725,8 @@ const char *sl_buffer(const sl_t *self);
 /** Return the active cursor position as a byte offset into sl_buffer(). */
 size_t sl_cursor(const sl_t *self);
 
-/** Set cursor to a byte offset; invalid offsets are clamped to valid text
- * boundaries. */
+/** Set cursor to a byte offset; invalid offsets are clamped to valid UTF-8
+ * cluster boundaries. Ends typing coalescing and the current Tab cycle. */
 int sl_set_cursor(sl_t *self, size_t cursor);
 
 /** Submit the active readline() buffer or reverse-search match from a callback.
@@ -1313,6 +1736,12 @@ int sl_submit(sl_t *self);
 
 /** Cancel the active readline() operation from inside a callback. */
 int sl_cancel(sl_t *self);
+
+/** Request the existing terminal-handoff suspension from an owner-thread idle
+ * or fd callback. Like SL_KEY_ACTION_SUSPEND, preserve the draft, cursor, undo,
+ * search and queue context. Returns SL_ERROR_INVALID outside active readline.
+ * Run child processes after readline returns SL_READLINE_SUSPENDED. */
+int sl_suspend(sl_t *self);
 
 /** Write callback-produced chunks above the active prompt. Ordinary readline
  * clears and redraws by default, or uses an
@@ -1362,37 +1791,36 @@ int sl_output_stream_reconcile(sl_t *self);
 
 /** Forward length bytes immediately to the live output session. Zero length
  * is a no-op; no newline or response boundary is implied. Valid bytes are
- * printable UTF-8, LF/CR/Tab, and ANSI SGR; malformed or unsupported control
- * sequences report SL_ERROR_INVALID. A failed write may have emitted a prefix,
- * while a successful write has emitted all complete input units. Native LF
- * positioning follows the output TTY's OPOST/ONLCR settings; producer bytes
- * are unchanged. Kernel tab expansion (TAB3 or OXTABS) is temporarily disabled
- * while Softline owns raw mode and restored on exit; OPOST/ONLCR are preserved
- * and tabs reach the terminal unchanged. Native writes after raw-mode release
- * disable expansion for the write and restore it before returning, without
- * flushing pending input. Feed calls add no intentional delay and never
- * request or wait for terminal cursor replies, including on resize. Cursor
- * advances use local scalar cell widths shared with prompt layout, without
- * retaining producer text, glyph spans or grapheme tails. Terminal Unicode
- * versions and cluster shaping can differ from the Unicode 16.0 accounting.
- * Wrapping remains
- * producer/terminal-owned. A physical resize can race the VT write and
- * misplace even ASCII output; this is an accepted concurrency limit.
- * A retained frame resized without an input-owned observation, including after
- * readline returns, uses a delta estimate. Earlier hard-ended ASCII reflow or
- * unknown terminal history can misplace continuation even after resize settles.
- * The active input loop observes resize before dispatching producer watches.
- * Synchronous producers use sl_output_stream_reconcile() after resize settles
- * and before the next feed. Feeds never observe input or model transcript text.
- * Width reflow of an unfinished Unicode/tab line
- * can misplace continuation, including CR tails; its tracked
- * column is retained and clamped only if offscreen. No grapheme buffering or
- * renderer-specific wrapping is used. At a known ASCII right edge with an
- * active prompt, a later printable continuation uses CR and IND after the
- * cursor handoff. This hard row boundary can remain split after width growth,
- * and a Unicode cluster split there may lose its attachment. At the bottom
- * output margin, native reflow differs between terminals; width growth may
- * leave a continuation on a separate row. A last-column report cannot
+ * printable UTF-8, LF/CR/Tab, ANSI SGR, and opt-in OSC 8; malformed or
+ * unsupported control sequences report SL_ERROR_INVALID. A failed write may
+ * have emitted a prefix, while a successful write has emitted all complete
+ * input units. Native LF positioning follows the output TTY's OPOST/ONLCR
+ * settings; producer bytes are unchanged. Kernel tab expansion (TAB3 or OXTABS)
+ * is temporarily disabled while Softline owns raw mode and restored on exit;
+ * OPOST/ONLCR are preserved and tabs reach the terminal unchanged. Native
+ * writes after raw-mode release disable expansion for the write and restore it
+ * before returning, without flushing pending input. Feed calls add no
+ * intentional delay and never request or wait for terminal cursor replies,
+ * including on resize. Cursor advances use local scalar cell widths shared with
+ * prompt layout, without retaining producer text, glyph spans or grapheme
+ * tails. Terminal Unicode versions and cluster shaping can differ from the
+ * Unicode 16.0 accounting. Wrapping remains producer/terminal-owned. A physical
+ * resize can race the VT write and misplace even ASCII output; this is an
+ * accepted concurrency limit. A retained frame resized without an input-owned
+ * observation, including after readline returns, uses a delta estimate. Earlier
+ * hard-ended ASCII reflow or unknown terminal history can misplace continuation
+ * even after resize settles. The active input loop observes resize before
+ * dispatching producer watches. Synchronous producers use
+ * sl_output_stream_reconcile() after resize settles and before the next feed.
+ * Feeds never observe input or model transcript text. Width reflow of an
+ * unfinished Unicode/tab line can misplace continuation, including CR tails;
+ * its tracked column is retained and clamped only if offscreen. No grapheme
+ * buffering or renderer-specific wrapping is used. At a known ASCII right edge
+ * with an active prompt, a later printable continuation uses CR and IND after
+ * the cursor handoff. This hard row boundary can remain split after width
+ * growth, and a Unicode cluster split there may lose its attachment. At the
+ * bottom output margin, native reflow differs between terminals; width growth
+ * may leave a continuation on a separate row. A last-column report cannot
  * distinguish Unicode pending wrap from a cursor before the final cell;
  * continuation can overwrite that cell. These are intentional opaque-feed
  * limits. Transcript cells are never reconstructed, cleared or replayed to
@@ -1430,11 +1858,96 @@ int sl_set_quoted_prompt_prefix(sl_t *self, const char *prefix);
 /** Override per-theme quote colours, or pass NULL to restore theme defaults. */
 int sl_set_quoted_prompt_style(sl_t *self, const sl_quote_style_t *style);
 
+/** Atomically replace completion providers on the owner thread. NULL/count
+ * zero clears them; invalid fields, duplicate triggers or copy failure keep
+ * the previous registry. Registration changes end the current completion.
+ * Each activation copies one callback-produced list, reused through typing,
+ * Backspace, Undo and Tab cycling. Typed/yanked/host-inserted whitespace keeps
+ * the activation when a candidate matches through it with a suffix remaining;
+ * otherwise it ends the activation. Deleting the trigger, moving the cursor
+ * outside its token, and submitting/replacing/queueing the draft also end it.
+ * Candidates include the trigger and contain printable UTF-8, LF/Tab, bounded
+ * by line_max_len. The first match is a dim
+ * inline ghost; Tab accepts it and repeated Tabs cycle the original matches.
+ * Editing/navigation resets that cycle but retains the activation list inside
+ * its token. Enter submits actual text, never the ghost. strip_trigger is
+ * undoable and applied on normal exit or submission; replacing/discarding the
+ * draft needs no extra deletion. Failed providers are not retried until another
+ * activation. Optional expand callbacks run on Tab before rotation, including
+ * for fully present unique candidates. Deeper lists are separate snapshots;
+ * Backspace selects the original parent list. Without further candidates, a
+ * fully present unique match or no match lets Tab reach ordinary host/queue
+ * handling. */
+int sl_set_completion_providers(sl_t *self,
+                                const sl_completion_provider_t *providers,
+                                size_t count);
+
+/** Set OSC 8 policy on the owner thread between output streams. Refused with
+ * SL_ERROR_NOT_READY while a stream, partial control or producer link is open.
+ * Refreshes passive detection from output_fd and the terminal environment.
+ * ON overrides detection; AUTO stays disabled for unknown, redirected and
+ * unverified multiplexer paths. No terminal query or input wait is performed.
+ */
+int sl_set_osc8_mode(sl_t *self, sl_osc8_mode_t mode);
+
+/** Return cached detection and effective feed policy without terminal I/O.
+ * detected means a recognized environment, not guaranteed terminal support.
+ * Pass enabled to a renderer's hyperlink option. Only OSC 8 is enabled: other
+ * OSC controls remain rejected. Native feed links cannot leak into editor UI.
+ * Complete controls are bounded by SL_OSC8_MAX_BYTES; incomplete controls alone
+ * may be retained across writes. Producer text is never buffered for replay.
+ */
+int sl_get_osc8_info(const sl_t *self, sl_osc8_info_t *info);
+
 /** Return the status of the most recent readline() call on this handle. */
 sl_readline_status_t sl_last_readline_status(const sl_t *self);
 
 /** Return the most recent diagnostic string owned by the handle, or NULL. */
 const char *sl_last_error(const sl_t *self);
+
+/** Hand off one backend operation on the owner thread. Softline assigns the
+ * request identity and copies bounded fields before calling the bridge. SL_OK
+ * means handoff only. Synchronous reentry from the bridge is rejected.
+ * Typed BEGIN_EDIT does not request a native editor; its accepted request
+ * retires without readline, freeing the ordinary retention slot. END_EDIT and
+ * ABORT_EDIT require the owned edit hold in the accepted mirror. */
+int sl_queue_backend_request(sl_t *self, const sl_queue_request_t *request,
+                             sl_queue_request_id_t *out_request_id);
+
+/** Apply one deferred response without delivering/echoing model text. Duplicate
+ * completed responses are harmless. Results never mutate the accepted mirror
+ * or synchronously invoke the outbound callback. Native edit intent is retained
+ * until its exact owned hold opens, is cancelled, or is reconciled as
+ * unavailable. A late accepted acquisition missing from the view requests one
+ * fresh snapshot at native dispatch; an existing newer draft remains editable
+ * until cleared or submitted. Typed BEGIN_EDIT acceptance retires without
+ * opening an editor.
+ */
+int sl_queue_backend_result(sl_t *self, const sl_queue_result_t *result);
+
+/** Copy one ordered snapshot/delta. Validation/allocation failure preserves the
+ * previous view. Revision gaps return SL_ERROR_CONFLICT and require a snapshot.
+ * This method never invokes the outbound callback. */
+int sl_queue_backend_update(sl_t *self, const sl_queue_change_t *change);
+
+/** Inspect a borrowed backend-mode view; local handles report enabled=0. */
+int sl_queue_backend_info(const sl_t *self, sl_queue_backend_info_t *out);
+
+/** Inspect one borrowed accepted backend entry at zero-based index, including
+ * ID and revision. The view stays valid until the next backend operation. */
+int sl_queue_backend_entry(const sl_t *self, size_t index,
+                           sl_queue_entry_t *out);
+
+/** Inspect retained requests at zero-based index, oldest first. Rejected offers
+ * retain their text; unknown outcomes must be resolved by original request ID.
+ */
+int sl_queue_backend_pending(const sl_t *self, size_t index,
+                             sl_queue_pending_info_t *out);
+
+/** Recover a rejected text proposal into an empty ordinary draft without
+ * resubmitting. The corresponding retained rejection is removed only after the
+ * copy succeeds. */
+int sl_queue_backend_recover(sl_t *self, sl_queue_request_id_t request_id);
 
 #ifdef __cplusplus
 }

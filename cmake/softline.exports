@@ -17,6 +17,13 @@ sl_history_save
 sl_history_set_max_len
 sl_insert
 sl_last_error
+sl_queue_backend_request
+sl_queue_backend_result
+sl_queue_backend_update
+sl_queue_backend_info
+sl_queue_backend_entry
+sl_queue_backend_pending
+sl_queue_backend_recover
 sl_last_readline_status
 sl_next_prompt
 sl_output_stream_begin
@@ -54,6 +61,9 @@ sl_set_prompt_queue_profile
 sl_set_prompt_theme
 sl_set_quoted_prompt_prefix
 sl_set_quoted_prompt_style
+sl_set_completion_providers
+sl_set_osc8_mode
+sl_get_osc8_info
 sl_set_screen_width
 sl_set_status_busy
 sl_set_status_element
@@ -65,6 +75,9 @@ sl_set_status_message
 sl_set_status_message_prefix
 sl_set_status_message_colors
 sl_submit
+sl_suspend
+sl_terminal_handoff
+sl_terminal_local
 sl_watch_add
 sl_watch_clear
 sl_watch_modify

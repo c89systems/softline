@@ -274,6 +274,224 @@ cleanup:
   return failed || errors;
 }
 
+static int inspect_draft(struct editor *e, const char *text, size_t cursor) {
+  char expected[128];
+  size_t i, length = strlen(text);
+  unsigned long sum = 0;
+  double deadline = now() + 5;
+  for (i = 0; i < length; ++i)
+    sum = (sum + (unsigned char)text[i]) % 65521;
+  snprintf(expected, sizeof(expected), "draft-%lu-%lu-%lu",
+           (unsigned long)length, (unsigned long)cursor, sum);
+  v.send(e->screen.terminal, "\033t", 2);
+  do {
+    const char *title = v.title(e->screen.terminal);
+    if (title && !strcmp(title, expected))
+      return 0;
+    pump_once();
+  } while (now() < deadline);
+  fprintf(stderr, "Draft mismatch: expected %s, got %s\n", expected,
+          v.title(e->screen.terminal));
+  return 1;
+}
+static char *visible_editor(struct editor *e) {
+  long first = (long)v.adjustment_value(v.adjustment(e->screen.terminal));
+  return v.text(e->screen.terminal, first, 0,
+                first + v.rows(e->screen.terminal) - 1,
+                v.columns(e->screen.terminal), NULL, NULL, NULL);
+}
+static int viewport_rows(struct editor *e, int first, int last, int cursor) {
+  long column, row;
+  char *frame;
+  char marker[32];
+  int i, failed = 0;
+  v.cursor(e->screen.terminal, &column, &row);
+  row -= cursor - first;
+  frame = v.text(e->screen.terminal, row, 0, row + last - first,
+                 v.columns(e->screen.terminal), NULL, NULL, NULL);
+  for (i = 0; i < 40; ++i) {
+    snprintf(marker, sizeof(marker), "line-%02d abcdefghij", i);
+    if (!!strstr(frame, marker) != (i >= first && i <= last))
+      failed = 1;
+  }
+  if (failed)
+    fprintf(stderr, "Expected input rows %d..%d:\n%s\n", first, last, frame);
+  v.free(frame);
+  return failed;
+}
+static int case_viewport(const char *example, int native) {
+  struct editor e;
+  char source[2048], *large = NULL, *frame;
+  size_t used = 0;
+  int i, failed = 1;
+  e.child = -1;
+  if (start_editor(&e, example, 80, "retained marker\r\n", "", "",
+                   native ? "--viewport-native" : "--viewport"))
+    goto cleanup;
+  resize_geometry(&e.screen, 80, 24);
+  if (rendered(&e))
+    goto cleanup;
+  for (i = 0; i < 40; ++i)
+    used += (size_t)snprintf(source + used, sizeof(source) - used,
+                             "line-%02d abcdefghij%s", i, i == 39 ? "" : "\n");
+  v.send(e.screen.terminal, "\033[200~", 6);
+  v.send(e.screen.terminal, source, (long)used);
+  v.send(e.screen.terminal, "\033[201~", 6);
+  if (rendered(&e) || inspect_draft(&e, source, used) ||
+      viewport_rows(&e, 28, 39, 39))
+    goto cleanup;
+  {
+    struct snapshot history = transcript(&e.screen);
+    if (strstr(history.text, "line-00")) {
+      fprintf(stderr, "Hidden input was painted into terminal history\n");
+      goto cleanup;
+    }
+  }
+  for (i = 0; i < 5; ++i)
+    v.send(e.screen.terminal, "\033[A", 3);
+  if (rendered(&e) || viewport_rows(&e, 28, 39, 34))
+    goto cleanup;
+  for (i = 0; i < 7; ++i)
+    v.send(e.screen.terminal, "\033[A", 3);
+  if (rendered(&e) || viewport_rows(&e, 27, 38, 27))
+    goto cleanup;
+  v.send(e.screen.terminal, "\033o", 2);
+  if (rendered(&e) || viewport_rows(&e, 27, 38, 27))
+    goto cleanup;
+  frame = visible_editor(&e);
+  i = strstr(frame, "producer marker") != NULL;
+  v.free(frame);
+  if (!i)
+    goto cleanup;
+  for (i = 0; i < 12; ++i)
+    v.send(e.screen.terminal, "\033[B", 3);
+  if (rendered(&e) || viewport_rows(&e, 28, 39, 39) ||
+      inspect_draft(&e, source, used))
+    goto cleanup;
+  resize_geometry(&e.screen, 80, 10);
+  if (rendered(&e) || viewport_rows(&e, 35, 39, 39))
+    goto cleanup;
+  resize_geometry(&e.screen, 80, 24);
+  if (rendered(&e) || viewport_rows(&e, 28, 39, 39))
+    goto cleanup;
+  v.send(e.screen.terminal, "\033g", 2);
+  if (rendered(&e) || viewport_rows(&e, 0, 11, 0) ||
+      inspect_draft(&e, source, 0))
+    goto cleanup;
+  v.send(e.screen.terminal, "\033h\033n", 4);
+  if (rendered(&e) || inspect_draft(&e, "", 0))
+    goto cleanup;
+  used = 0;
+  for (i = 0; i < 40; ++i)
+    used += (size_t)snprintf(source + used, sizeof(source) - used, "\t中é%s",
+                             i == 39 ? "END" : "\n");
+  v.send(e.screen.terminal, "\033[200~", 6);
+  v.send(e.screen.terminal, source, (long)used);
+  v.send(e.screen.terminal, "\033[201~", 6);
+  resize_geometry(&e.screen, 16, 8);
+  if (rendered(&e) || inspect_draft(&e, source, used))
+    goto cleanup;
+  resize_geometry(&e.screen, 80, 24);
+  if (rendered(&e) || inspect_draft(&e, source, used))
+    goto cleanup;
+  v.send(e.screen.terminal, "\033g", 2);
+  if (rendered(&e) || inspect_draft(&e, source, 0))
+    goto cleanup;
+  v.send(e.screen.terminal, "\033h\033n", 4);
+  /* A real maximum-size paste, followed by an over-limit UTF-8 character.
+   * No text staging in the fixture: the actual terminal/input path handles it.
+   */
+  large = malloc(131073);
+  if (!large)
+    goto cleanup;
+  memset(large, 'x', 131070);
+  memcpy(large + 131070, "é", 3);
+  v.send(e.screen.terminal, "\033[200~", 6);
+  v.send(e.screen.terminal, large, 131072);
+  v.send(e.screen.terminal, "中\033[201~", 9);
+  if (rendered(&e) || inspect_draft(&e, large, 131072))
+    goto cleanup;
+  resize_geometry(&e.screen, 24, 8);
+  if (rendered(&e) || inspect_draft(&e, large, 131072))
+    goto cleanup;
+  resize_geometry(&e.screen, 80, 24);
+  if (rendered(&e) || inspect_draft(&e, large, 131072))
+    goto cleanup;
+  v.send(e.screen.terminal, "\037", 1);
+  if (rendered(&e) || inspect_draft(&e, "", 0))
+    goto cleanup;
+  /* Undo clears the paste as one edit. The saved whole draft can also round
+   * trip at the limit without rendering hidden rows into terminal history. */
+  v.send(e.screen.terminal, "\033[200~", 6);
+  v.send(e.screen.terminal, large, 131072);
+  v.send(e.screen.terminal, "\033[201~\033k\033j", 10);
+  if (rendered(&e) || inspect_draft(&e, large, 131072))
+    goto cleanup;
+  /* The maximum number of hard rows uses heap layout metadata and the same
+   * bounded viewport, including when navigating to either end. */
+  v.send(e.screen.terminal, "\033n", 2);
+  memset(large, '\n', 131072);
+  v.send(e.screen.terminal, "\033[200~", 6);
+  v.send(e.screen.terminal, large, 131072);
+  v.send(e.screen.terminal, "\033[201~", 6);
+  if (rendered(&e) || inspect_draft(&e, large, 131072))
+    goto cleanup;
+  v.send(e.screen.terminal, "\033g", 2);
+  if (rendered(&e) || inspect_draft(&e, large, 0))
+    goto cleanup;
+  v.send(e.screen.terminal, "\033h\037\033j", 5);
+  memset(large, 'x', 131070);
+  memcpy(large + 131070, "é", 3);
+  if (rendered(&e) || inspect_draft(&e, large, 131072))
+    goto cleanup;
+  v.send(e.screen.terminal, "\r", 1);
+  if (wait_marker(&e, "submitted-length: 131072"))
+    goto cleanup;
+  failed = 0;
+cleanup:
+  if (failed)
+    fprintf(stderr, "Viewport case failed (%s)\n",
+            native ? "native" : "readline");
+  free(large);
+  stop_editor(&e);
+  return failed || errors;
+}
+
+static int completion_finish(const char *fixture) {
+  struct editor e;
+  struct snapshot current;
+  int failed = 1;
+  if (start_editor(&e, fixture, 16, "", "h", "", "--completion"))
+    goto cleanup;
+  current = transcript(&e.screen);
+  if (!strstr(current.text, "world"))
+    goto cleanup;
+  v.send(e.screen.terminal, "ello ", 5);
+  if (rendered(&e))
+    goto cleanup;
+  current = transcript(&e.screen);
+  if (!strstr(current.text, "world")) {
+    fprintf(stderr, "Typed phrase space lost the ghost:\n%s\n", current.text);
+    goto cleanup;
+  }
+  v.send(e.screen.terminal, "\025h", 2);
+  if (rendered(&e))
+    goto cleanup;
+  v.send(e.screen.terminal, "\r", 1);
+  if (wait_marker(&e, "HOST_AFTER"))
+    goto cleanup;
+  current = transcript(&e.screen);
+  if (strstr(current.text, "world") || strstr(current.text, "suggestion") ||
+      !strstr(current.text, "softline> h\nsubmitted: h\nHOST_AFTER\n")) {
+    fprintf(stderr, "Ghost survived editor finish:\n%s\n", current.text);
+    goto cleanup;
+  }
+  failed = 0;
+cleanup:
+  stop_editor(&e);
+  return failed || errors;
+}
+
 int main(int argc, char **argv) {
   const char *sources[] = {
       "one two three four", "alpha beta gamma delta epsilon zeta eta",
@@ -283,6 +501,10 @@ int main(int argc, char **argv) {
   int filled;
   if ((argc != 2 && argc != 3) || load())
     return 2;
+  if (argc == 3 && !strcmp(argv[2], "completion-finish"))
+    return completion_finish(argv[1]);
+  if (argc == 3 && !strcmp(argv[2], "viewport"))
+    return case_viewport(argv[1], 0) || case_viewport(argv[1], 1);
   if (argc == 3 && !strcmp(argv[2], "themes")) {
     const char *drafts[] = {"", "a", "abc", "café 中文 é",
                             "alpha beta gamma delta epsilon zeta eta"};

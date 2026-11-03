@@ -10,7 +10,7 @@ Only the chat examples and integration tests depend on libmdf. A released
 libsoftline, its Lua facade, headers, CMake exports, and package metadata have
 no libmdf dependency.
 
-libmdf 0.17.0 has incremental feed, a bound sink, and in-document width and
+libmdf 0.19.0 has incremental feed, a bound sink, and in-document width and
 margin changes through `set_geometry()`. The chat composer updates both
 renderer geometries on the Softline owner thread before feeding later
 Markdown; Softline reads the terminal dimensions for its native prompt.
@@ -20,7 +20,7 @@ Softline nor the examples recreate or replay an unfinished Markdown document.
 Softline never infers libmdf margins. The example supplies its borrowed stdout
 fd to libmdf's destination-aware ANSI AUTO policy: terminal output is themed,
 and redirected output is escape-free. Renderer handles are rebuilt against
-libmdf 0.17.0's options layout; this private example dependency does not change
+libmdf 0.19.0's options layout; this private example dependency does not change
 Softline's ABI.
 
 ## Generic Softline output session
@@ -221,7 +221,8 @@ accepts one-byte fragments indefinitely.
 The C and Lua surfaces expose a single native chat layout. ABI 1 introduced the
 public `output_stream_reconcile` receiver method. ABI 2 retains it and adds
 per-entry queue approval and stable identities. ABI 3 adds native submission
-policies and per-entry execution/stop state. Equivalent free functions validate NULL handles.
+policies and per-entry execution/stop state. ABI 4 adds constructor-selected
+asynchronous queue backends. Equivalent free functions validate NULL handles.
 Public declarations document ownership, thread context, lifecycle, errors,
 and chunk semantics for clangd. Lua methods document the same contract in the
 Lua reference and adjacent public binding comments. Lua cannot invoke its VM
@@ -234,7 +235,8 @@ The current ABI policy supersedes the earlier development ABI 0 exception.
 The reconciliation method advanced released v0.10.0's ABI 0 to ABI 1 in v0.11.0.
 Queue approval extends that released receiver layout and changes insertion
 signatures in ABI 2. Native queue policies extend the receiver and entry layouts,
-advancing released v0.13.0's ABI 2 to the current ABI 3. Both C and Lua consumers must
+advancing released v0.13.0's ABI 2 to ABI 3. Constructor-selected backends advance
+released v0.15.1's ABI 3 to the current ABI 4. Both C and Lua consumers must
 rebuild against the matching header and library. Local release rehearsal tags
 are not the released baseline for this decision.
 

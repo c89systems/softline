@@ -100,9 +100,10 @@ and must never be triggered by pushing for feedback.
 libmdf remains an example/integration-test dependency, outside `libsoftline` and
 its SDK imports. Private bundled c-ares remains Linux resolver implementation;
 there is no inferred cpkt SDK dependency. Lifecycle work preserves public C/Lua
-behavior, selected targets and the artifact set. The separate retained-resize
-repair adds owner reconciliation and advances the exposed receiver ABI from
-released v0.10.0's ABI 0 to ABI 1. Cross
+behavior, selected targets and the artifact set. Owner reconciliation first
+shipped in v0.11.0 with ABI 1. The current development ABI is 4: constructor-selected
+queue backends extend released v0.15.1's ABI 3. C and Lua consumers must rebuild
+against matching headers and libraries. Cross
 execution and hosted native checks are not implicitly opted in; cross lanes prove
 build/link/package metadata, with runtime execution deferred where no selected
 native runner exists.

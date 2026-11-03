@@ -411,6 +411,215 @@ cleanup:
   return failed;
 }
 
+static int completion(void) {
+  struct editor e;
+  int failed = 0;
+  size_t mark;
+  struct winsize size = {18, 52, 0, 0};
+  test_rows = 24;
+  test_columns = 80;
+  REQUIRE(start(&e, "tests/lua-fixtures/completion.lua", NULL, NULL) == 0);
+  REQUIRE(wait_for(&e, "complete> ", 0) == 0);
+  /* Approval presentation waits for an idle editor. Offer it before typing,
+   * then verify completion preserves its already visible text. */
+  REQUIRE(wait_for(&e, "held stays visible", 0) == 0);
+  mark = e.length;
+  REQUIRE(send_bytes(&e, "/app") == 0);
+  /* The missing suffix is dimmed inline before Tab, with no preview panel. */
+  REQUIRE(wait_for(&e, "\033[2mrove on", mark) == 0);
+  REQUIRE(!contains(&e, "T /approve", mark));
+  REQUIRE(contains(&e, "queued stays visible", 0));
+  REQUIRE(contains(&e, "held stays visible", 0));
+  REQUIRE(contains(&e, "Reasoning remains host owned.", 0));
+  REQUIRE(ioctl(e.master, TIOCSWINSZ, &size) == 0);
+  e.rows = size.ws_row;
+  e.columns = size.ws_col;
+  e.top = 0;
+  e.bottom = e.rows - 1;
+  if (e.row >= e.rows)
+    e.row = e.rows - 1;
+  if (e.column >= e.columns)
+    e.column = e.columns - 1;
+  mark = e.length;
+  REQUIRE(send_bytes(&e, "\014\t\t") == 0);
+  REQUIRE(wait_for(&e, "/approve off", mark) == 0);
+  REQUIRE(send_bytes(&e, "\177\177\t\002\006\t\033s") == 0);
+  REQUIRE(wait_for(&e, "inside> ", 0) == 0);
+  REQUIRE(send_bytes(&e, "\t\033s") == 0);
+  REQUIRE(wait_for(&e, "update> ", 0) == 0);
+  mark = e.length;
+  REQUIRE(send_bytes(&e, "\024") == 0);
+  REQUIRE(wait_for(&e, "\033[2mop", mark) == 0);
+  REQUIRE(send_bytes(&e, "\t\033s") == 0);
+  REQUIRE(wait_for(&e, "cleared> ", 0) == 0);
+  REQUIRE(send_bytes(&e, "\t\033s") == 0);
+  REQUIRE(wait_for(&e, "provider-1> ", 0) == 0);
+  REQUIRE(send_bytes(&e, "@\024\t\t\r") == 0);
+  REQUIRE(wait_for(&e, "provider-2> ", 0) == 0);
+  REQUIRE(send_bytes(&e, "@\t\r") == 0);
+  REQUIRE(wait_for(&e, "provider-3> ", 0) == 0);
+  REQUIRE(send_bytes(&e, "@a\t\r") == 0);
+  REQUIRE(wait_for(&e, "provider-4> ", 0) == 0);
+  REQUIRE(send_bytes(&e, "@\t\r") == 0);
+  REQUIRE(wait_for(&e, "provider-5> ", 0) == 0);
+  REQUIRE(send_bytes(&e, "@e\t\r") == 0);
+  REQUIRE(wait_for(&e, "expand-1> ", 0) == 0);
+  REQUIRE(send_bytes(&e, "@l\t\t\r") == 0);
+  REQUIRE(wait_for(&e, "expand-2> ", 0) == 0);
+  REQUIRE(send_bytes(&e, "@lua/sub/de\t\r") == 0);
+  REQUIRE(wait_for(&e, "expand-3> ", 0) == 0);
+  REQUIRE(send_bytes(&e, "@lua/\t\177\177\177\177\177\177\177\177\t\t\r") == 0);
+  REQUIRE(wait_for(&e, "expand-4> ", 0) == 0);
+  REQUIRE(send_bytes(&e, "@l\t\t\r") == 0);
+  REQUIRE(wait_for(&e, "expand-overlap-1> ", 0) == 0);
+  mark = e.length;
+  REQUIRE(send_bytes(&e, "/app") == 0);
+  REQUIRE(wait_for(&e, "\033[2mle", mark) == 0);
+  REQUIRE(send_bytes(&e, "\t\r") == 0);
+  REQUIRE(wait_for(&e, "expand-overlap-2> ", 0) == 0);
+  REQUIRE(send_bytes(&e, "/a\t\t\177\177\177\177\177\177p\t\r") == 0);
+  REQUIRE(wait_for(&e, "expand-overlap-3> ", 0) == 0);
+  REQUIRE(send_bytes(&e, "/root/app\t\r") == 0);
+  {
+    int i;
+    for (i = 1; i <= 4; ++i) {
+      char marker[32];
+      snprintf(marker, sizeof(marker), "expand-error-%d> ", i);
+      REQUIRE(wait_for(&e, marker, 0) == 0);
+      REQUIRE(send_bytes(&e, "@l\t\t\t\r") == 0);
+    }
+  }
+  {
+    int mode;
+    for (mode = 0; mode <= 1; ++mode) {
+      char marker[48];
+      snprintf(marker, sizeof(marker), "suspend-completion-%d> ", mode);
+      REQUIRE(wait_for(&e, marker, 0) == 0);
+      REQUIRE(send_bytes(&e, "@a\t\033s") == 0);
+      snprintf(marker, sizeof(marker), "resume-completion-%d> ", mode);
+      REQUIRE(wait_for(&e, marker, 0) == 0);
+      REQUIRE(send_bytes(&e, "\t\r") == 0);
+    }
+  }
+  REQUIRE(wait_for(&e, "lua completion passed", 0) == 0);
+  REQUIRE(finish(&e) == 0);
+cleanup:
+  close_editor(&e);
+  return failed;
+}
+
+static int example_completion(int chat) {
+  struct editor e;
+  int failed = 0;
+  size_t mark;
+  const char *prompt = chat ? "> " : "softline> ";
+  working_directory = getenv("SOFTLINE_TEST_COMPLETION_DIR");
+  test_rows = 24;
+  test_columns = 80;
+  REQUIRE(start(&e, chat ? "examples/chat.lua" : "examples/simple.lua", NULL,
+                NULL) == 0);
+  REQUIRE(wait_for(&e, "Completion demo:", 0) == 0);
+  REQUIRE(wait_for(&e, prompt, 0) == 0);
+  mark = e.length;
+  REQUIRE(send_bytes(&e, "hel") == 0);
+  REQUIRE(wait_for(&e, "\033[2mlo world", mark) == 0);
+  mark = e.length;
+  /* Native chat may append only the changed suffix. Assert the eventual
+   * submitted value instead of requiring an entire input row to redraw. */
+  REQUIRE(send_bytes(&e, "\t\t\t\nsay ver") == 0);
+  REQUIRE(wait_for(&e, "verification", mark) == 0);
+  mark = e.length;
+  REQUIRE(send_bytes(&e, "\t\r") == 0);
+  if (chat) {
+    REQUIRE(wait_for(&e, "[turn] hello world", mark) == 0);
+    REQUIRE(wait_for(&e, "say verification", mark) == 0);
+    REQUIRE(wait_for(&e, "\033[?2004h", mark) == 0);
+  } else {
+    REQUIRE(wait_for(&e, "submitted: hello world\r\nsay verification\r\n",
+                     mark) == 0);
+    REQUIRE(wait_for(&e, "softline> ", mark) == 0);
+  }
+  mark = e.length;
+  REQUIRE(send_bytes(&e, "@REA") == 0);
+  REQUIRE(wait_for(&e, "\033[2mDME.md", mark) == 0);
+  mark = e.length;
+  REQUIRE(send_bytes(&e, "\t \r") == 0);
+  if (chat) {
+    double deadline = now() + 3;
+    while (!contains(&e, "[turn] README.md ", mark) &&
+           !contains(&e, "[queued] README.md ", mark) && now() < deadline)
+      if (pump(&e, 20))
+        break;
+    REQUIRE(contains(&e, "[turn] README.md ", mark) ||
+            contains(&e, "[queued] README.md ", mark));
+  } else {
+    REQUIRE(wait_for(&e, "submitted: README.md ", mark) == 0);
+    REQUIRE(wait_for(&e, "softline> ", mark) == 0);
+  }
+  mark = e.length;
+  REQUIRE(send_bytes(&e, "@tree/ne\t") == 0);
+  REQUIRE(wait_for(&e, "sted/", mark) == 0);
+  mark = e.length;
+  REQUIRE(send_bytes(&e, "source.\t\r") == 0);
+  if (chat) {
+    double deadline = now() + 3;
+    while (!contains(&e, "[turn] tree/nested/source.c", mark) &&
+           !contains(&e, "[queued] tree/nested/source.c", mark) &&
+           now() < deadline)
+      if (pump(&e, 20))
+        break;
+    REQUIRE(contains(&e, "[turn] tree/nested/source.c", mark) ||
+            contains(&e, "[queued] tree/nested/source.c", mark));
+  } else {
+    REQUIRE(wait_for(&e, "submitted: tree/nested/source.c", mark) == 0);
+    REQUIRE(wait_for(&e, "softline> ", mark) == 0);
+  }
+  mark = e.length;
+  REQUIRE(send_bytes(&e, "/q") == 0);
+  REQUIRE(wait_for(&e, "\033[2muit", mark) == 0);
+  REQUIRE(send_bytes(&e, "\t\r") == 0);
+  REQUIRE(finish(&e) == 0);
+cleanup:
+  close_editor(&e);
+  return failed;
+}
+
+static int backend_coroutines(void) {
+  struct editor e;
+  int failed = 0;
+  REQUIRE(start(&e, "tests/lua-fixtures/backend-coroutines.lua", NULL, NULL) ==
+          0);
+  REQUIRE(wait_for(&e, "backend-ready-readline", 0) == 0);
+  REQUIRE(send_bytes(&e, "\024\r") == 0);
+  REQUIRE(wait_for(&e, "backend-ready-next_prompt", 0) == 0);
+  REQUIRE(send_bytes(&e, "\024\r") == 0);
+  REQUIRE(wait_for(&e, "lua backend coroutine dispatch passed", 0) == 0);
+  REQUIRE(finish(&e) == 0);
+cleanup:
+  close_editor(&e);
+  return failed;
+}
+
+static int terminal(void) {
+  struct editor e;
+  int failed = 0;
+  size_t mark;
+  REQUIRE(start(&e, "tests/lua-fixtures/terminal.lua", NULL, NULL) == 0);
+  REQUIRE(wait_for(&e, "terminal> ", 0) == 0);
+  REQUIRE(send_bytes(&e, "\033e\033s") == 0);
+  REQUIRE(wait_for(&e, "TERMINAL-READY", 0) == 0);
+  mark = e.length;
+  REQUIRE(send_bytes(&e, "~.") == 0);
+  REQUIRE(wait_for(&e, "TERMINAL-RESUMED", mark) == 0);
+  REQUIRE(wait_for(&e, "\033[?2004h", mark) == 0);
+  REQUIRE(send_bytes(&e, "\033s") == 0);
+  REQUIRE(wait_for(&e, "lua terminal relay passed", mark) == 0);
+  REQUIRE(finish(&e) == 0);
+cleanup:
+  close_editor(&e);
+  return failed;
+}
+
 int main(int argc, char **argv) {
   if (argc == 7 && !strcmp(argv[1], "store")) {
     if (strcmp(argv[2], "c") && strcmp(argv[2], "lua"))
@@ -424,6 +633,20 @@ int main(int argc, char **argv) {
     return 2;
   executable = argv[2];
   root = argv[3];
+  if (!strcmp(argv[1], "terminal"))
+    return terminal();
+  if (!strcmp(argv[1], "backend-coroutines"))
+    return backend_coroutines();
+  if (!strcmp(argv[1], "completion"))
+    return completion();
+  if (!strcmp(argv[1], "simple-completion-c")) {
+    c_chat = 1;
+    return example_completion(0);
+  }
+  if (!strcmp(argv[1], "simple-completion"))
+    return example_completion(0);
+  if (!strcmp(argv[1], "chat-completion"))
+    return example_completion(1);
   if (!strcmp(argv[1], "readline_edit"))
     return readline_edit();
   if (!strcmp(argv[1], "idle"))

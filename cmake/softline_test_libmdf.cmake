@@ -4,7 +4,7 @@ set(SOFTLINE_TEST_LIBMDF_MODULE_DIR "${CMAKE_CURRENT_LIST_DIR}")
 
 # libmdf is only for examples and integration tests. It must never be linked
 # by a Softline library target or appear in exported package metadata.
-set(SOFTLINE_TEST_LIBMDF_VERSION "0.17.0")
+set(SOFTLINE_TEST_LIBMDF_VERSION "0.19.0")
 
 function(softline_test_libmdf_supported output)
   if(SL_TARGET_ID MATCHES
@@ -25,25 +25,25 @@ function(softline_enable_dev_libmdf target)
   set(_softline_libmdf_name
     "libmdf-${SOFTLINE_TEST_LIBMDF_VERSION}-${SL_TARGET_ID}.tar.gz")
   if(SL_TARGET_ID STREQUAL "x86_64-linux-gnu")
-    set(_softline_libmdf_sha "7563dcd74b48afad1d7358815d0115c798c1a46219dc7cabdbcbb45e4edac53c")
+    set(_softline_libmdf_sha "f4cf5c0c50c1909441ccc340f85e60849eeba29428a5e77e04c6b5b92bbab831")
   elseif(SL_TARGET_ID STREQUAL "x86_64-linux-musl")
-    set(_softline_libmdf_sha "08e11370793274b3db78ea35b45ee9459f906103487c3345c0188c07ce897f3f")
+    set(_softline_libmdf_sha "eb128a3865e81c906fc77779a9bcaaa215845d5fb49a306c4838a894248d470e")
   elseif(SL_TARGET_ID STREQUAL "aarch64-linux-gnu")
-    set(_softline_libmdf_sha "366e5b9e1cb0bae99a07a367d6b92e67aa616139cda59298446b8e4661cf50f0")
+    set(_softline_libmdf_sha "8918427d0de9915c3a6e3f7eb4e510dbb326a018c4ff04323fed4f5298cf384a")
   elseif(SL_TARGET_ID STREQUAL "aarch64-linux-musl")
-    set(_softline_libmdf_sha "348c544a44b98ff9b4762c9ef4e9095f5e03817e99c134da6afbc62a2d0fb0bc")
+    set(_softline_libmdf_sha "01461ca30d94ef410c6b713882212020195d8d0e3fc18c5070b9f7e9ef987f2a")
   elseif(SL_TARGET_ID STREQUAL "armhf-linux-gnu")
-    set(_softline_libmdf_sha "6aa7e024b2378ed1a7cf3ddab02f836d3c448d1d83e86eeb7b7cc0fdaaabe424")
+    set(_softline_libmdf_sha "5b8d9f1d061b3a2274505d2bacedb65b1104b081f4894a51f716596ce158b36d")
   elseif(SL_TARGET_ID STREQUAL "armhf-linux-musl")
-    set(_softline_libmdf_sha "3c56e55e115c939496f088f3f5f0ff8fb6ac229bed40da643239fde554d5f47b")
+    set(_softline_libmdf_sha "7767eea3ea251f2dc6e41f31c440ec127105e33ddd59ff8f983664c914e14731")
   else()
-    set(_softline_libmdf_sha "616299de8ec6956c10819e77e2e7ebec07be4215283227a81a2d9516bba2bd29")
+    set(_softline_libmdf_sha "080e36be62666e5ea233859a17141dd9730233091d37daa8ab680567b57b623c")
   endif()
 
   include(${SOFTLINE_TEST_LIBMDF_MODULE_DIR}/softline_verified_archive.cmake)
   softline_verified_archive(
     "libmdf"
-    "https://github.com/sa6mwa/libmdf/releases/download/v${SOFTLINE_TEST_LIBMDF_VERSION}/${_softline_libmdf_name}"
+    "https://github.com/c89systems/libmdf/releases/download/v${SOFTLINE_TEST_LIBMDF_VERSION}/${_softline_libmdf_name}"
     "${_softline_libmdf_sha}" "${_softline_libmdf_name}" _softline_libmdf_archive)
 
   set(_softline_libmdf_cache_root

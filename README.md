@@ -40,12 +40,26 @@ Currently implemented:
 
 - Enter submits the current buffer.
 - `Ctrl-J` inserts a newline.
+- Trigger callbacks supply current completions as inline dimmed suggestions.
+  Tab accepts the suggestion and cycles matches. Each trigger registration
+  selects draft-start or whitespace-boundary matching.
+  See `sl_set_completion_providers()` and the [completion contract](docs/softline-spec.md#completion-providers).
+- OSC 8 feed hyperlinks are opt-in: OFF by default, ON by host choice, or AUTO
+  with conservative passive detection. `sl_get_osc8_info()` exposes the effective
+  policy for renderers. C chat uses AUTO; try `make run-chat OSC8=on`.
+  See the [hyperlink contract](docs/softline-spec.md#osc-8-hyperlinks).
 - `Ctrl-D` on an empty buffer returns `NULL`; inside text it deletes forward.
 - `Ctrl-C` remains a terminal interrupt instead of being swallowed.
 - `last_readline_status()` distinguishes submitted text, EOF, cancellation,
-  interrupt, and failures after `readline()` returns.
-- `Ctrl-U`, `Ctrl-K`, word deletion, movement, history recall (`Up`/`Down` or
-  `Ctrl-P`/`Ctrl-N`), and delete keys operate across the whole multiline buffer.
+  interrupt, suspension, and failures after `readline()` or `next_prompt()`
+  returns.
+- `Ctrl-A`/`Ctrl-E` move to the start/end of the actual newline-delimited line.
+  `Ctrl-U` kills to that line's start and `Ctrl-K` to its end; at a line boundary
+  they remove only the adjacent newline. `Ctrl-W` kills a word within that line,
+  or only the preceding newline at line start. Soft wraps do not create these
+  boundaries. `Up`/`Down` move between visual rows with a preferred column and
+  fall back to history at the draft edges; `Ctrl-P`/`Ctrl-N` recall history
+  directly.
 - `Alt-K` saves the whole draft in one handle-local stash and clears it;
   saving an empty draft leaves the stash alone. `Alt-J` appends the saved text
   after all current input, retaining the saved copy. `Alt-N` clears without
@@ -65,8 +79,8 @@ Currently implemented:
   submission. This read-only query is true even for a failed match and false
   after selection, cancellation, or editor exit. Return `SL_KEY_ACTION_PASS`
   during search to let Enter select an editable match. The chat examples defer
-  their shell/exit guards until normal editing resumes; actual shell
-  submissions remain blocked during generation.
+  their shell/exit guards until normal editing resumes; shell execution waits
+  until the current turn ends.
 - `Ctrl-V` reads PNG or JPEG image data from the X11 `CLIPBOARD` selection and
   inserts the literal path to an owner-only cache image file at the cursor.
   It speaks X11 directly through `DISPLAY`, including an SSH-forwarded display,
@@ -154,8 +168,8 @@ Currently implemented:
 
 Not currently implemented:
 
-- completion menus or completion provider APIs
-- inline hints, autosuggestions, or syntax highlighting
+- asynchronous completion provider APIs
+- history autosuggestions or syntax highlighting
 - forward history search or history filtering hooks
 - redo, vi mode, or full readline-style command sets
 - full Unicode Text Segmentation, locale-specific ambiguous-width handling, or
@@ -166,10 +180,59 @@ Not currently implemented:
 
 ## Examples
 
+The native local queue remains the default. For a separate-process queue owner,
+start `make run-chat-queue-server` in one terminal and `make run-chat-remote` in
+another. All C chat themes accept `CHAT_QUEUE=local|remote`, for example
+`make run-chat-riced CHAT_QUEUE=remote`. Accepted work and edit holds survive
+frontend detach; the example owner is volatile across its own restart. See
+[queue backends](docs/queue-backends.md) for the C/Lua contract and demos.
+Local and remote C chat share the same frontend and Markdown renderer. Remote
+Alt-S can hand the terminal to a shell at the next response seam while retaining
+the draft; the backend continues running and missed output is not replayed.
+The remote chat host shows disconnect state in its thinking row and retries
+every two seconds (`CHAT_RECONNECT_MS` changes the interval), preserving the
+draft and reconciling queue state without resubmitting uncertain work.
+Connection attempts run asynchronously: repeated unsuccessful retries keep the
+same status frame without repainting an unchanged editor. In C chat, `/quit`
+is handled by the remote frontend and needs no queue-owner acknowledgement.
+Alt-Q exits both C and Lua chat immediately, including with a draft; Ctrl-D
+exits an empty editor. These controls remain usable while disconnected or
+waiting for a connection handshake.
+
 `example_simple` is the normal terminal prompt. Output is printed after each
 submitted line and the next prompt proceeds below it like an ordinary REPL.
 
-`example_chat` is the C streaming Markdown demo. It links pinned libmdf 0.17.0
+The C and Lua simple/multiline and chat examples all register completion providers
+and print a `Completion demo:` guide when interactive. Try them with
+`make run-simple`, `make lua-debug-simple`, any `run-chat-*` target, or
+`make lua-debug-chat`:
+
+- Type `h` to see `hello world` as dim ghost text. Tab accepts it; further Tabs
+  cycle between `hello there` and `hello world`. Backspace restarts matching
+  from the remaining actual text. Typing `hello ` keeps the `world` ghost;
+  a matching space inside a phrase does not end completion.
+- Type `say ver`, then Tab: it completes `verification` after the space.
+  Ctrl-J adds a real newline; the same word completion works on that next line.
+- Type `/q`, then Tab to complete `/quit`; Enter exits.
+- Type `@REA`, then Tab to complete `@README.md` from the current directory.
+  Only the current directory is listed, including hidden entries except `.git`.
+  Directories end in `/`: after accepting one, Tab lists and completes its
+  children before cycling. You can also type a child prefix, then Tab.
+  Backspace restores the cached parent list. Directory symlinks are listed
+  without a trailing `/` and are not traversed.
+  Enter or a separating space removes `@`; spaces that continue a matching
+  filename keep completion active. Each new `@` activation fetches a fresh file
+  list.
+- Chat completes `/app` to `/approve`; the next Tab resolves `/approve on`,
+  then rotates to `/approve off`. The same optional continuation callback is
+  used for command and file examples.
+
+The inline ghost appears before Tab and is not submitted until accepted. These callbacks belong to the example
+hosts; applications using `readline()` or `next_prompt()` register their own
+with `set_completion_providers()` / `sl_set_completion_providers()`.
+
+`example_chat` is the C streaming Markdown demo. It links pinned
+[libmdf 0.19.0](https://github.com/c89systems/libmdf/releases/tag/v0.19.0)
 only as an example dependency: libsoftline and its installed package remain
 independent of libmdf. The composer gives libmdf a two-column left margin and its default
 ANSI palette for terminal output (escape-free when redirected), updating both
@@ -198,7 +261,7 @@ chat open. `/status` inspects the paused backlog without releasing it;
 `/resume` explicitly resumes it. New direct chat turns retain their usual
 resumption behavior.
 
-Both chat examples accept the exact, argument-free commands `!sh` and `/shell`
+The local C and Lua chat examples accept the exact, argument-free commands `!sh` and `/shell`
 between turns. Enter (or idle Alt-Enter) opens `$SHELL -i`, falling back to
 `/bin/sh -i` when `SHELL` is unset or empty. While an operation is running,
 these commands remain in Softline's visible, editable queue until the whole
@@ -206,7 +269,7 @@ turn ends. Alt-Enter, including empty-editor promotion, does not waive this
 execution hold. Piped input and redirected output cannot open a shell. Other
 text, including `/shell arguments`, remains a simulated chat turn.
 
-Both chat examples install the native submission classifier for slash and
+The local C and Lua chat examples install the native submission classifier for slash and
 shell commands, including idle Enter. Try these policy demonstrations in
 `run-chat-*` or the Lua chat targets:
 
@@ -226,22 +289,27 @@ queue. The C and Lua terminal tests gate their simulated workers with an
 inherited `SOFTLINE_CHAT_GATE_FD` (3..9, one newline-terminated token per turn),
 so boundary assertions do not depend on sleeps.
 
-Alt-S opens the same shell between turns while preserving the current draft,
+Alt-S opens a new PTY session between turns while preserving the current draft,
 cursor, undo, history search and queued-entry editing state. Exit the shell to
 resume editing; nothing is submitted or added to history by the shortcut.
-The command forms still return to an empty prompt.
+The command forms still return to an empty prompt. Local C/Lua chat uses the
+local PTY adapter; remote chat opens its PTY in the backend. Both use the same
+Softline byte relay. Enter then `~.` terminates handoff locally, including when
+the shell or transport hangs; `~~` at the start of a line sends a literal tilde.
 
-The examples end the output session before launching the shell, restoring
-terminal input and the full scroll region. After the shell exits, they begin a
+The relay ends the output session before opening the adapter, releases the
+scroll region, and owns local raw input while forwarding PTY bytes unchanged.
+After the shell exits, it restores terminal modes and begins a
 new session on the same handle: the prompt is built afresh at the current
 terminal size, the output cursor is probed again, and history, queue and
 settings survive. An unfinished external line restarts quote separation;
 otherwise known spacing remains.
 Clearing or resizing inside the shell is allowed. No
 transcript is replayed. A failed shell launch or nonzero exit is reported and
-returns to chat. Applications can use this same `output_stream_end()` / child
-process / `output_stream_begin()` sequence outside an active editor callback;
-shell execution belongs to the application.
+returns to chat. Applications call `sl_terminal_local()` for the built-in local
+adapter or `sl_terminal_handoff()` with a nonblocking host adapter for another
+PTY transport, outside active editor callbacks. The host chooses the shell,
+authentication and protocol. See [the terminal adapter contract](docs/terminal-handoff-design.md).
 
 To bind another key, return `SL_KEY_ACTION_SUSPEND` from its callback.
 `readline()` or `next_prompt()` returns NULL with `SL_READLINE_SUSPENDED`.
@@ -409,6 +477,13 @@ Chat uses the full terminal width and needs at least three rows: two for the
 VT100 scroll region and one for the prompt. Rectangular viewports are unsupported.
 Softline never enters or leaves the alternate screen itself.
 
+The default draft limit is 128 KiB (131072 UTF-8 bytes), configurable with
+`sl_config_t.line_max_len`. Multiline input shows at most half the terminal
+rows, leaving room for output and separate queue/status rows. The viewport
+follows the cursor one visual row at a time when it crosses an edge; hidden
+input stays editable without being painted into terminal history. Producer
+output is never retained or replayed by this viewport.
+
 For ordinary finite `print_above()` calls without a persistent output
 session, `sl_set_live_scroll_region()` remains available to configure the
 readline scrollback editor. It acquires ownership at startup and retries
@@ -492,7 +567,10 @@ kill ring persists across prompts on the same handle.
 ## Prompt queueing
 
 Prompt queueing is available for interactive chat-like prompts, including
-normal scrollback terminals. It does not alter non-TTY input. Enable it in the
+normal scrollback terminals. This section describes the default native local
+queue. Constructor-selected [queue backends](docs/queue-backends.md) own delivery
+and accepted state externally; backend entries never return as local model input.
+Queueing does not alter non-TTY input. Enable the local queue in the
 handle configuration or after construction, and read application work through
 `next_prompt()`:
 
@@ -632,7 +710,7 @@ entry immediately. Explicit
 `sl_bind_key()` bindings always take precedence over these built-ins.
 Cancelling a queued-turns editor keeps queued drafts visible but stops automatic
 FIFO release; a subsequent direct submission or manual promotion resumes it.
-The chat examples recognize `/quit` when they receive it. An ordinary queued
+The local chat examples recognize `/quit` when they receive it. An ordinary queued
 `/quit` runs after earlier FIFO entries; a steered `/quit` runs when the example
 takes steers at its next response boundary. An idle Alt-Enter promotion delivers
 it directly. Entries behind `/quit` are not processed.
@@ -773,11 +851,17 @@ the caller's normal chat history. These test stores remain available for
 diagnosis until `make clean`.
 
 Every project-owned C target is compiled as C89 with POSIX terminal APIs.
-Shared builds use `SOFTLINE_ABI_VERSION=3` for SONAME/SOVERSION. Queue policy
-methods extend the public receiver layout and entry information includes
-execution eligibility and cancellation state. Rebuild consumers against the new
-header/library pair. ABI 3 advances exactly once from released v0.13.0's ABI 2,
-independently of the project release version.
+For editor setup, run `make build-debug` to prepare the dependencies, generated
+headers and `build/debug/compile_commands.json`. The checked-in `.clangd` uses
+that database; public-header Doxygen comments supply API hover documentation.
+`make test-clangd` verifies configuration/database discovery and semantic parsing
+of `src/softline.c`. Lua API usage and callback contracts are documented in
+[lua/README.md](lua/README.md) and the facade's source comments.
+
+Shared builds use `SOFTLINE_ABI_VERSION=4` for SONAME/SOVERSION. Constructor-selected
+queue backends extend the public configuration and receiver layout. Rebuild
+consumers against the new header/library pair. ABI 4 advances exactly once from
+released v0.15.1's ABI 3, independently of the project release version.
 The ABI is fixed by the source, not a CMake option. Reconfiguring an existing
 build discards any obsolete cached ABI value before generating library names
 and installed metadata.
@@ -831,6 +915,13 @@ Its ordinary rehearsal may omit Darwin when osxcross is unavailable.
 `make verify-release-archives` verifies the existing complete release manifest
 and every source/Lua artifact and SDK it names, without regenerating checksums.
 
+Select candidate artifact versions with `SL_VERSION_OVERRIDE`, for example
+`SL_VERSION_OVERRIDE=1.2.3 make prerelease`. Preparation must leave release refs
+unchanged; do not reserve synthetic patch versions or create rehearsal tags in
+the owning checkout. Only the intended final release receives a tag, after the
+engineer signs the default-branch commit. A failed final release stops; return
+to authorized development instead of inventing another version to retry it.
+
 `make release` is only for the final exact lightweight `vX.Y.Z` tag on a clean,
 signed commit attached to the default branch resolved by `origin/HEAD`, without
 a candidate version override. Complete implementation and review on one
@@ -869,9 +960,12 @@ compiler prefix, including installations with only dotted executable names.
 prefix and fails if its tools are missing instead of selecting another prefix.
 
 Linux clipboard protocol tests run without an X server. They check request and
-reply sequence wraparound, I/O failures, and byte preservation for a 17 MiB PNG
-transferred in small INCR chunks. The optional X11 tests also exercise real
-clipboard owners and forwarded displays.
+reply sequence wraparound, I/O failures, final property deletion for direct and
+INCR transfers, and byte preservation for a 17 MiB PNG transferred in small
+INCR chunks. Short test deadlines cover silent peers, truncated replies, missing
+selection/chunk/terminator events and continuous unrelated events/replies.
+The optional X11 tests also exercise real clipboard owners and forwarded
+displays.
 
 Package smoke links fully static GNU and musl consumers with fatal linker
 warnings. Linux X11 hostname lookup uses privately bundled MIT-licensed c-ares

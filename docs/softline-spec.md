@@ -20,22 +20,25 @@ The public API is the installed header `include/softline/softline.h`.
 - `sl_create()` creates a handle with default configuration.
 - `sl_create_with_config()` accepts `sl_config_t` for input/output fds, prompt
   wrapping width, live scroll regions, queueing, themes, status lines, history length,
-  and line length.
+  line length, image paste, OSC 8 policy, and the optional queue backend.
 - `sl_config_init()` sets the documented defaults:
   - input fd: `STDIN_FILENO`
   - output fd: `STDOUT_FILENO`
   - ordinary readline at the current cursor
   - history max length: 100
-  - line max length: 4096 bytes
+  - complete editable draft max length: 131072 UTF-8 bytes (128 KiB)
   - prompt queueing and live scroll regions: disabled
   - prompt queue capacity and previews when enabled: 64 and 3
   - prompt theme: ANSI-only `default`
   - status line and spinner: disabled
   - status busy state and idle marker: false and `+`
+  - queue authority: native local queue (`queue_backend = NULL`)
+  - OSC 8 hyperlinks: disabled (`SL_OSC8_OFF`)
 - `readline()` returns a project-allocated string that must be released with
   `free_string()`.
 - `last_readline_status()` classifies the most recent `readline()` outcome as
-  submitted text, EOF, cancellation, interrupt, or error.
+  submitted text, EOF, cancellation, interrupt, suspension, or error, for both
+  `readline()` and `next_prompt()`.
 - Free-function wrappers mirror the receiver methods. Receiver methods are the
   primary handle-oriented style; wrappers provide conventional C call sites and
   NULL-argument guarding.
@@ -98,6 +101,11 @@ The editor supports these built-in behaviors:
   display hosts support literal IPv4/IPv6, `/etc/hosts`, then DNS configured by
   `/etc/resolv.conf`, including search domains. Lookup shares the clipboard's
   10-second deadline and uses no libc NSS modules or additional link libraries.
+  The same overall deadline bounds X11 setup, replies, selection and INCR events;
+  incoming unrelated events do not restart it. INCR capture waits for the
+  zero-length terminator and deletes that property to acknowledge completion
+  to the clipboard owner. Missing events or a missing terminator fail the paste,
+  preserve the draft and remove any partial capture file.
   The default path is `${XDG_CACHE_HOME}/softline/{xid}.png` or `.jpeg`,
   falling back to `$HOME/.cache/softline/` when `XDG_CACHE_HOME` is unset or
   relative. The xid is 20 lowercase base32hex characters in the
@@ -164,6 +172,17 @@ The editor supports these built-in behaviors:
 - Bracketed paste mode is enabled while editing; pasted carriage returns become
   buffer content instead of submitting the prompt.
 - Input is limited by `line_max_len`.
+- The editable input viewport occupies at most half the terminal rows (at least
+  one row), independently of the complete draft length. Queue/status rows are
+  separate; native output retains at least two output rows where geometry allows.
+  Only visible input rows are formatted and painted. At the end of a long draft,
+  the last rows are visible. Moving within the viewport keeps it stationary;
+  crossing its top/bottom edge scrolls just enough to reveal the cursor's row.
+  The prompt prefix stays on the first visible input row when it fits the width.
+  Resize recomputes wrapping and viewport capacity without discarding draft text.
+  This does not retain or replay producer output.
+  While reverse search is active, its query occupies a separate, width-limited
+  header row above the scrollable result so scrolling cannot hide the query.
 - Editing falls back to a plain line reader when either input or output is not
   a TTY; it does not emit prompts.
 
@@ -208,6 +227,11 @@ frame uses normal terminal scrolling when it needs additional space.
 
 
 ### Prompt Queue
+
+This section describes the native local queue. A constructor-selected
+[queue backend](queue-backends.md) instead owns accepted work and execution;
+its entries never return from `next_prompt()` as local model input. Matching
+completion consumes Tab before the queue keymap in either mode.
 
 Interactive ordinary readline and native chat prompts can opt into a prompt queue through
 configuration or `set_prompt_queue()`. Non-TTY input remains a plain line
@@ -297,7 +321,8 @@ approval; it never approves or delivers the deleted entry. Later held messages
 remain hidden except in the waiting count until earlier entries are decided or deleted.
 The question shows the message and its queued/steering route:
 Alt-A explicitly focuses the approval, inverting the foreground/background of
-its compact heading and moving the cursor onto its approval controls.
+its compact heading. The terminal cursor stays at the draft's editing position;
+focus changes key routing and heading colours, not cursor placement.
 Alt-Y approves and Alt-N rejects
 (case-insensitive), only while focused. Enter never answers an approval;
 arrow keys retain ordinary editor/history behavior. Escape or Alt-A returns
@@ -368,8 +393,10 @@ the stop. Ordinary profiles retain their existing direct-submission behavior.
 The renderer owns prompt presentation so the marker, typed text, queue panel,
 and optional status line always share the active layout. The built-in `default`
 theme uses only standard 16-colour ANSI sequences: a bold bright-white marker,
-normal terminal-colour input, subdued dark-gray queue text and separators,
-standard-colour status elements, and red/green busy markers. `plain` is
+normal terminal-colour input, blue queue and approval text, dark-gray separators,
+standard-colour status elements, and red/green busy markers. Queue/approval text
+uses each theme's first status-element colour role; focused approvals invert
+their heading foreground/background. `plain` is
 uncoloured for the editor and queue, while quoted prompts and status messages
 use neutral ANSI styling. The remaining named themes use their embedded
 palettes.
@@ -400,15 +427,15 @@ link libmdf or own its document lifecycle.
 The C and Lua chat examples support exact `!sh` and `/shell` submissions
 without arguments on interactive terminals, only between operations. Enter or
 idle Alt-Enter launches `$SHELL -i`, falling back to `/bin/sh -i` when unset or
-empty. Busy submissions and attempts to queue or steer these commands are
-rejected while leaving the draft editable. Argument-bearing text remains an
+empty. Busy submissions remain editable in the queue until the whole turn ends;
+steering intent cannot waive the command's execution hold. Argument-bearing text remains an
 ordinary chat turn. The application closes its idle output session, runs the
-shell with ordinary terminal input and full scrolling, then begins a fresh
+shell through the local PTY adapter with full scrolling, then begins a fresh
 session at its final cursor and current geometry. Clear and resize inside the
 shell are allowed. History, queue and configuration survive on the same handle;
 transcript replay is unnecessary. Failed launches and nonzero exits report an
 error and return to chat. This uses existing output-session APIs and adds no
-library shell-execution API or ABI change.
+receiver shell method or receiver ABI change.
 
 Alt-S uses the same between-operation shell handoff without submitting the
 draft. A key callback returns `SL_KEY_ACTION_SUSPEND`; the editor returns NULL
@@ -417,14 +444,33 @@ column, undo, kill ring, reverse search, history navigation and approval/edit
 state. The next readline/next_prompt resumes that continuation before automatic
 queue delivery. Held edits retain their identity, position and explicit approval
 requirement. Suspending does not append history, approve, requeue or cancel.
+It also preserves completion snapshots and the active Tab cycle without stripping
+an optional trigger; resumed completion does not call the provider again.
 The application runs the child outside callbacks, after ending its output
 session, then begins a fresh session and resumes editing. Shell clear/resize
 changes the physical layout only: owned UI wraps at the current geometry, with
 no producer transcript storage or replay. Exact `!sh` and `/shell` submissions
 still return to an empty prompt. Suspension does not pause background producers;
-the caller must arrange exclusive terminal ownership. The examples reject Alt-S
-while an operation is running. The generic action and status extend existing
-enums without changing the public receiver/configuration layouts or ABI.
+the caller must arrange exclusive terminal ownership. The local examples reject
+Alt-S while an operation is running. Remote chat instead requests handoff at a
+response seam, detaches output delivery while the shell runs and resubscribes
+to future output on return. The backend continues executing without transcript
+buffering or replay. An owner-thread idle/watch callback can request the same
+suspension with `sl_suspend()` (Lua `sl:suspend()`); the child still runs after
+readline returns. This method is part of the unreleased ABI 4 layout.
+The generic action and status extend existing enums; the `sl_suspend()` receiver
+method is included in ABI 4. The terminal adapter free functions add no shell
+controls to the receiver.
+
+The shared local/remote PTY adapter and locally handled escape from a hung
+session are specified in [the terminal handoff design](terminal-handoff-design.md).
+`sl_terminal_handoff()` runs any host-supplied nonblocking adapter;
+`sl_terminal_local()` supplies the local PTY adapter. Enter followed by `~.`
+returns to the preserved editor even when the shell or transport is hung.
+The shell process owns this adapter's lifetime. After reaping it, the adapter
+drains currently available output up to 64 KiB, stopping at the first empty read
+or the byte limit. A background job retaining or continuously writing the slave
+cannot prolong that drain indefinitely. The remote demo uses the same adapter.
 
 Host buffer replacements and insertions during suspension are journaled like
 active edits, including while the output session is closed. No-op or rejected
@@ -498,8 +544,9 @@ slots and absent status messages reserve no rows. Adding or removing queue,
 status, or editor rows adjusts the output margin immediately. Growth scrolls
 existing output cells only by the rows needed to fit; shrink clears former
 prompt cells and returns their rows to output without moving transcript cells.
-The editor pages only when the frame exceeds the physical terminal capacity;
-queue and status rows stay visible whenever they fit.
+The editable input pages at half the terminal height, or earlier when needed
+to leave two output rows and the queue/status panel. Queue and status rows
+stay visible whenever they fit.
 
 `print_above()` accepts a chunk callback and writes all chunks above the active
 prompt. The callback returns `SL_OK` with a non-empty chunk to continue, or
@@ -583,7 +630,7 @@ error, and handle teardown. If the terminal does not answer the probe, output
 uses the compatible clear-and-redraw path.
 
 After a TTY live session, finite `print_above()` output continues in native
-terminal scrollback. Producer output accepts printable UTF-8 and ANSI SGR
+terminal scrollback. Producer output accepts printable UTF-8, ANSI SGR and opt-in OSC 8
 bytes without cell reserialization.
 
 ## Current History Behavior
@@ -642,10 +689,10 @@ Current build surfaces include:
 - CMake presets
 - static and shared library builds
 - shared-library ABI/SOVERSION policy through the source-owned
-  `SOFTLINE_ABI_VERSION`, currently `3`, decoupled from the project release
-  version and not a CMake cache option. Queue policy methods and entry-state
-  fields change exposed C layouts, advancing exactly once from released
-  v0.13.0's ABI 2. Consumers must rebuild.
+  `SOFTLINE_ABI_VERSION`, currently `4`, decoupled from the project release
+  version and not a CMake cache option. Constructor-selected backends extend
+  the public configuration and receiver layouts, advancing exactly once from
+  released v0.15.1's ABI 3. Consumers must rebuild.
 - installed CMake package exports with canonical target `softline::softline`
 - installed pkg-config metadata
 - Lua 5.5 facade packaged as LuaRocks source artifacts
@@ -660,38 +707,176 @@ Current build surfaces include:
 The library is not currently a Windows console implementation, a terminfo
 database consumer, or a curses-style screen abstraction.
 
+## Current Hyperlink And Completion Behavior
+
+### OSC 8 hyperlinks
+
+Validated producer output (`output_stream_write()` and native finite output)
+rejects OSC controls by default. `sl_osc8_mode_t` selects `SL_OSC8_OFF`,
+`SL_OSC8_ON` or `SL_OSC8_AUTO` through `sl_config_t.osc8_mode` or
+`sl_set_osc8_mode()` / `set_osc8_mode()`. Set policy between output streams;
+an open stream, partial control or retained producer link returns
+`SL_ERROR_NOT_READY`. Invalid modes return `SL_ERROR_INVALID` without changes.
+
+`sl_get_osc8_info()` / `get_osc8_info()` returns cached `sl_osc8_info_t` fields:
+`mode`, `detected` and `enabled`. Detection recognizes known output-terminal
+environments conservatively; it is a hint, not proof of support. `enabled` is
+the effective validated-feed policy and is the value to give a renderer such
+as libmdf's `options.osc8`. OFF always disables acceptance, ON explicitly
+overrides detection, and AUTO requires a recognized TTY on `output_fd`.
+Unknown terminals, redirection, `TERM=dumb`, and unverified tmux/screen paths
+remain disabled under AUTO. Detection runs at construction or a policy setter,
+using environment variables and `isatty()` only. The getter is cached; no
+terminal query, input read, timeout or feed round trip is added.
+
+Enabled feeds accept only `OSC 8 ; params ; URI ST`, with BEL or ESC-backslash
+as the terminator, and an empty URI to close. Other OSC commands remain
+rejected. Parameters are printable ASCII, and URIs are printable valid UTF-8;
+embedded controls, C1 characters, malformed UTF-8 and oversized controls are
+rejected before that control reaches the terminal. `SL_OSC8_MAX_BYTES` is 8192,
+including opener and terminator. Controls and UTF-8 may span arbitrary writes;
+only a bounded incomplete control or character is held. Labels stream directly
+and are never retained for transcript replay. Ending on an incomplete control
+returns an error, allowing the caller to finish it or destroy the handle.
+
+Native writes retain only active hyperlink metadata, close the hardware link
+before returning to editor UI, and reopen it for the next producer fragment.
+The URI and `id` parameters survive fragment boundaries. Queue, approval,
+reasoning, status, input and ghost text are outside producer links. Quoted user
+prompts close the producer link as a new output record. Redirected feeds retain
+raw producer controls and close any unfinished link when the stream ends or
+the handle is destroyed, including after an incomplete-control error.
+Ordinary finite `print_above()` without a native surface retains its existing
+raw host-output behavior; this policy is for validated feeds.
+
+Local and remote C chat use AUTO and pass `enabled` to their test-only libmdf
+renderer. `make run-chat OSC8=on` overrides detection; `OSC8=off` disables links.
+No libmdf dependency is introduced into the library.
+
+### Completion providers
+
+`set_completion_providers()` / `sl_set_completion_providers()` atomically copies
+an array of `sl_completion_provider_t` registrations. Each has one printable
+non-whitespace ASCII `trigger`, a `scope`, `strip_trigger`, a synchronous
+`sl_completion_callback_t`, optional `sl_completion_expand_callback_t` in
+`expand`, and borrowed host context. Duplicate triggers,
+invalid fields and copy failure preserve the previous registrations.
+NULL/count zero clears them. `SL_COMPLETION_START` (zero/default) anchors only
+at byte zero of the draft. `SL_COMPLETION_WORD` also allows a trigger after
+ASCII whitespace (space, Tab, LF, CR, vertical Tab and form feed).
+
+The input owner calls the provider once when its trigger activates a token.
+The C callback receives the editor, trigger, `sl_completion_emit_t`, emitter
+context and host context. It emits full strings including the trigger, in
+cycling order; each emission is copied immediately, so temporary host strings
+are safe. Strings are printable valid UTF-8 with LF/Tab allowed and bounded by
+`line_max_len`; duplicates merge, and malformed/control-bearing candidates
+fail. A failed callback or emission discards the entire activation's list,
+leaves typed text including its trigger intact, and is not retried until a new
+activation. Empty successful lists are cached too. Providers may read editor
+state but must not mutate/destroy it, retain the emitter or yield. No provider
+is invoked by rendering or a producer feed. Asynchronous resolution is not part
+of this interface; hosts provide a synchronous snapshot of their current data.
+
+Optional `expand(self, completed, emit, context, userdata)` runs only on Tab,
+before rotation, when actual text contains a completed candidate. `completed`
+includes the trigger. It also works for a unique, fully present match, and for
+known ancestor candidates when the user has typed part of a child path. Emit
+full strings strictly extending that prefix. A nonempty result becomes a
+separate completion level and that Tab accepts its first matching candidate.
+An empty result retains normal rotation or host Tab handling. No continuation
+is called for ghost text alone. An existing matching suggestion is accepted
+before trying a shorter ancestor continuation, including after each lazy lookup.
+
+Each prefix is resolved at most once per activation, including empty and failed
+attempts. Softline keeps parent and child snapshots separate, choosing the most
+specific cached list with a candidate matching the draft. Backspace below its prefix
+returns to the original parent list, rather than mixing parent candidates with
+descendants. Continuing inside a cached level does not call the provider again.
+An already visited continuation does not interrupt a resumed parent-level Tab
+cycle. Typing further into that directory, or Tab without a parent cycle,
+reuses its cached children. This preserves cycling through the first list after
+Backspace while allowing repeated navigation into previously visited levels.
+Continuation failure discards only its new list, rings once and preserves the
+draft and prior candidates; subsequent Tabs can rotate normally. The initial
+callback still runs only once per token. All snapshots end with that activation.
+
+Softline owns that snapshot while the token is active, including through typing,
+Backspace, Undo, ambiguous matches and Tab cycling. Whitespace inserted by
+ordinary editing (including yank or host insertion) continues the activation
+when it matches a candidate prefix with further characters to complete. For
+example, typing `hello ` keeps `world` visible for `hello world`; Tab accepts
+the phrase and further Tabs cycle matching phrases. Whitespace without a
+remaining matching suffix ends the activation. Bracketed paste,
+deleting the trigger, moving outside the token, submission,
+queueing, replacing the draft or replacing registrations ends the activation.
+Accepted candidates and restored undo text may themselves contain spaces;
+those spaces do not end the activation. Other editing/navigation ends the Tab
+cycle and rematches the current prefix against the cached snapshot, without
+calling the provider.
+
+Matching is literal and case-sensitive. The first match appears as a dim inline
+suffix. Tab accepts that full candidate; further Tabs cycle the originally
+resolved matching set in list order, wrapping to the first. Thus
+`/` can cycle all slash commands, while Backspace from `/command1` to `/command`
+restricts the next cycle to that prefix. No whitespace is appended. With no
+active cycle, a unique fully present completion or no match lets normal host
+bindings and queue mappings receive Tab. Matching completion precedes both.
+Reverse search and bracketed paste retain their existing key/literal semantics.
+With providers configured, Tab during acquisition of a backend edit hold
+waits for that outcome and earlier deferred typing. It then completes the actual
+draft or falls through to the host, including when the hold was rejected. Other
+host control bindings remain responsive while the hold is pending.
+
+Completion inside text replaces the remaining current whitespace-delimited
+word while preserving subsequent unrelated text. A complete already-present
+phrase suffix is reused. An entire Tab cycle is one undoable edit, separate from adjacent
+typing, and retains queue/approval identity, holds and order. An expansion over
+the draft limit leaves the draft/cursor unchanged and consumes Tab with a bell.
+If reused phrase bytes join an existing combining-mark or emoji continuation,
+the cursor advances past the resulting whole cluster; those existing bytes are
+preserved. Subsequent movement, deletion and undo keep their cluster semantics.
+
+Ghost text is a display-only projection inside the multiline editor, wrapping
+and paging with it. It does not change the draft, actual cursor, undo journal,
+queue/approval entries or host status/reasoning. Enter submits only actual text;
+Tab is required to accept a suggestion. Existing matching text after the cursor
+is reused in the preview; unrelated text remains visible. Navigation operates
+on the actual draft. There is no separate completion panel. Ghosts follow
+cursor moves, host list changes, undo, suspension and resize. No producer
+transcript is retained.
+
+`strip_trigger` is off by default. When enabled, normal completion exit or
+submission removes the one introductory character, including from queued or
+held edited entries, without changing their identities, holds or FIFO order.
+Enter submits actual text and never accepts a ghost. For example, `@REA` + Tab
+can accept `@README.md`; Space or Enter removes `@`, leaving `README.md`.
+Trigger removal is undoable. Whole-draft replacement/discard uses its existing
+editing-context rules rather than adding a second deletion. Failed providers
+never strip the trigger. Registration replacement ends any active completion.
+
+C/Lua simple multiline and chat examples use callbacks for `/`, `h`, `v`, `n`
+and `@`. Slash callbacks provide the host's commands. `@` takes a fresh current
+directory snapshot on activation, accepts at word boundaries and removes its
+marker on exit/submission. It uses the same frontend in
+local/remote chat; the example host owns file discovery, not the Softline library.
+Directories end in `/`; further Tabs resolve only that directory through the
+same resolver, without scanning its descendants. The command resolver similarly
+extends `/approve` to `/approve on` and `/approve off`. Hidden entries are
+included, `.git` entries excluded, and symlinks listed without following them.
+
 ## Gap List Toward A More Complete Multiline Readline Alternative
 
 This section is a product and engineering backlog, not a promise that every item
 belongs in softline. Each item should get tests before being considered part of
-the public contract.
-
-### Completion
-
-Missing:
-
-- completion callback API
-- completion menus
-- common-prefix insertion
-- completion replacement spans
-- multiline-aware completion display
-- async completion lifecycle
-- completion cancellation
-- completion tests across wrapped prompts and native chat
-
-Likely API shape:
-
-- register a completion provider per handle
-- pass immutable buffer, cursor, and prompt context to the provider
-- return owned completion candidates plus optional replacement range
-- keep rendering policy in softline rather than forcing callbacks to draw
+the public contract. OSC 8 and synchronous trigger completion are implemented
+as described above.
 
 ### Hints And Autosuggestions
 
 Missing:
 
 - right-side hints
-- inline ghost text
 - validation messages
 - async suggestion updates
 - style policy for hints in narrow terminals
@@ -755,7 +940,7 @@ Current behavior emits common ANSI/VT-style escape sequences.
 Missing:
 
 - terminfo/termcap capability lookup
-- terminal feature detection
+- general terminal feature detection beyond the cached OSC 8 policy
 - fallback strategies for limited terminals
 - configurable bracketed paste support
 - richer key sequence decoding
@@ -808,7 +993,7 @@ Missing:
 - scrollback buffer abstraction for alternate-screen applications
 - offscreen transcript replay or scrollback
 - caller-driven reflow of already emitted content after resize
-- arbitrary terminal controls beyond documented SGR
+- arbitrary terminal controls beyond documented SGR and opt-in OSC 8
 
 These transcript-management features are outside the current native chat
 contract. There is one full-width chat layout, and no boxed viewport API.
@@ -817,7 +1002,7 @@ contract. There is one full-width chat layout, and no boxed viewport API.
 
 Missing:
 
-- prompt styling API
+- arbitrary prompt-span styling API
 - syntax highlighting callback
 - completion/hint style policy
 - active selection style
@@ -929,14 +1114,16 @@ facade, not a reason to weaken the core handle model.
 
 ## Suggested Near-Term Milestones
 
-1. Completion provider API
+1. Asynchronous completion providers
 
-   Add synchronous completion with replacement spans and native chat tests.
+   Synchronous trigger providers, inline phrase ghosts, Tab cycling and lazy
+   continuation callbacks are implemented. Add asynchronous resolution only
+   when an embedding host requires it.
 
 2. Unicode width policy
 
-   Decide whether softline remains byte-oriented with documented limitations or
-   adopts a width/grapheme dependency.
+   Decide whether to extend the built-in cluster/width rules or adopt a
+   width/grapheme dependency for fuller Unicode coverage.
 
 3. Event-loop-friendly session API
 

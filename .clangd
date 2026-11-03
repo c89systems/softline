@@ -1,3 +1,6 @@
+# Run make build-debug first to prepare the pinned dependencies, generated
+# headers and compilation database used below. make test-clangd checks that
+# this configuration/database is loaded and src/softline.c parses correctly.
 CompileFlags:
   CompilationDatabase: build/debug
   Add:

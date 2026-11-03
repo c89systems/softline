@@ -7,14 +7,21 @@
 int main(int argc, char **argv) {
   sl_x11_t x;
   uint32_t timestamp;
-  int fd, result = -1;
-  if (argc != 5)
+  int fd, flags, timeout_ms, result = -1;
+  if (argc != 6)
     return 2;
   memset(&x, 0, sizeof(x));
   x.fd = atoi(argv[2]);
+  /* Match sl_x11_connect(): the deadline relies on nonblocking socket I/O. */
+  flags = fcntl(x.fd, F_GETFL, 0);
+  if (flags < 0 || fcntl(x.fd, F_SETFL, flags | O_NONBLOCK) < 0)
+    return 2;
   x.sequence = (uint16_t)strtoul(argv[3], NULL, 10);
   x.root = 1;
-  x.deadline = sl_now_ms() + SL_CLIPBOARD_TIMEOUT_MS;
+  timeout_ms = atoi(argv[5]);
+  if (timeout_ms <= 0 || timeout_ms > SL_CLIPBOARD_TIMEOUT_MS)
+    return 2;
+  x.deadline = sl_now_ms() + timeout_ms;
   (void)signal(SIGPIPE, SIG_IGN);
   if (strcmp(argv[1], "atom") == 0)
     result = sl_x11_atom(&x, "CLIPBOARD") == 30 ? 0 : -1;
@@ -28,7 +35,7 @@ int main(int argc, char **argv) {
       result = -1;
   } else if (strcmp(argv[1], "select") == 0)
     result = sl_x11_select_image(&x, 10, 25, 20, 30, 123) == 1 ? 0 : -1;
-  else if (strcmp(argv[1], "transfer") == 0) {
+  else if (strcmp(argv[1], "transfer") == 0 || strcmp(argv[1], "direct") == 0) {
     fd = open(argv[4], O_WRONLY | O_CREAT | O_EXCL, 0600);
     if (fd < 0)
       return 2;

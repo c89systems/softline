@@ -18,6 +18,8 @@
 
 typedef struct softline_lua_handle {
   sl_t *sl;
+  /* Input/backend wrappers scope native callbacks to the active caller;
+   * the constructor coroutine need not remain alive after construction. */
   lua_State *L;
   struct {
     sl_key_t key;
@@ -33,6 +35,10 @@ typedef struct softline_lua_handle {
   char history_callback_error[SOFTLINE_LUA_IDLE_ERROR_LEN];
   int idle_callback_ref;
   int policy_callback_ref;
+  int completion_callback_active;
+  sl_queue_backend_t backend_callbacks;
+  int backend_callback_active;
+  int terminal_callback_active;
   int policy_callback_active;
   int idle_callback_active;
   int idle_callback_failed;
@@ -56,6 +62,10 @@ static softline_lua_handle_t *softline_lua_check(lua_State *L, int index) {
       (softline_lua_handle_t *)luaL_checkudata(L, index, SOFTLINE_LUA_HANDLE);
   luaL_argcheck(L, handle != NULL && handle->sl != NULL, index,
                 "closed softline handle");
+  luaL_argcheck(L, !handle->backend_callback_active, index,
+                "cannot reenter softline from a backend callback");
+  luaL_argcheck(L, !handle->terminal_callback_active, index,
+                "cannot reenter softline from a terminal callback");
   return handle;
 }
 
@@ -68,6 +78,9 @@ static int softline_lua_status(lua_State *L, int status) {
   lua_pushinteger(L, status);
   return 2;
 }
+
+#include "softline_queue_backend_lua.h"
+#include "softline_terminal_lua.h"
 
 static int softline_lua_find_key_ref(softline_lua_handle_t *handle,
                                      sl_key_t key) {
@@ -271,10 +284,14 @@ static const char *const softline_lua_config_fields[] = {
     "status_busy",
     "status_idle_marker",
     "history_max_len",
-    "line_max_len"};
+    "line_max_len",
+    "queue_backend",
+    "queue_backend_context",
+    "osc8_mode"};
 
 static void softline_lua_config(lua_State *L, int index, sl_config_t *config,
-                                int *rooted_template) {
+                                int *rooted_template, int *backend,
+                                int *backend_context) {
   const char *idle_marker;
   size_t idle_marker_len;
   if (lua_isnoneornil(L, index))
@@ -358,6 +375,14 @@ static void softline_lua_config(lua_State *L, int index, sl_config_t *config,
   if (!lua_isnil(L, -1))
     config->prompt_theme = (sl_prompt_theme_t)luaL_checkinteger(L, -1);
   lua_pop(L, 1);
+  lua_getfield(L, index, "osc8_mode");
+  if (!lua_isnil(L, -1)) {
+    lua_Integer mode = luaL_checkinteger(L, -1);
+    luaL_argcheck(L, mode >= SL_OSC8_OFF && mode <= SL_OSC8_AUTO, index,
+                  "osc8_mode must be OSC8_OFF, OSC8_ON or OSC8_AUTO");
+    config->osc8_mode = (sl_osc8_mode_t)mode;
+  }
+  lua_pop(L, 1);
   lua_getfield(L, index, "statusline");
   if (!lua_isnil(L, -1))
     config->statusline = lua_toboolean(L, -1);
@@ -392,15 +417,28 @@ static void softline_lua_config(lua_State *L, int index, sl_config_t *config,
   if (!lua_isnil(L, -1))
     config->line_max_len = (size_t)luaL_checkinteger(L, -1);
   lua_pop(L, 1);
+  lua_getfield(L, index, "queue_backend");
+  if (!lua_isnil(L, -1)) {
+    luaL_checktype(L, -1, LUA_TTABLE);
+    *backend = lua_gettop(L);
+  } else
+    lua_pop(L, 1);
+  lua_getfield(L, index, "queue_backend_context");
+  if (!lua_isnil(L, -1))
+    *backend_context = lua_gettop(L);
+  else
+    lua_pop(L, 1);
 }
 
 static int softline_lua_new(lua_State *L) {
   sl_config_t config;
   softline_lua_handle_t *handle;
-  int i, rooted_template = 0;
+  int i, rooted_template = 0, backend = 0, backend_context = 0;
   sl_config_init(&config);
-  softline_lua_config(L, 1, &config, &rooted_template);
-  handle = (softline_lua_handle_t *)lua_newuserdatauv(L, sizeof(*handle), 1);
+  softline_lua_config(L, 1, &config, &rooted_template, &backend,
+                      &backend_context);
+  handle = (softline_lua_handle_t *)lua_newuserdatauv(L, sizeof(*handle), 3);
+  memset(handle, 0, sizeof(*handle));
   handle->L = L;
   handle->history_callback_active = 0;
   handle->history_caller = NULL;
@@ -421,13 +459,15 @@ static int softline_lua_new(lua_State *L) {
   handle->watch_callback_active = 0;
   softline_lua_clear_idle_error(handle);
   softline_lua_clear_watch_error(handle);
+  luaL_getmetatable(L, SOFTLINE_LUA_HANDLE);
+  lua_setmetatable(L, -2);
+  backend_config(L, handle, &config, backend, backend_context);
   handle->sl = sl_create_with_config(&config);
   if (!handle->sl)
     return luaL_error(L, "failed to create softline handle");
-  luaL_getmetatable(L, SOFTLINE_LUA_HANDLE);
-  lua_setmetatable(L, -2);
-  if (rooted_template)
-    lua_remove(L, -2);
+  lua_pushvalue(L, -1);
+  lua_replace(L, 1);
+  lua_settop(L, 1);
   return 1;
 }
 
@@ -435,8 +475,10 @@ static int softline_lua_gc(lua_State *L) {
   softline_lua_handle_t *handle;
   int i;
   handle = (softline_lua_handle_t *)luaL_checkudata(L, 1, SOFTLINE_LUA_HANDLE);
-  if (handle->policy_callback_active || handle->idle_callback_active ||
-      handle->watch_callback_active || handle->history_callback_active)
+  if (handle->completion_callback_active || handle->backend_callback_active ||
+      handle->policy_callback_active || handle->idle_callback_active ||
+      handle->watch_callback_active || handle->history_callback_active ||
+      handle->terminal_callback_active)
     return 0;
   for (i = 0; i < SOFTLINE_LUA_MAX_KEY_BINDINGS; i++) {
     if (handle->key_bindings[i].ref != LUA_NOREF) {
@@ -458,27 +500,37 @@ static int softline_lua_gc(lua_State *L) {
   lua_pushnil(L);
   lua_setiuservalue(L, 1, 1);
   if (handle->sl) {
+    handle->L = L;
     sl_destroy(handle->sl);
     handle->sl = NULL;
   }
+  lua_pushnil(L);
+  lua_setiuservalue(L, 1, 2);
+  lua_pushnil(L);
+  lua_setiuservalue(L, 1, 3);
   return 0;
 }
 
 static int softline_lua_close(lua_State *L) {
   softline_lua_handle_t *handle;
   handle = (softline_lua_handle_t *)luaL_checkudata(L, 1, SOFTLINE_LUA_HANDLE);
-  if (handle->policy_callback_active || handle->idle_callback_active ||
-      handle->watch_callback_active || handle->history_callback_active)
+  if (handle->completion_callback_active || handle->backend_callback_active ||
+      handle->policy_callback_active || handle->idle_callback_active ||
+      handle->watch_callback_active || handle->history_callback_active ||
+      handle->terminal_callback_active)
     return luaL_error(L, "cannot close softline handle from its callback");
   return softline_lua_gc(L);
 }
 
-/** Lua editor:readline(prompt): return submitted input or nil, status.
- * Raw mode temporarily disables kernel tab expansion (TAB3/OXTABS) while
- * preserving OPOST/ONLCR; original terminal flags are restored on release. */
+/** Lua editor:readline(prompt): return submitted input or nil, status,
+ * including READLINE_SUSPENDED for a preserved editor continuation. Native
+ * callbacks run on this call's coroutine; the constructor coroutine need not
+ * remain alive. Raw mode temporarily disables kernel tab expansion
+ * (TAB3/OXTABS) while preserving OPOST/ONLCR; original terminal flags are
+ * restored on release. */
 static int softline_lua_readline(lua_State *L) {
   softline_lua_handle_t *handle;
-  lua_State *previous;
+  lua_State *previous, *previous_backend;
   const char *prompt;
   char *line;
   handle = softline_lua_check(L, 1);
@@ -488,7 +540,12 @@ static int softline_lua_readline(lua_State *L) {
   handle->history_callback_error[0] = '\0';
   previous = handle->history_caller;
   handle->history_caller = L;
+  /* All native callbacks belong to this input call, including when the
+   * constructor coroutine has already been collected. */
+  previous_backend = handle->L;
+  handle->L = L;
   line = sl_readline(handle->sl, prompt);
+  handle->L = previous_backend;
   handle->history_caller = previous;
   if (handle->idle_callback_failed || handle->watch_callback_failed) {
     if (line)
@@ -511,9 +568,12 @@ static int softline_lua_readline(lua_State *L) {
   return 1;
 }
 
+/** Lua editor:next_prompt(prompt): local queues return line, source, id, or
+ * nil, status on exit. Backend mode stays in the editor across offers and
+ * never returns accepted backend work as local model input. */
 static int softline_lua_next_prompt(lua_State *L) {
   softline_lua_handle_t *handle;
-  lua_State *previous;
+  lua_State *previous, *previous_backend;
   const char *prompt;
   char *line;
   sl_prompt_source_t source;
@@ -525,7 +585,10 @@ static int softline_lua_next_prompt(lua_State *L) {
   source = SL_PROMPT_SOURCE_NONE;
   previous = handle->history_caller;
   handle->history_caller = L;
+  previous_backend = handle->L;
+  handle->L = L;
   line = sl_next_prompt(handle->sl, prompt, &source);
+  handle->L = previous_backend;
   handle->history_caller = previous;
   if (handle->idle_callback_failed || handle->watch_callback_failed) {
     if (line)
@@ -834,6 +897,165 @@ static int softline_lua_set_image_paste_path_template(lua_State *L) {
       L, sl_set_image_paste_path_template(handle->sl, path_template));
 }
 
+/** Lua editor:set_osc8_mode(mode): update policy between output streams. */
+static int softline_lua_set_osc8_mode(lua_State *L) {
+  softline_lua_handle_t *handle = softline_lua_check(L, 1);
+  lua_Integer mode = luaL_checkinteger(L, 2);
+  if (mode < SL_OSC8_OFF || mode > SL_OSC8_AUTO)
+    return softline_lua_status(L, SL_ERROR_INVALID);
+  return softline_lua_status(
+      L, sl_set_osc8_mode(handle->sl, (sl_osc8_mode_t)mode));
+}
+
+/** Lua editor:get_osc8_info(): cached mode, detected and enabled fields. */
+static int softline_lua_get_osc8_info(lua_State *L) {
+  softline_lua_handle_t *handle = softline_lua_check(L, 1);
+  sl_osc8_info_t info;
+  int result = sl_get_osc8_info(handle->sl, &info);
+  if (result != SL_OK)
+    return softline_lua_status(L, result);
+  lua_newtable(L);
+  lua_pushinteger(L, info.mode);
+  lua_setfield(L, -2, "mode");
+  lua_pushboolean(L, info.detected);
+  lua_setfield(L, -2, "detected");
+  lua_pushboolean(L, info.enabled);
+  lua_setfield(L, -2, "enabled");
+  return 1;
+}
+
+static int softline_lua_completion(sl_t *sl, const char *prefix,
+                                   const char *method,
+                                   sl_completion_emit_t emit, void *context,
+                                   void *userdata) {
+  softline_lua_handle_t *handle = userdata;
+  lua_State *L = handle->history_caller ? handle->history_caller : handle->L;
+  int top = lua_gettop(L), status = SL_OK;
+  size_t i, count;
+  (void)sl;
+  lua_getiuservalue(L, 1, 3);
+  lua_pushlstring(L, prefix, 1);
+  lua_rawget(L, -2);
+  lua_getfield(L, -1, method);
+  lua_pushstring(L, prefix);
+  handle->completion_callback_active = 1;
+  if (lua_pcall(L, 1, 1, 0) != LUA_OK)
+    status = SL_ERROR;
+  else if (!lua_istable(L, -1))
+    status = SL_ERROR_INVALID;
+  else {
+    count = lua_rawlen(L, -1);
+    for (i = 0; i < count; ++i) {
+      const char *text;
+      size_t length;
+      lua_rawgeti(L, -1, (lua_Integer)i + 1);
+      text =
+          lua_type(L, -1) == LUA_TSTRING ? lua_tolstring(L, -1, &length) : NULL;
+      if (!text || strlen(text) != length)
+        status = SL_ERROR_INVALID;
+      else
+        status = emit(text, context);
+      lua_pop(L, 1);
+      if (status != SL_OK)
+        break;
+    }
+  }
+  handle->completion_callback_active = 0;
+  lua_settop(L, top);
+  return status;
+}
+
+static int softline_lua_complete(sl_t *sl, char trigger,
+                                 sl_completion_emit_t emit, void *context,
+                                 void *userdata) {
+  char prefix[2];
+  prefix[0] = trigger;
+  prefix[1] = '\0';
+  return softline_lua_completion(sl, prefix, "complete", emit, context,
+                                 userdata);
+}
+
+static int softline_lua_expand(sl_t *sl, const char *completed,
+                               sl_completion_emit_t emit, void *context,
+                               void *userdata) {
+  return softline_lua_completion(sl, completed, "expand", emit, context,
+                                 userdata);
+}
+
+/** Lua editor:set_completion_providers(registrations): replace trigger/scope/
+ * strip_trigger settings, complete(trigger), and optional expand(completed).
+ * Callbacks return full strings including the trigger, run synchronously on
+ * the input coroutine, and must not mutate/close the editor or yield. Lists are
+ * copied and cached per activation; matching spaces keep phrase ghosts active.
+ * Tab accepts then cycles; Enter submits actual text. expand runs on a later
+ * Tab before rotation, including for a unique complete match. nil clears the
+ * registrations. Invalid fields preserve the previous registrations.
+ */
+static int softline_lua_set_completion_providers(lua_State *L) {
+  softline_lua_handle_t *handle = softline_lua_check(L, 1);
+  sl_completion_provider_t *items;
+  size_t count = 0, i;
+  int callbacks, status;
+  if (handle->completion_callback_active)
+    return softline_lua_status(L, SL_ERROR_NOT_READY);
+  if (!lua_isnoneornil(L, 2)) {
+    luaL_checktype(L, 2, LUA_TTABLE);
+    count = lua_rawlen(L, 2);
+  }
+  luaL_argcheck(L, count <= (size_t)-1 / sizeof(*items), 2,
+                "too many completion providers");
+  items = lua_newuserdatauv(L, count * sizeof(*items), 0);
+  memset(items, 0, count * sizeof(*items));
+  lua_newtable(L);
+  callbacks = lua_gettop(L);
+  for (i = 0; i < count; ++i) {
+    const char *trigger;
+    size_t length;
+    lua_rawgeti(L, 2, (lua_Integer)i + 1);
+    luaL_checktype(L, -1, LUA_TTABLE);
+    lua_getfield(L, -1, "trigger");
+    trigger = luaL_checklstring(L, -1, &length);
+    luaL_argcheck(L, length == 1, 2, "trigger must be one ASCII character");
+    items[i].trigger = trigger[0];
+    lua_pop(L, 1);
+    lua_getfield(L, -1, "scope");
+    if (!lua_isnil(L, -1)) {
+      lua_Integer scope = luaL_checkinteger(L, -1);
+      luaL_argcheck(L,
+                    scope == SL_COMPLETION_START || scope == SL_COMPLETION_WORD,
+                    2, "invalid completion scope");
+      items[i].scope = (sl_completion_scope_t)scope;
+    }
+    lua_pop(L, 1);
+    lua_getfield(L, -1, "strip_trigger");
+    if (!lua_isnil(L, -1))
+      luaL_checktype(L, -1, LUA_TBOOLEAN);
+    items[i].strip_trigger = lua_toboolean(L, -1);
+    lua_pop(L, 1);
+    lua_pushlstring(L, &items[i].trigger, 1);
+    lua_newtable(L);
+    lua_getfield(L, -3, "complete");
+    luaL_checktype(L, -1, LUA_TFUNCTION);
+    lua_setfield(L, -2, "complete");
+    lua_getfield(L, -3, "expand");
+    if (!lua_isnil(L, -1)) {
+      luaL_checktype(L, -1, LUA_TFUNCTION);
+      items[i].expand = softline_lua_expand;
+    }
+    lua_setfield(L, -2, "expand");
+    lua_rawset(L, callbacks);
+    items[i].callback = softline_lua_complete;
+    items[i].userdata = handle;
+    lua_pop(L, 1);
+  }
+  status = sl_set_completion_providers(handle->sl, items, count);
+  if (status != SL_OK)
+    return softline_lua_status(L, status);
+  lua_pushvalue(L, callbacks);
+  lua_setiuservalue(L, 1, 3);
+  return softline_lua_status(L, SL_OK);
+}
+
 static int softline_lua_set_prompt_queue(lua_State *L) {
   softline_lua_handle_t *handle;
   handle = softline_lua_check(L, 1);
@@ -1076,7 +1298,12 @@ static int softline_lua_queue_stopped(lua_State *L) {
 
 static int softline_lua_queue_resume(lua_State *L) {
   softline_lua_handle_t *handle = softline_lua_check(L, 1);
-  return softline_lua_status(L, sl_prompt_queue_resume(handle->sl));
+  lua_State *previous = handle->L;
+  int status;
+  handle->L = L;
+  status = sl_prompt_queue_resume(handle->sl);
+  handle->L = previous;
+  return softline_lua_status(L, status);
 }
 
 static int softline_lua_queue_info(lua_State *L) {
@@ -1108,18 +1335,28 @@ static int softline_lua_queue_draft_info(lua_State *L) {
 
 static int softline_lua_queue_approve(lua_State *L) {
   softline_lua_handle_t *handle = softline_lua_check(L, 1);
+  lua_State *previous = handle->L;
+  int status;
   sl_prompt_id_t id;
   if (!softline_lua_queue_identity(L, &id))
     return softline_lua_status(L, SL_ERROR_INVALID);
-  return softline_lua_status(L, sl_prompt_queue_approve(handle->sl, id));
+  handle->L = L;
+  status = sl_prompt_queue_approve(handle->sl, id);
+  handle->L = previous;
+  return softline_lua_status(L, status);
 }
 
 static int softline_lua_queue_reject(lua_State *L) {
   softline_lua_handle_t *handle = softline_lua_check(L, 1);
+  lua_State *previous = handle->L;
+  int status;
   sl_prompt_id_t id;
   if (!softline_lua_queue_identity(L, &id))
     return softline_lua_status(L, SL_ERROR_INVALID);
-  return softline_lua_status(L, sl_prompt_queue_reject(handle->sl, id));
+  handle->L = L;
+  status = sl_prompt_queue_reject(handle->sl, id);
+  handle->L = previous;
+  return softline_lua_status(L, status);
 }
 
 static int softline_lua_last_prompt_id(lua_State *L) {
@@ -1191,14 +1428,17 @@ static int softline_lua_queue_clear(lua_State *L) {
 
 static int softline_lua_queue_draft(lua_State *L) {
   softline_lua_handle_t *handle;
-  lua_State *previous;
+  lua_State *previous, *previous_backend;
   int status;
   handle = softline_lua_check(L, 1);
   if (!handle->history_callback_active)
     handle->history_callback_error[0] = '\0';
   previous = handle->history_caller;
   handle->history_caller = L;
+  previous_backend = handle->L;
+  handle->L = L;
   status = sl_prompt_queue_enqueue_draft(handle->sl);
+  handle->L = previous_backend;
   handle->history_caller = previous;
   return softline_lua_history_status(L, handle, status);
 }
@@ -1517,6 +1757,9 @@ static int softline_lua_cancel(lua_State *L) {
   handle = softline_lua_check(L, 1);
   return softline_lua_status(L, sl_cancel(handle->sl));
 }
+static int softline_lua_suspend(lua_State *L) {
+  return softline_lua_status(L, sl_suspend(softline_lua_check(L, 1)->sl));
+}
 
 /** Lua editor:bind_key(key, callback) overrides built-in handling. An Enter
  * callback returning KEY_ACTION_SUBMIT submits a reverse-search match
@@ -1792,7 +2035,9 @@ static int softline_lua_output_stream_reconcile(lua_State *L) {
 
 /** Lua editor:output_stream_write(bytes): forward a byte string immediately.
  * No newline or document boundary is inferred; an empty string is a no-op.
- * Printable UTF-8, LF/CR/Tab and ANSI SGR are accepted. Partial ANSI/UTF-8 is
+ * Printable UTF-8, LF/CR/Tab, ANSI SGR and opt-in OSC 8 are accepted. OSC 8 is
+ * off by default; get_osc8_info().enabled reports the effective feed policy.
+ * Other OSC controls remain rejected. Partial ANSI/UTF-8 is
  * bounded and retained across writes; complete bytes are emitted before return.
  * Native LF follows OPOST/ONLCR. While Softline owns raw mode, kernel tab
  * expansion (TAB3/OXTABS) is disabled so tabs reach the terminal unchanged;
@@ -1860,6 +2105,13 @@ static int softline_lua_output_stream_end(lua_State *L) {
 }
 
 static const luaL_Reg softline_lua_methods[] = {
+    {"queue_backend_request", softline_lua_queue_backend_request},
+    {"queue_backend_result", softline_lua_queue_backend_result},
+    {"queue_backend_update", softline_lua_queue_backend_update},
+    {"queue_backend_info", softline_lua_queue_backend_info},
+    {"queue_backend_entry", softline_lua_queue_backend_entry},
+    {"queue_backend_pending", softline_lua_queue_backend_pending},
+    {"queue_backend_recover", softline_lua_queue_backend_recover},
     {"readline", softline_lua_readline},
     {"next_prompt", softline_lua_next_prompt},
     {"history_add", softline_lua_history_add},
@@ -1872,6 +2124,9 @@ static const luaL_Reg softline_lua_methods[] = {
     {"history_compact", softline_lua_history_compact},
     {"history_set_auto_add", softline_lua_history_set_auto_add},
     {"set_screen_width", softline_lua_set_screen_width},
+    {"set_completion_providers", softline_lua_set_completion_providers},
+    {"set_osc8_mode", softline_lua_set_osc8_mode},
+    {"get_osc8_info", softline_lua_get_osc8_info},
     {"set_live_scroll_region", softline_lua_set_live_scroll_region},
     {"set_image_paste_path_template",
      softline_lua_set_image_paste_path_template},
@@ -1926,6 +2181,7 @@ static const luaL_Reg softline_lua_methods[] = {
     {"set_cursor", softline_lua_set_cursor},
     {"submit", softline_lua_submit},
     {"cancel", softline_lua_cancel},
+    {"suspend", softline_lua_suspend},
     {"bind_key", softline_lua_bind_key},
     {"set_idle_callback", softline_lua_set_idle_callback},
     {"watch_add", softline_lua_watch_add},
@@ -1944,8 +2200,11 @@ static const luaL_Reg softline_lua_methods[] = {
     {"close", softline_lua_close},
     {NULL, NULL}};
 
-static const luaL_Reg softline_lua_functions[] = {{"new", softline_lua_new},
-                                                  {NULL, NULL}};
+static const luaL_Reg softline_lua_functions[] = {
+    {"new", softline_lua_new},
+    {"terminal_handoff", softline_lua_terminal_handoff},
+    {"terminal_local", softline_lua_terminal_local},
+    {NULL, NULL}};
 
 int luaopen_softline(lua_State *L) {
   luaL_newmetatable(L, SOFTLINE_LUA_HANDLE);
@@ -1958,6 +2217,18 @@ int luaopen_softline(lua_State *L) {
 
   lua_newtable(L);
   luaL_setfuncs(L, softline_lua_functions, 0);
+  lua_pushinteger(L, SL_TERMINAL_OPEN);
+  lua_setfield(L, -2, "TERMINAL_OPEN");
+  lua_pushinteger(L, SL_TERMINAL_STEP);
+  lua_setfield(L, -2, "TERMINAL_STEP");
+  lua_pushinteger(L, SL_TERMINAL_READ);
+  lua_setfield(L, -2, "TERMINAL_READ");
+  lua_pushinteger(L, SL_TERMINAL_WRITE);
+  lua_setfield(L, -2, "TERMINAL_WRITE");
+  lua_pushinteger(L, SL_TERMINAL_RESIZE);
+  lua_setfield(L, -2, "TERMINAL_RESIZE");
+  lua_pushinteger(L, SL_TERMINAL_CLOSE);
+  lua_setfield(L, -2, "TERMINAL_CLOSE");
   lua_pushinteger(L, SL_READLINE_NONE);
   lua_setfield(L, -2, "READLINE_NONE");
   lua_pushinteger(L, SL_READLINE_SUBMITTED);
@@ -1984,6 +2255,54 @@ int luaopen_softline(lua_State *L) {
   lua_setfield(L, -2, "ERROR_IO");
   lua_pushinteger(L, SL_ERROR_FULL);
   lua_setfield(L, -2, "ERROR_FULL");
+  lua_pushinteger(L, SL_ERROR_UNSUPPORTED);
+  lua_setfield(L, -2, "ERROR_UNSUPPORTED");
+  lua_pushinteger(L, SL_ERROR_CONFLICT);
+  lua_setfield(L, -2, "ERROR_CONFLICT");
+  lua_pushinteger(L, SL_ERROR_NOT_READY);
+  lua_setfield(L, -2, "ERROR_NOT_READY");
+  lua_pushinteger(L, SL_QUEUE_OFFER);
+  lua_setfield(L, -2, "QUEUE_OFFER");
+  lua_pushinteger(L, SL_QUEUE_BEGIN_EDIT);
+  lua_setfield(L, -2, "QUEUE_BEGIN_EDIT");
+  lua_pushinteger(L, SL_QUEUE_END_EDIT);
+  lua_setfield(L, -2, "QUEUE_END_EDIT");
+  lua_pushinteger(L, SL_QUEUE_ABORT_EDIT);
+  lua_setfield(L, -2, "QUEUE_ABORT_EDIT");
+  lua_pushinteger(L, SL_QUEUE_APPROVE);
+  lua_setfield(L, -2, "QUEUE_APPROVE");
+  lua_pushinteger(L, SL_QUEUE_WITHDRAW);
+  lua_setfield(L, -2, "QUEUE_WITHDRAW");
+  lua_pushinteger(L, SL_QUEUE_SET_INTENT);
+  lua_setfield(L, -2, "QUEUE_SET_INTENT");
+  lua_pushinteger(L, SL_QUEUE_STOP);
+  lua_setfield(L, -2, "QUEUE_STOP");
+  lua_pushinteger(L, SL_QUEUE_RESUME);
+  lua_setfield(L, -2, "QUEUE_RESUME");
+  lua_pushinteger(L, SL_QUEUE_CLEAR);
+  lua_setfield(L, -2, "QUEUE_CLEAR");
+  lua_pushinteger(L, SL_QUEUE_AUTO_APPROVAL);
+  lua_setfield(L, -2, "QUEUE_AUTO_APPROVAL");
+  lua_pushinteger(L, SL_QUEUE_SYNCHRONIZE);
+  lua_setfield(L, -2, "QUEUE_SYNCHRONIZE");
+  lua_pushinteger(L, SL_QUEUE_RESOLVE);
+  lua_setfield(L, -2, "QUEUE_RESOLVE");
+  lua_pushinteger(L, SL_QUEUE_ACCEPTED);
+  lua_setfield(L, -2, "QUEUE_ACCEPTED");
+  lua_pushinteger(L, SL_QUEUE_REJECTED);
+  lua_setfield(L, -2, "QUEUE_REJECTED");
+  lua_pushinteger(L, SL_QUEUE_UNKNOWN);
+  lua_setfield(L, -2, "QUEUE_UNKNOWN");
+  lua_pushinteger(L, SL_QUEUE_SNAPSHOT);
+  lua_setfield(L, -2, "QUEUE_SNAPSHOT");
+  lua_pushinteger(L, SL_QUEUE_UPSERT);
+  lua_setfield(L, -2, "QUEUE_UPSERT");
+  lua_pushinteger(L, SL_QUEUE_REMOVE);
+  lua_setfield(L, -2, "QUEUE_REMOVE");
+  lua_pushinteger(L, SL_QUEUE_STATE);
+  lua_setfield(L, -2, "QUEUE_STATE");
+  lua_pushinteger(L, SL_QUEUE_DISCONNECTED);
+  lua_setfield(L, -2, "QUEUE_DISCONNECTED");
   lua_pushinteger(L, SL_WATCH_READ);
   lua_setfield(L, -2, "WATCH_READ");
   lua_pushinteger(L, SL_WATCH_WRITE);
@@ -2094,6 +2413,18 @@ int luaopen_softline(lua_State *L) {
   lua_setfield(L, -2, "KEY_BACKSPACE");
   lua_pushinteger(L, SL_KEY_TAB);
   lua_setfield(L, -2, "KEY_TAB");
+  lua_pushinteger(L, SL_OSC8_OFF);
+  lua_setfield(L, -2, "OSC8_OFF");
+  lua_pushinteger(L, SL_OSC8_ON);
+  lua_setfield(L, -2, "OSC8_ON");
+  lua_pushinteger(L, SL_OSC8_AUTO);
+  lua_setfield(L, -2, "OSC8_AUTO");
+  lua_pushinteger(L, SL_OSC8_MAX_BYTES);
+  lua_setfield(L, -2, "OSC8_MAX_BYTES");
+  lua_pushinteger(L, SL_COMPLETION_START);
+  lua_setfield(L, -2, "COMPLETION_START");
+  lua_pushinteger(L, SL_COMPLETION_WORD);
+  lua_setfield(L, -2, "COMPLETION_WORD");
   lua_pushinteger(L, SL_KEY_ENTER);
   lua_setfield(L, -2, "KEY_ENTER");
   lua_pushinteger(L, SL_KEY_CTRL_N);

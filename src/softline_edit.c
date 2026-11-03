@@ -30,7 +30,8 @@ void sl_edit_destroy(sl_edit_t *edit) {
 }
 
 void sl_edit_begin(sl_edit_t *edit, int command) {
-  if ((command != SL_EDIT_INSERT && command != SL_EDIT_PASTE) ||
+  if ((command != SL_EDIT_INSERT && command != SL_EDIT_PASTE &&
+       command != SL_EDIT_COMPLETE) ||
       edit->last_command != command)
     edit->group++;
   edit->open = 1;
@@ -80,10 +81,14 @@ int sl_edit_record(sl_edit_t *edit, size_t at, const char *old, size_t old_len,
 }
 
 int sl_edit_undo(sl_edit_t *edit, char *buf, size_t cap, size_t *len,
-                 size_t *cursor) {
+                 size_t *cursor, sl_edit_change_t *change) {
   unsigned long group;
   size_t restored;
   struct sl_undo_entry *check;
+  size_t original = *len, first = *len, last = 0;
+  int changed = 0;
+  if (change)
+    memset(change, 0, sizeof(*change));
   if (!edit->undo)
     return 0;
   group = edit->undo->group;
@@ -100,6 +105,13 @@ int sl_edit_undo(sl_edit_t *edit, char *buf, size_t cap, size_t *len,
     restored += check->removed;
     if (check->cursor > restored)
       goto invalid;
+    if (!changed || last < check->at + check->inserted)
+      last = check->at + check->removed;
+    else
+      last = last - check->inserted + check->removed;
+    if (!changed || check->at < first)
+      first = check->at;
+    changed = 1;
   }
   do {
     struct sl_undo_entry *entry = edit->undo;
@@ -115,6 +127,11 @@ int sl_edit_undo(sl_edit_t *edit, char *buf, size_t cap, size_t *len,
     free(entry);
   } while (edit->undo && edit->undo->group == group);
   edit->yank_valid = 0;
+  if (change) {
+    change->at = first;
+    change->removed = original - (*len - last) - first;
+    change->inserted = last - first;
+  }
   return 1;
 invalid:
   sl_edit_clear_undo(edit);

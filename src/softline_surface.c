@@ -1,5 +1,6 @@
 #include "softline_surface.h"
 #include "softline_unicode.h"
+#include <softline/softline.h>
 
 #include <errno.h>
 #include <stdio.h>
@@ -34,7 +35,12 @@ struct sl_surface {
   size_t line_extent;
   int ascii_line;
   int line_open;
-  int parser; /* 0 text, 1 ESC, 2 CSI */
+  int parser; /* 0 text, 1 ESC, 2 CSI, 3..7 OSC 8 */
+  int osc8_enabled, osc8_open;
+  size_t osc_len, uri_len;
+  unsigned long osc_cp, osc_min;
+  unsigned int osc_need;
+  char *hyperlink; /* Active producer control only; no label/transcript. */
   char csi[128];
   size_t csi_len;
   char utf8[4];
@@ -178,7 +184,61 @@ static int sl_surface_byte(sl_surface_t *surface, unsigned char byte,
                            int newline_returns) {
   unsigned long cp;
   unsigned int i;
+  if (surface->parser >= 3) {
+    int state = surface->parser;
+    if (++surface->osc_len > SL_OSC8_MAX_BYTES)
+      return -2;
+    if (state == 3) {
+      if (byte != '8')
+        return -2;
+      surface->parser = 4;
+    } else if (state == 4) {
+      if (byte != ';')
+        return -2;
+      surface->parser = 5;
+    } else if (state == 5) {
+      if (byte == ';')
+        surface->parser = 6;
+      else if (byte < 0x20 || byte >= 0x7f)
+        return -2;
+    } else if (state == 7) {
+      if (byte != '\\')
+        return -2;
+      surface->parser = 0;
+      surface->osc8_open = surface->uri_len != 0;
+    } else if (surface->osc_need) {
+      if ((byte & 0xc0u) != 0x80u)
+        return -2;
+      surface->osc_cp = (surface->osc_cp << 6) | (byte & 0x3fu);
+      if (!--surface->osc_need &&
+          (surface->osc_cp < surface->osc_min ||
+           (surface->osc_cp >= 0x80 && surface->osc_cp <= 0x9f) ||
+           (surface->osc_cp >= 0xd800 && surface->osc_cp <= 0xdfff) ||
+           surface->osc_cp > 0x10ffff))
+        return -2;
+      ++surface->uri_len;
+    } else if (byte == 0x07 || byte == 0x1b) {
+      surface->parser = byte == 0x07 ? 0 : 7;
+      if (!surface->parser)
+        surface->osc8_open = surface->uri_len != 0;
+    } else if (byte >= 0x20 && byte < 0x7f)
+      ++surface->uri_len;
+    else if (byte >= 0xc2 && byte <= 0xf4) {
+      surface->osc_need = byte < 0xe0 ? 1 : byte < 0xf0 ? 2 : 3;
+      surface->osc_min = byte < 0xe0 ? 0x80 : byte < 0xf0 ? 0x800 : 0x10000;
+      surface->osc_cp = byte & (byte < 0xe0 ? 0x1f : byte < 0xf0 ? 0x0f : 7);
+      ++surface->uri_len;
+    } else
+      return -2;
+    return 0;
+  }
   if (surface->parser == 1) {
+    if (byte == ']' && surface->osc8_enabled) {
+      surface->parser = 3;
+      surface->osc_len = 2;
+      surface->uri_len = surface->osc_need = 0;
+      return 0;
+    }
     if (byte != '[') {
       surface->parser = 0;
       return -2;
@@ -301,8 +361,11 @@ static int sl_surface_byte(sl_surface_t *surface, unsigned char byte,
   return 0;
 }
 
-sl_surface_t *sl_surface_create_validator(void) {
-  return (sl_surface_t *)calloc(1, sizeof(sl_surface_t));
+sl_surface_t *sl_surface_create_validator(int fd) {
+  sl_surface_t *surface = calloc(1, sizeof(*surface));
+  if (surface)
+    surface->fd = fd;
+  return surface;
 }
 
 int sl_surface_is_native(const sl_surface_t *surface) {
@@ -357,7 +420,7 @@ static int sl_surface_style(const sl_surface_t *surface, char *seq,
 
 sl_surface_t *sl_surface_create_native(int fd, int width, int height, int row,
                                        int col, int history_rows) {
-  sl_surface_t *surface = sl_surface_create_validator();
+  sl_surface_t *surface = sl_surface_create_validator(fd);
   struct winsize terminal;
   char seq[128];
   int count, shift;
@@ -463,8 +526,20 @@ static int sl_surface_continues_row(const char *bytes, size_t length) {
   while (i < length) {
     unsigned char ch = (unsigned char)bytes[i++];
     if (ch == 27) {
-      while (i < length && bytes[i++] != 'm')
-        ;
+      if (i < length && bytes[i++] == ']') {
+        while (i < length) {
+          ch = (unsigned char)bytes[i++];
+          if (ch == 7)
+            break;
+          if (ch == 27 && i < length && bytes[i] == '\\') {
+            ++i;
+            break;
+          }
+        }
+      } else {
+        while (i < length && bytes[i++] != 'm')
+          ;
+      }
       continue;
     }
     return ch != '\n' && ch != '\r' && ch != '\t';
@@ -492,12 +567,14 @@ static void sl_surface_clip_producer(sl_surface_t *surface) {
 
 int sl_surface_native_write(sl_surface_t *surface, const char *bytes,
                             size_t length, int prompt_row, int prompt_col) {
-  struct iovec parts[3];
+  struct iovec parts[4];
   sl_surface_t next;
   char prefix[192], suffix[64];
   int count, position, style_count, suffix_count, first, newline_returns;
   struct termios attributes;
-  size_t i;
+  size_t i, osc_start = 0;
+  char *new_link = NULL;
+  int link_changed = 0;
   if (!sl_surface_is_native(surface))
     return -1;
   if (tcgetattr(surface->fd, &attributes) != 0)
@@ -536,44 +613,67 @@ int sl_surface_native_write(sl_surface_t *surface, const char *bytes,
   if (style_count < 0)
     return -1;
   count += style_count;
-  memcpy(suffix, "\033[0m", 4);
-  suffix_count = 4;
-  if (prompt_row >= 0) {
-    int position = sl_surface_cursor(
-        suffix + suffix_count, sizeof(suffix) - (size_t)suffix_count,
-        surface->terminal_rows - 1 - prompt_row, prompt_col);
-    if (position < 0)
-      return -1;
-    suffix_count += position;
-  }
+  suffix_count = 0;
   next = *surface;
   next.write_line_control = 0;
   sl_surface_reset_partial(&next);
   next.tracking = 1;
   for (i = 0; i < length; i++) {
+    int state = next.parser;
+    if (state == 1 && bytes[i] == ']')
+      osc_start = i - 1;
     if (sl_surface_byte(&next, (unsigned char)bytes[i], newline_returns) != 0)
-      return -1;
+      goto failed;
+    if (state >= 6 && !next.parser) {
+      free(new_link);
+      new_link = NULL;
+      link_changed = 1;
+      if (next.osc8_open) {
+        size_t size = i - osc_start + 1;
+        new_link = malloc(size + 1);
+        if (!new_link)
+          goto failed;
+        memcpy(new_link, bytes + osc_start, size);
+        new_link[size] = '\0';
+      }
+    }
+  }
+  if (link_changed ? new_link != NULL : surface->hyperlink != NULL) {
+    memcpy(suffix, "\033]8;;\033\\", 7);
+    suffix_count = 7;
+  }
+  memcpy(suffix + suffix_count, "\033[0m", 4);
+  suffix_count += 4;
+  if (prompt_row >= 0) {
+    int position = sl_surface_cursor(
+        suffix + suffix_count, sizeof(suffix) - (size_t)suffix_count,
+        surface->terminal_rows - 1 - prompt_row, prompt_col);
+    if (position < 0)
+      goto failed;
+    suffix_count += position;
   }
   parts[0].iov_base = prefix;
   parts[0].iov_len = (size_t)count;
-  parts[1].iov_base = (void *)bytes;
-  parts[1].iov_len = length;
-  parts[2].iov_base = suffix;
-  parts[2].iov_len = (size_t)suffix_count;
+  parts[1].iov_base = surface->hyperlink;
+  parts[1].iov_len = surface->hyperlink ? strlen(surface->hyperlink) : 0;
+  parts[2].iov_base = (void *)bytes;
+  parts[2].iov_len = length;
+  parts[3].iov_base = suffix;
+  parts[3].iov_len = (size_t)suffix_count;
   first = 0;
-  while (first < 3) {
-    ssize_t written = writev(surface->fd, parts + first, 3 - first);
+  while (first < 4) {
+    ssize_t written = writev(surface->fd, parts + first, 4 - first);
     if (written < 0 && errno == EINTR)
       continue;
     if (written <= 0) {
       surface->producer_cursor_live = 0;
-      return -1;
+      goto failed;
     }
-    while (first < 3 && (size_t)written >= parts[first].iov_len) {
+    while (first < 4 && (size_t)written >= parts[first].iov_len) {
       written -= (ssize_t)parts[first].iov_len;
       first++;
     }
-    if (first < 3) {
+    if (first < 4) {
       parts[first].iov_base = (char *)parts[first].iov_base + written;
       parts[first].iov_len -= (size_t)written;
     }
@@ -590,7 +690,14 @@ int sl_surface_native_write(sl_surface_t *surface, const char *bytes,
   surface->attributes = next.attributes;
   memcpy(surface->foreground, next.foreground, sizeof(next.foreground));
   memcpy(surface->background, next.background, sizeof(next.background));
+  if (link_changed) {
+    free(surface->hyperlink);
+    surface->hyperlink = new_link;
+  }
   return 0;
+failed:
+  free(new_link);
+  return -1;
 }
 
 int sl_surface_native_finish(sl_surface_t *surface, int prompt_row) {
@@ -618,6 +725,7 @@ int sl_surface_native_finish(sl_surface_t *surface, int prompt_row) {
       SL_ROW(surface) >= surface->terminal_rows - 1)
     sl_surface_native_history_shift(surface, -1);
   surface->native_stream = 0;
+  surface->osc8_open = 0;
   return 0;
 }
 
@@ -626,6 +734,9 @@ void sl_surface_destroy(sl_surface_t *surface) {
     return;
   if (surface->native_stream)
     (void)sl_surface_native_finish(surface, -1);
+  else if (surface->osc8_open)
+    (void)sl_surface_write_all(surface->fd, "\033]8;;\033\\", 7);
+  free(surface->hyperlink);
   free(surface);
 }
 
@@ -759,8 +870,19 @@ void sl_surface_reset_partial(sl_surface_t *surface) {
     return;
   surface->parser = 0;
   surface->csi_len = 0;
+  surface->osc_need = 0;
   surface->utf8_len = 0;
   surface->utf8_need = 0;
+}
+
+void sl_surface_set_osc8(sl_surface_t *surface, int enabled) {
+  if (surface)
+    surface->osc8_enabled = enabled;
+}
+
+int sl_surface_hyperlink_active(const sl_surface_t *surface) {
+  return surface && (surface->native_stream ? surface->hyperlink != NULL
+                                            : surface->osc8_open);
 }
 
 int sl_surface_native_cursor_live(const sl_surface_t *surface) {

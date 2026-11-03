@@ -20,6 +20,8 @@ cp "${ROOT_DIR}/README.md" "${STAGE_ROOT}/"
 cp "${ROOT_DIR}/softline.rockspec.in" "${STAGE_ROOT}/"
 cp "${ROOT_DIR}/lua/README.md" "${STAGE_ROOT}/lua/"
 cp "${ROOT_DIR}/lua/softline_lua.c" "${STAGE_ROOT}/lua/"
+cp "${ROOT_DIR}/lua/softline_queue_backend_lua.h" "${STAGE_ROOT}/lua/"
+cp "${ROOT_DIR}/lua/softline_terminal_lua.h" "${STAGE_ROOT}/lua/"
 cp "${ROOT_DIR}/scripts/build_lua_rock.sh" "${STAGE_ROOT}/scripts/"
 cp "${ROOT_DIR}/scripts/require-host-bash.sh" "${STAGE_ROOT}/scripts/"
 cp "${ROOT_DIR}/scripts/release_version.sh" "${STAGE_ROOT}/scripts/"
@@ -30,6 +32,7 @@ cp "${ROOT_DIR}/tests/lua_readline.lua" "${STAGE_ROOT}/tests/"
 cp "${ROOT_DIR}/tests/lua_watch_file_gc.lua" "${STAGE_ROOT}/tests/"
 cp "${ROOT_DIR}/examples/simple.lua" "${STAGE_ROOT}/examples/"
 cp "${ROOT_DIR}/examples/chat.lua" "${STAGE_ROOT}/examples/"
+cp "${ROOT_DIR}/examples/completion.lua" "${STAGE_ROOT}/examples/"
 
 cat > "${STAGE_ROOT}/RELEASE_MANIFEST" <<'EOF'
 LICENSE
@@ -37,6 +40,8 @@ README.md
 softline.rockspec.in
 lua/README.md
 lua/softline_lua.c
+lua/softline_queue_backend_lua.h
+lua/softline_terminal_lua.h
 scripts/build_lua_rock.sh
 scripts/require-host-bash.sh
 scripts/release_version.sh
@@ -47,6 +52,7 @@ tests/lua_readline.lua
 tests/lua_watch_file_gc.lua
 examples/simple.lua
 examples/chat.lua
+examples/completion.lua
 VERSION
 RELEASE_MANIFEST
 EOF

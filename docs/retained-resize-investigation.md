@@ -1,5 +1,10 @@
 # Retained-frame resize regression
 
+This is the historical investigation of the reconciliation repair first shipped
+in v0.11.0. Its original ABI and test counts below are historical evidence, not
+current release proof. The current API uses ABI 4; see the
+[ABI contract](softline-mdf-stream-design.md#shared-library-abi).
+
 The standalone C fixture and real tmux cell assertions reproduce the reported
 stale status suffix after a settled resize between output writes. The fixture
 links only Softline, with no renderer, provider or adjacent checkout dependency.
@@ -12,8 +17,9 @@ resize settles and before synchronous output resumes. It observes and repaints
 the owned frame without entering/cancelling readline, changing input state,
 waiting inside feeds or retaining/replaying transcript bytes. Check its result:
 a missing cursor report returns `SL_ERROR_IO`. C receiver/free-function and Lua
-methods are equivalent. Consumers must rebuild for ABI 1, one increment from
-released v0.10.0's ABI 0; the exposed receiver layout gains a method.
+methods are equivalent. The repair originally required rebuilding consumers for
+ABI 1, one increment from released v0.10.0's ABI 0, because the receiver gained
+a method. Current consumers must use the current matching header/library pair.
 
 Run the required regressions with the prepared native toolchain and tmux:
 
@@ -83,7 +89,7 @@ racing a write and terminal-specific Unicode/tab reflow ambiguities retain their
 documented limits. CAI's dependency update and adoption of the new call are
 separate work outside this repository.
 
-## Verification
+## Original repair verification
 
 The completed repair passed the full native suite (57/57), host/API checks
 (24/24), ASan/UBSan (14/14), Lua (16/16), and installed static/shared/both
@@ -91,7 +97,8 @@ CMake and pkg-config consumers, including lib64. The installed consumer calls
 both forms of the reconciliation API. SONAME is `libsoftline.so.1`; generated
 package metadata reports ABI 1. Formatting and diff checks also pass.
 
-Logs are retained under `build/retained-resize-{native,host,asan,lua,consumers}.log`.
+Original logs used `build/retained-resize-{native,host,asan,lua,consumers}.log`.
+These generated logs are disposable and removed by `make clean`.
 Old sanitizer and consumer build caches referenced the retired toolchain root;
 only those owned build directories were moved aside before reconfiguration.
 No release/tag/publish operation is part of this repair.

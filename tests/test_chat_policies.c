@@ -13,6 +13,22 @@ static int idle_after(struct editor *e, size_t offset, const char *completed) {
   return 1;
 }
 
+static int reattached(struct editor *e, size_t offset) {
+  double deadline = now() + 2;
+  if (!remote_owner)
+    return 0;
+  do {
+    /* A resumed empty editor first paints the unsynchronized panel. Its
+     * removal leaves the reasoning row, status line and single input row. */
+    if (strstr(e->bytes + offset, "P 0 pending") && !e->escape_length &&
+        e->bottom == e->rows - 4)
+      return 0;
+    if (pump(e, 10))
+      return 1;
+  } while (now() < deadline);
+  return 1;
+}
+
 static int exercise(const char *build, const char *shell,
                     const char *filename) {
   struct editor e;
@@ -47,7 +63,7 @@ static int exercise(const char *build, const char *shell,
   REQUIRE(wait_for(&e, "\033[?2004h", 0) == 0);
   /* The entire burst enters the native queue before any command can run. */
   mark = e.length;
-  REQUIRE(send_bytes(&e, "/statux\r\033e\177s\r") == 0);
+  REQUIRE(send_bytes(&e, "/statux\r\033e\177\t\r") == 0);
   REQUIRE(wait_for(&e, "Status: idle / backlog running", mark) == 0);
   REQUIRE(!contains(&e, "Thinking...", mark));
   REQUIRE(send_bytes(&e, "start\r") == 0);
@@ -82,6 +98,7 @@ static int exercise(const char *build, const char *shell,
   mark = e.length;
   REQUIRE(send_bytes(&e, "exit\n") == 0);
   REQUIRE(wait_for(&e, "\033[?2004h", mark) == 0);
+  REQUIRE(reattached(&e, mark) == 0);
   mark = e.length;
   printed = e.printed_length;
   REQUIRE(send_bytes(&e, "edit-boundary\r") == 0);
@@ -106,6 +123,7 @@ static int exercise(const char *build, const char *shell,
   mark = e.length;
   REQUIRE(send_bytes(&e, "exit\n") == 0);
   REQUIRE(wait_for(&e, "\033[?2004h", mark) == 0);
+  REQUIRE(reattached(&e, mark) == 0);
   /* The next worker is also gated, so cancellation and backlog retention are
    * observed independently of its duration. */
   REQUIRE(send_bytes(&e, "second\r") == 0);
@@ -155,9 +173,11 @@ cleanup:
 }
 
 int main(int argc, char **argv) {
-  if (argc != 7)
+  if (argc != 7 && argc != 8)
     return 2;
-  c_chat = !strcmp(argv[1], "c");
+  c_chat = !strcmp(argv[1], "c") || !strcmp(argv[1], "remote");
+  if (argc == 8)
+    remote_owner = argv[7];
   executable = argv[2];
   root = argv[3];
   return exercise(argv[4], argv[5], argv[6]);

@@ -39,6 +39,10 @@ fields are:
 - `prompt_queue`
 - `prompt_queue_max_entries`
 - `prompt_queue_preview_entries`
+- `queue_backend` (default `nil`; keeps the native local queue; see
+  [queue backends](#constructor-selected-queue-backend))
+- `queue_backend_context` (default `nil`; retained until backend detach)
+- `osc8_mode` (default `softline.OSC8_OFF`; see [hyperlinks](#osc-8-hyperlinks))
 - `prompt_theme`
 - `statusline`
 - `statusline_start_element`
@@ -46,7 +50,7 @@ fields are:
 - `status_busy`
 - `status_idle_marker`
 - `history_max_len`
-- `line_max_len`
+- `line_max_len` (complete draft limit in UTF-8 bytes; default 131072 / 128 KiB)
 
 Each handle owns its buffer, cursor, history, prompt state, and diagnostics.
 Call `sl:close()` when done; the Lua finalizer also closes an unclosed handle.
@@ -69,13 +73,15 @@ live scroll regions, status lines, and spinners are off; the theme is
   disabled so the terminal handles tabs. OPOST/ONLCR and other output flags are
   preserved; original flags are restored on release.
 - `sl:next_prompt([prompt])` returns `line, source, id`. The ID is zero for a
-  direct draft without queued origin. Automatic queue delivery
+  direct draft without queued origin. With the native local queue, automatic
+  delivery
   dispatches FIFO entries before opening an editor; manual delivery retains
   them for explicit take or Alt-Enter promotion. `source` is
   `PROMPT_SOURCE_QUEUED`, `PROMPT_SOURCE_DIRECT`, or
   `PROMPT_SOURCE_PROMOTED`. On interactive handles it retains terminal input
   ownership between results; `close()` restores the terminal. On no result it
-  returns `nil, status`.
+  returns `nil, status`. With a configured queue backend it keeps editing across
+  submissions; accepted backend work never returns as local model input.
 - `sl:history_add(line)` adds one history entry and synchronously calls the
   attached append hook; empty and consecutive duplicate entries are ignored.
 - `sl:history_set_max_len(max_len)` changes the retained history cap; `0`
@@ -132,7 +138,8 @@ live scroll regions, status lines, and spinners are off; the theme is
   Ready watches are visited round-robin, with at most eight callbacks before
   terminal input is handled again.
 - `sl:set_prompt_queue(enabled, max_entries, preview_entries)` enables the
-  chat queue. The default profile maps Tab to queue a nonempty editor and
+  native local chat queue. The default profile maps Tab to queue a nonempty
+  editor and
   Alt-E to edit the newest queued entry. Disabling the queue clears it;
   reducing `max_entries` below the current queue length fails.
 - `sl:queue_count()` and `sl:queue_capacity()` return the queue state.
@@ -155,8 +162,8 @@ live scroll regions, status lines, and spinners are off; the theme is
   editing, requeueing and cancellation. Later held messages appear only in
   the count until the first is decided. Out-of-order `queue_approve` and
   `queue_reject` calls fail without changing the queue. Alt-A focuses
-  approval with inverted foreground/background on the compact heading,
-  and the cursor on its controls.
+  approval with inverted foreground/background on the compact heading.
+  The cursor stays at its draft editing position; only key routing changes.
   Only focused Alt-Y/Alt-N approve/reject (case-insensitive); Enter never approves.
   Escape returns to typing. Alt-E edits the full
   offered entry in either focus state; submission/requeue
@@ -177,6 +184,9 @@ live scroll regions, status lines, and spinners are off; the theme is
   refuses held entries. Insert/append return a new opaque per-handle ID, never
   reused, with `held` defaulting to false. Automatic approval overrides explicit
   holds. Replacement preserves ID and hold.
+  These synchronous mutation methods describe the native local queue; backend
+  mode uses [typed requests](#constructor-selected-queue-backend) and rejects
+  unsupported local mutations.
 - `sl:queue_info(index)` returns `{id, mode, held, policy, stopped, eligible}`;
   `policy` contains boolean `enqueue`, `independent` and `executable` fields.
   `sl:queue_draft_info()`
@@ -312,6 +322,10 @@ live scroll regions, status lines, and spinners are off; the theme is
   owned UI rows while preserving editor and producer state and the transcript.
   Return `softline.KEY_ACTION_RESET` from another key binding to remap recovery;
   a Ctrl-L binding overrides the built-in behavior normally.
+  Ctrl-A/E move to the start/end of the actual newline-delimited line. Ctrl-U/K
+  kill to its start/end; at the boundary they remove only the adjacent newline.
+  Ctrl-W kills a word within that actual line or the preceding newline at line
+  start. Soft wraps do not create these boundaries.
   Ctrl-Y yanks killed draft text and Alt-Y rotates that yank; focused approval
   controls retain priority over Alt-Y. Ctrl-_ or Ctrl-X Ctrl-U undoes draft
   edits, Ctrl-T transposes Unicode clusters, and Alt-D/Alt-Backspace kill words.
@@ -386,8 +400,10 @@ live scroll regions, status lines, and spinners are off; the theme is
 - `sl:output_stream_write(bytes)` sends a Lua byte string immediately into the
   open session. Calls from a watch callback can alternate with prompt typing.
   Chunk boundaries add no newline or response separator. The stream accepts
-  printable UTF-8, LF/CR/Tab, and ANSI SGR styling; malformed or unsupported
-  terminal controls return `nil, status`. An empty string succeeds without
+  printable UTF-8, LF/CR/Tab, ANSI SGR styling, and opt-in OSC 8 hyperlinks.
+  OSC 8 is off by default; `sl:get_osc8_info().enabled` reports the effective
+  feed policy. Other OSC controls and malformed input return `nil, status`.
+  An empty string succeeds without
   changing the screen. No full response is buffered. Native LF positioning
   follows the output TTY's OPOST/ONLCR settings without changing those settings
   or producer bytes. While Softline owns raw mode, kernel tab expansion
@@ -565,9 +581,9 @@ The exact commands `!sh` and `/shell` open `$SHELL -i` (`/bin/sh -i` when
 unset or empty), only between turns on an interactive terminal. Enter or idle
 Alt-Enter launches the shell; busy submissions and attempts to queue/steer it
 are blocked, keeping the draft editable. Arguments are not interpreted as shell
-commands. The example ends its output session before `os.execute()` and begins
-a new session on return. Clear and resize inside the shell are allowed; history,
-queue and settings survive, and the transcript is never replayed. Failed launches
+commands. The example uses the local PTY adapter, ending its output session and
+beginning a new session on return. Clear and resize inside the shell are allowed;
+history, queue and settings survive, and the transcript is never replayed. Failed launches
 and nonzero exits report an error and return to chat.
 
 Alt-S uses that same shell handoff between turns while keeping the draft,
@@ -677,3 +693,236 @@ compaction and should not rewrite an active shared native file.
 The C and Lua chat examples attach `softline.examples.chat` at startup and enable
 auto-add for accepted prompts/commands, including queued and steered drafts.
 All themes use the same key. `SOFTLINE_HISTORY_DIR` overrides their directory.
+
+## Constructor-selected queue backend
+
+`sl:suspend()` lets an owner-thread idle/watch callback request the same
+draft-preserving terminal handoff as `KEY_ACTION_SUSPEND`. It returns `nil, status`
+outside active readline and does not stop backend work. Run the foreground
+child after readline returns `READLINE_SUSPENDED`, then resume the editor.
+
+Ordinary constructors retain the native local queue. `queue_backend` instead
+selects an application-owned asynchronous queue for the entire handle lifetime;
+`prompt_queue` must be enabled. `queue_backend_context` is any Lua value retained
+until teardown and passed to the copied request/detach callbacks.
+
+```lua
+local outgoing = {}
+local sl = softline.new {
+  prompt_queue = true,
+  queue_backend_context = outgoing,
+  queue_backend = {
+    capabilities = (1 << (softline.QUEUE_RESOLVE + 1)) - 1,
+    max_pending_requests = 16,
+    request = function(request, context)
+      if #context == 16 then return false end
+      context[#context + 1] = request
+      -- Signal the adapter's watched descriptor here; never wait for a reply.
+      return true
+    end,
+    detach = function(context)
+      -- Cancel/unsubscribe observations before releasing the context.
+      -- Accepted backend work remains owned by the backend.
+    end,
+  },
+}
+assert(sl:queue_backend_update {
+  kind = softline.QUEUE_SNAPSHOT, revision = "initial", entries = {},
+  total_count = 0,
+})
+```
+
+The adapter drains its pollable descriptor through `watch_add()` and applies
+results/updates on the editor-owner thread. Request callbacks return `true` only
+for handoff; backend acceptance arrives later. They cannot reenter Softline.
+All copied text is bounded by `line_max_len`, backend IDs/revisions/tokens by
+127 bytes, and snapshots by `prompt_queue_max_entries`. No network or storage
+implementation is imposed by Softline. The C constructor uses equivalent
+callbacks and a borrowed context; rebuild C/Lua consumers for shared ABI 4.
+
+- `sl:queue_backend_request(request)` returns a per-handle request ID, or
+  `nil, status`. Request fields are `operation`, `item_id`, `item_revision`,
+  `queue_revision`, `edit_token`, `text`, `mode`, `enabled` and
+  `target_request_id`. Omitted expected revisions use the current mirror.
+  Capability bits are `1 << operation`.
+- `sl:queue_backend_result(result)` accepts `request_id`, `status`, optional
+  `item_id`, `item_revision`, `edit_token` and `reason`. Successful item operations
+  report item identity/revision. A successful begin-edit also reports its token.
+  Typed begin-edit requests retire on acceptance without opening readline,
+  allowing headless hosts to end/abort edits with a one-request retention limit.
+  The owned hold must also appear in the ordered view before end/abort handoff.
+  Native edit intent can remain retained until its editor opens. Results never
+  recreate accepted mirror entries or synchronously call the outbound callback.
+- `sl:queue_backend_update(change)` applies `kind`, `previous_revision`,
+  `revision`, `entries`, one-based `index`, `item_id`, causing `request_id`,
+  authoritative `total_count`, `stopped` and `auto_approval`. Entry fields are
+  `id`, `revision`, `text`, `mode`, `held`, `edit_held`, holder-only `edit_token`,
+  `ready`, `stopped` and `action`. Updates must follow one ordered subscription.
+  A gap requires an explicit snapshot; inbound calls never invoke the outbound
+  request callback synchronously. The next native dispatch requests resync.
+- `sl:queue_backend_info()` returns backend enablement, synchronization,
+  queue revision, visible/total counts and retained request count.
+- `sl:queue_backend_entry(index)` returns a Lua table copied from the native
+  view, including opaque backend identity and revision.
+- `sl:queue_backend_pending(index)` returns the retained request fields plus
+  `pending`, last `status` and optional `reason`, oldest first.
+- `sl:queue_backend_recover(request_id)` restores definitely rejected proposal
+  text into an empty ordinary draft. Alt-E also recovers such proposals. Unknown
+  outcomes require resolution using their original ID; they never auto-flush.
+
+Operations are `softline.QUEUE_OFFER`, `softline.QUEUE_BEGIN_EDIT`,
+`softline.QUEUE_END_EDIT`, `softline.QUEUE_ABORT_EDIT`, `softline.QUEUE_APPROVE`,
+`softline.QUEUE_WITHDRAW`, `softline.QUEUE_SET_INTENT`, `softline.QUEUE_STOP`,
+`softline.QUEUE_RESUME`, `softline.QUEUE_CLEAR`, `softline.QUEUE_AUTO_APPROVAL`,
+`softline.QUEUE_SYNCHRONIZE` and `softline.QUEUE_RESOLVE`.
+Response statuses are `softline.QUEUE_ACCEPTED`, `softline.QUEUE_REJECTED` and
+`softline.QUEUE_UNKNOWN`. Changes are `softline.QUEUE_SNAPSHOT`,
+`softline.QUEUE_UPSERT`, `softline.QUEUE_REMOVE`, `softline.QUEUE_STATE` and
+`softline.QUEUE_DISCONNECTED`. Recoverable API errors include
+`softline.ERROR_UNSUPPORTED`, `softline.ERROR_CONFLICT` and
+`softline.ERROR_NOT_READY`.
+
+Enter/queue keys hand off offers and keep the native editor/watch loop active.
+Alt-E opens a queued edit only after its hold is acknowledged. Enter requeues
+under that same identity; empty submission/Alt-N requests withdrawal. Approval
+markers change only with backend observations. Backend entries cannot be taken
+as local model input. Legacy synchronous mutation methods report unsupported in
+backend mode; use typed requests for clear, auto-approval, policy and intent.
+Profile/key selection remains local presentation. Backend input editing requires
+a TTY; noninteractive hosts can use the typed request API directly.
+After reconnect, an accepted native acquisition with a missing or mismatched
+owned hold requests one fresh snapshot. A changed/absent hold in that view
+retires the intent without recreating work. A newer draft typed while disconnected
+remains editable/submittable; the recovered edit opens when the editor is empty.
+
+`max_pending_requests` bounds ordinary retained requests; three additional slots
+reserve one synchronization, resolution and STOP request each. Native
+cancellation/interrupt sends STOP before ABORT_EDIT, even at an ordinary
+one-request limit. A pending STOP is not duplicated; on disconnect it remains
+unknown and must be resolved by its original ID. Callbacks run on the
+calling coroutine, including when the constructor's coroutine has been
+collected. Callback/context references are owned by the receiver and ordinary
+reference cycles remain collectible. Accepted offers enter auto-add history
+once, in the coroutine applying the result, without replacing a newer draft.
+
+## OSC 8 hyperlinks
+
+The `osc8_mode` configuration field controls hyperlinks.
+`softline.new({osc8_mode = softline.OSC8_AUTO})` opts into conservative passive
+terminal detection. The default is `softline.OSC8_OFF`; `softline.OSC8_ON`
+explicitly overrides detection. `sl:set_osc8_mode(mode)` updates policy between
+streams. `sl:get_osc8_info()` returns `{mode, detected, enabled}`. Give `enabled`
+to the host renderer's hyperlink option; `detected` is a cached environment
+hint, not a terminal probe. AUTO remains off for unknown terminals, redirection
+and unverified multiplexers. Enabled streams accept bounded OSC 8 controls
+with BEL or ESC-backslash termination, including fragmented writes, while
+other OSC commands remain rejected. `softline.OSC8_MAX_BYTES` bounds each
+complete control, including its opener and terminator. Native links cannot
+leak into editor UI.
+See the [feed contract](../docs/softline-spec.md#osc-8-hyperlinks).
+
+## Completion providers
+
+`sl:set_completion_providers(registrations)` replaces trigger registrations;
+nil or an empty table clears them. Each specifies `trigger`, optional `scope`
+(default `softline.COMPLETION_START`), optional `strip_trigger` (default false)
+and `complete(trigger)`, which returns an array of full candidate strings.
+Optional `expand(completed)` supplies further candidates before Tab rotation.
+`softline.COMPLETION_WORD` also permits the trigger after ASCII whitespace.
+
+```lua
+assert(sl:set_completion_providers({
+  {trigger = "/", complete = function()
+    return {"/approve", "/status"}
+  end, expand = function(completed)
+    if completed == "/approve" then return {"/approve on", "/approve off"} end
+    return {}
+  end},
+  {trigger = "@", scope = softline.COMPLETION_WORD, strip_trigger = true,
+   complete = function() return {"@README.md", "@src/"} end,
+   expand = function(completed)
+     if completed == "@src/" then return {"@src/softline.c"} end
+     return {}
+   end},
+}))
+```
+
+The callback runs once per active token and returns the host's current snapshot.
+It may read the editor but must not mutate/close it or yield. Softline copies the
+strings, caches them through typing/Backspace/Undo, and shows the first match as a
+dimmed inline ghost. Tab accepts it; repeated Tabs cycle the original matches.
+Suspension preserves the activation, Tab cycle, trigger and cursor through
+terminal handoff. Resuming uses the same cached list without calling the
+provider again; suspension does not strip the trigger.
+Other edits or movement reset cycling while retaining the snapshot inside its
+token. Typed, yanked or host-inserted whitespace keeps completion active when
+it matches a candidate with a suffix remaining: typing `hello ` can still offer
+`world`. Whitespace without such a continuation, deleting the trigger,
+leaving the token, queueing/submitting or replacing the draft ends completion.
+`strip_trigger` then removes the marker
+as an undoable edit. Enter submits actual text, never a ghost. Errors, invalid
+UTF-8/NUL/control-bearing candidates or callback exceptions discard the list,
+preserve typed text including its marker and suppress retries for that token.
+No provider runs from a feed/render operation. Callback closures are owned by
+the editor userdata and remain collectable even when they capture that editor.
+The optional continuation receives the full completed string including its
+trigger, even for a unique match. It must return candidates strictly extending
+that string, or `{}` to allow normal rotation/host Tab handling. It can also
+resolve a completed ancestor of a partially typed child path. Each prefix is
+cached separately until activation ends; Backspace selects the parent list.
+Visited continuations do not interrupt resumed parent cycling; type further
+into their prefix to reuse the cached children.
+Continuation errors discard only their new list and preserve the draft and
+earlier candidates. The examples use this for one-directory-at-a-time file
+lookup and `/approve` subcommands, through the same callback functions.
+See the [full contract](../docs/softline-spec.md#completion-providers).
+
+## PTY terminal handoff
+
+`softline.terminal_local(sl[, shell])` opens a fresh local PTY and invokes one
+shell executable with `-i` (default `$SHELL`, falling back to `/bin/sh`). It uses
+`sl_terminal_local()` through the same relay as remote adapters. Call between
+editor calls after suspension, outside key/watch/idle callbacks. An existing
+output session ends and restarts automatically. The result is `true, exit_status,
+escaped`, or `nil, error_code`. The exit status is -1 while unavailable, otherwise
+an exit code or 128+signal. `escaped` reports local escape with Enter then `~.`.
+The handle owns eventual nonblocking reaping of cancelled local children.
+
+`softline.terminal_handoff(sl, callback)` runs a host-selected adapter, returning
+`true, escaped` or `nil, error_code`. A callback exception is raised only after
+terminal restoration and the close callback. The function keeps the callback
+rooted during handoff. Reentry, including `sl:close()`, is forbidden. Neither
+function adds a receiver shell-control method; both use the shared adapter path.
+
+If physical terminal output prevents session restoration, the function returns
+`nil, softline.ERROR_IO` promptly with input modes released and the output
+session closed. The draft and editing continuation remain intact. Reopen with
+`sl:output_stream_begin()` once output is writable; no terminal drainage is
+required before the failed handoff returns.
+
+The callback takes one event table, borrows it for that invocation, and returns
+a result table. `operation` is one of `softline.TERMINAL_OPEN`,
+`softline.TERMINAL_STEP`, `softline.TERMINAL_READ`, `softline.TERMINAL_WRITE`,
+`softline.TERMINAL_RESIZE`, or `softline.TERMINAL_CLOSE`. All callbacks return
+promptly. Optional result `status` defaults to `softline.OK`; use
+`softline.ERROR_NOT_READY` for read/write would-block, or another error code on
+failure. The remaining fields follow the C `sl_terminal_event_t` contract:
+
+- OPEN/RESIZE receive current `rows` and `columns`.
+- STEP receives ready `events` bits. Return `ready` (boolean), `fd` (default -1),
+  `interests` (WATCH_READ/WRITE bits, default 0), and `timeout_ms` (default -1).
+  Service transport/control frames here; provide deadlines while opening.
+- READ receives capacity in `length`. Return a binary `data` string no longer
+  than that capacity; an empty string is EOF.
+- WRITE receives a binary `data` string and `length`. Return `transferred`,
+  allowing partial progress; zero progress requires ERROR_NOT_READY.
+- CLOSE runs exactly once after OPEN, including failure. Cancel/release without
+  waiting for a child or peer response. The host owns adapter resources.
+
+The host owns transport, authentication and framing. PTY output goes directly
+through the real terminal without interpretation, transcript buffering or replay.
+The relay retains at most bounded chunks, forwards size changes, and restores
+local terminal modes and the suspended draft/cursor/undo/queue holds on return.
+Enter then `~.` works even while setup or transport I/O is stalled; `~~` at the
+start of a line sends one literal tilde. Oversized pending input fails explicitly
+instead of silently dropping bytes. See [the full contract](../docs/terminal-handoff-design.md).

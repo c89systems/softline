@@ -22,19 +22,38 @@ endif()
 set_tests_properties(lua_runtime PROPERTIES ENVIRONMENT
   "SOFTLINE_TOOLCHAIN_ROOT=${runtime_root};SOFTLINE_EXPECTED_LIBRARY_ROOT=${library_root}")
 add_test(NAME lua_smoke COMMAND "${SOFTLINE_LUA_EXECUTABLE}" "${root}/tests/lua_smoke.lua")
-foreach(mode history_auto readline simple chat)
+add_test(NAME lua_osc8 COMMAND "${SOFTLINE_LUA_EXECUTABLE}" "${root}/tests/lua_osc8.lua")
+add_test(NAME lua_queue_backend COMMAND "${SOFTLINE_LUA_EXECUTABLE}" "${root}/tests/lua_queue_backend.lua")
+add_test(NAME lua_backend_coroutines COMMAND "${pty_test}" backend-coroutines "${SOFTLINE_LUA_EXECUTABLE}" "${root}")
+foreach(mode history_auto readline simple chat packaged)
   add_test(NAME "lua_console_${mode}" COMMAND "${BASH_EXECUTABLE}"
     "${root}/tests/check_lua_console.sh" "${SOFTLINE_LUA_EXECUTABLE}" "${root}" "${mode}")
 endforeach()
 add_test(NAME lua_history_editor COMMAND "${pty_test}" history "${SOFTLINE_LUA_EXECUTABLE}" "${root}")
 add_test(NAME lua_readline_edit COMMAND "${pty_test}" readline_edit "${SOFTLINE_LUA_EXECUTABLE}" "${root}")
 add_test(NAME lua_queue_policy COMMAND "${pty_test}" policy "${SOFTLINE_LUA_EXECUTABLE}" "${root}")
+add_test(NAME lua_terminal_handoff COMMAND "${pty_test}" terminal "${SOFTLINE_LUA_EXECUTABLE}" "${root}")
+add_test(NAME lua_completion COMMAND "${pty_test}" completion "${SOFTLINE_LUA_EXECUTABLE}" "${root}")
+add_test(NAME lua_demo_files COMMAND "${BASH_EXECUTABLE}" "${root}/tests/check_completion_files.sh"
+  "${root}" inventory "${SOFTLINE_LUA_EXECUTABLE}" "${root}/tests/lua_demo_files.lua" "${root}")
+add_test(NAME lua_simple_completion COMMAND "${BASH_EXECUTABLE}" "${root}/tests/check_completion_files.sh"
+  "${root}" interactive "${pty_test}" simple-completion "${SOFTLINE_LUA_EXECUTABLE}" "${root}")
+add_test(NAME lua_chat_completion COMMAND "${BASH_EXECUTABLE}" "${root}/tests/check_completion_files.sh"
+  "${root}" interactive "${pty_test}" chat-completion "${SOFTLINE_LUA_EXECUTABLE}" "${root}")
+set_tests_properties(lua_chat_completion PROPERTIES ENVIRONMENT
+  "SOFTLINE_HISTORY_DIR=${root}/build/test-history/lua_chat_completion;SOFTLINE_PROMPT_THEME=plain;SOFTLINE_CHAT_OPERATION_STEP_MS=0")
 string(SHA256 chat_history_key "softline.examples.chat")
 add_test(NAME lua_chat_policies COMMAND "${lua_build}/test_chat_policies" lua
   "${SOFTLINE_LUA_EXECUTABLE}" "${root}" "${root}/build" "${lua_build}/test_chat_shell"
   "${chat_history_key}.history")
 add_test(NAME lua_chat_history COMMAND "${pty_test}" store lua "${SOFTLINE_LUA_EXECUTABLE}"
   "${root}" "${root}/build" "${chat_history_key}.history")
+add_test(NAME lua_chat_exit_controls COMMAND "${lua_build}/test_chat_shell" lua-controls
+  "${SOFTLINE_LUA_EXECUTABLE}" "${root}" "${root}/build"
+  "${chat_history_key}.history" "${lua_build}/test_chat_shell")
+add_test(NAME lua_chat_shell COMMAND "${lua_build}/test_chat_shell" lua
+  "${SOFTLINE_LUA_EXECUTABLE}" "${root}" "${root}/build"
+  "${chat_history_key}.history" "${lua_build}/test_chat_shell")
 if(NOT SOFTLINE_LUA_DEBUG)
   foreach(mode mixed_tty watch)
     add_test(NAME "lua_chat_${mode}" COMMAND "${pty_test}" "${mode}" "${SOFTLINE_LUA_EXECUTABLE}" "${root}")
@@ -44,9 +63,6 @@ if(NOT SOFTLINE_LUA_DEBUG)
   add_test(NAME lua_idle_callback COMMAND "${pty_test}" idle "${SOFTLINE_LUA_EXECUTABLE}" "${root}")
   add_test(NAME lua_queue_approval COMMAND "${pty_test}" approval "${SOFTLINE_LUA_EXECUTABLE}" "${root}")
   add_test(NAME lua_watch_file_gc COMMAND "${pty_test}" watch_gc "${SOFTLINE_LUA_EXECUTABLE}" "${root}")
-  add_test(NAME lua_chat_shell COMMAND "${lua_build}/test_chat_shell" lua
-    "${SOFTLINE_LUA_EXECUTABLE}" "${root}" "${root}/build"
-    "${chat_history_key}.history" "${lua_build}/test_chat_shell")
 endif()
 get_property(tests DIRECTORY PROPERTY TESTS)
 set_tests_properties(${tests} PROPERTIES TIMEOUT 60 LABELS "lua;integration")

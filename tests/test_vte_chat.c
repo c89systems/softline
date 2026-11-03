@@ -1,3 +1,4 @@
+#include "remote_chat_owner.h"
 #include "terminal_pause.h"
 #include "vte_test.h"
 
@@ -61,6 +62,16 @@ static int wait_visible(struct chat *c, const char *marker) {
   } while (now() < deadline);
   return 1;
 }
+static int wait_column(struct chat *c, long column) {
+  double deadline = now() + 2;
+  do {
+    struct snapshot s = frame(c);
+    if (s.column == column)
+      return 0;
+    pump_once();
+  } while (now() < deadline);
+  return 1;
+}
 static int drain(void *context) {
   struct chat *c = (struct chat *)context;
   int status;
@@ -73,16 +84,28 @@ static int drain(void *context) {
   }
   return event < 0;
 }
+static int pause_producer(struct chat *c) {
+  if (!remote_owner)
+    return pause_worker(c->child, drain, c, &c->worker);
+  if (kill(remote_owner_pid, SIGUSR1))
+    return 1;
+  c->worker = remote_owner_pid;
+  return drain(c);
+}
+static int resume_producer(struct chat *c) {
+  return kill(c->worker, remote_owner ? SIGUSR2 : SIGCONT);
+}
 static void close_chat(struct chat *c) {
   int status;
   if (c->worker > 0)
-    kill(c->worker, SIGCONT);
+    resume_producer(c);
   if (c->child > 0) {
     kill(-c->child, SIGTERM);
     kill(c->child, SIGCONT);
     waitpid(c->child, &status, 0);
   }
   v.destroy(c->screen.window);
+  stop_remote_owner();
   pump();
 }
 static int start_chat(struct chat *c, const char *example, const char *theme,
@@ -93,6 +116,10 @@ static int start_chat(struct chat *c, const char *example, const char *theme,
   char prior[4096], milliseconds[32];
   size_t used = 0;
   c->child = c->worker = -1;
+  if (start_remote_owner())
+    return 1;
+  if (remote_owner && getenv("SOFTLINE_CHAT_TEST_OFFLINE"))
+    stop_remote_owner();
   c->screen = create();
   resize(&c->screen, 97, height);
   for (index = 0; index < 100; ++index)
@@ -127,7 +154,10 @@ static int start_chat(struct chat *c, const char *example, const char *theme,
     setenv("TERM", "xterm-256color", 1);
     setenv("SOFTLINE_CHAT_CHAR_MS", milliseconds, 1);
     setenv("SOFTLINE_PROMPT_THEME", theme, 1);
-    execl(example, example, (char *)NULL);
+    if (remote_owner)
+      execl(example, example, "127.0.0.1", remote_owner_port, (char *)NULL);
+    else
+      execl(example, example, (char *)NULL);
     _exit(127);
   }
   close(slave);
@@ -162,18 +192,18 @@ static int window_resize(struct chat *c, int columns, int rows) {
 static int coordinated_resize(struct chat *c, int columns, int rows,
                               int worker_already_paused) {
   int failed;
-  if (!worker_already_paused && pause_worker(c->child, drain, c, &c->worker))
+  if (!worker_already_paused && pause_producer(c))
     return 1;
   if (pause_editor(c->child, drain, c)) {
     if (c->worker > 0)
-      kill(c->worker, SIGCONT);
+      resume_producer(c);
     c->worker = -1;
     return 1;
   }
   failed = window_resize(c, columns, rows);
   kill(c->child, SIGCONT);
   if (!worker_already_paused && c->worker > 0) {
-    kill(c->worker, SIGCONT);
+    resume_producer(c);
     c->worker = -1;
   }
   return failed;
@@ -378,7 +408,7 @@ static int approval_resize_case(const char *example) {
   REQUIRE(start_chat(&c, example, "plain", 24, 10) == 0);
   send_input(&c, "start-response\r");
   REQUIRE(wait_frame(&c, "A 4 awaiting approval", "> \n", -1, 2) == 0);
-  REQUIRE(pause_worker(c.child, drain, &c, &c.worker) == 0 && c.worker > 0);
+  REQUIRE(pause_producer(&c) == 0 && c.worker > 0);
   send_input(&c, "ordinary-first\rordinary-second\r\033a\033n\033a\033n");
   REQUIRE(wait_frame(&c, "Demo queued request #3:", "> \n", -1, 2) == 0);
   s = transcript(&c.screen);
@@ -445,7 +475,7 @@ static int multiline_approval_case(const char *example) {
   REQUIRE(start_chat(&c, example, "plain", 24, 10) == 0);
   send_input(&c, "start-response\r");
   REQUIRE(wait_frame(&c, "A 4 awaiting approval", "> \n", -1, 2) == 0);
-  REQUIRE(pause_worker(c.child, drain, &c, &c.worker) == 0 && c.worker > 0);
+  REQUIRE(pause_producer(&c) == 0 && c.worker > 0);
   send_input(&c, "ordinary-first\rordinary-second\r");
   REQUIRE(wait_frame(&c, "Q 6. ordinary-second", "> \n", -1, 2) == 0);
   send_input(&c, "\033a\033n");
@@ -567,14 +597,14 @@ static int tiny_case(const char *example, int feed_small, int small_columns) {
   REQUIRE(start_chat(&c, example, "default", 80, 5) == 0);
   send_input(&c, "one\r");
   REQUIRE(wait_frame(&c, "Here is", "> \n", 0, 8) == 0);
-  REQUIRE(pause_worker(c.child, drain, &c, &c.worker) == 0 && c.worker > 0);
+  REQUIRE(pause_producer(&c) == 0 && c.worker > 0);
   REQUIRE(coordinated_resize(&c, small_columns, 3, 1) == 0);
   settle(.2);
   if (feed_small) {
-    REQUIRE(kill(c.worker, SIGCONT) == 0);
+    REQUIRE(resume_producer(&c) == 0);
     c.worker = -1;
     REQUIRE(wait_frame(&c, "italic", "> \n", 0, 8) == 0);
-    REQUIRE(pause_worker(c.child, drain, &c, &c.worker) == 0 && c.worker > 0);
+    REQUIRE(pause_producer(&c) == 0 && c.worker > 0);
   }
   REQUIRE(coordinated_resize(&c, 97, 80, 1) == 0);
   settle(.2);
@@ -585,7 +615,7 @@ static int tiny_case(const char *example, int feed_small, int small_columns) {
   length = anchor + strlen(feed_small ? "italic" : "Here is");
   memcpy(prefix, before.text, length);
   prefix[length] = 0;
-  REQUIRE(kill(c.worker, SIGCONT) == 0);
+  REQUIRE(resume_producer(&c) == 0);
   c.worker = -1;
   REQUIRE(wait_frame(&c, "Try another prompt.", "> \n", 0, 8) == 0);
   after = frame(&c);
@@ -696,7 +726,7 @@ static int width_case(const char *example, const char *theme) {
     } else {
       send_input(&c, "draft");
       REQUIRE(wait_frame(&c, NULL, "> draft\n", 0, .1) == 0);
-      REQUIRE(pause_worker(c.child, drain, &c, &c.worker) == 0);
+      REQUIRE(pause_producer(&c) == 0);
       count = turn == 1 ? 161 : turn == 2 ? 14 : 12;
       for (stage = 0; stage < count; ++stage) {
         width = turn == 1   ? (stage < 80 ? 110 - stage : 30 + stage - 80)
@@ -706,7 +736,7 @@ static int width_case(const char *example, const char *theme) {
         settle(turn == 1 ? .005 : turn == 2 ? .06 : .12);
       }
       if (c.worker > 0) {
-        kill(c.worker, SIGCONT);
+        resume_producer(&c);
         c.worker = -1;
       }
     }
@@ -839,11 +869,282 @@ cleanup:
   return failed || errors;
 }
 
+static int reconnect_case(const char *example) {
+  struct chat c;
+  struct snapshot s;
+  long column, row;
+  double deadline;
+  int cycle, failed = 0;
+  REQUIRE(remote_owner != NULL);
+  setenv("SOFTLINE_CHAT_APPROVAL_DEMO", "0", 1);
+  setenv("SOFTLINE_CHAT_RECONNECT_MS", "100", 1);
+  REQUIRE(start_chat(&c, example, "plain", 24, 20) == 0);
+  send_input(&c, "start\r");
+  REQUIRE(wait_frame(&c, "Thinking...", "> \n", -1, 2) == 0);
+  send_input(&c, "queued-before-restart\r");
+  REQUIRE(wait_frame(&c, "Q 1. queued-before-restart", "> \n", -1, 2) == 0);
+  send_input(&c, "\033[200~draft café\nsecond tail\033[201~\002\002\002\002");
+  REQUIRE(wait_frame(&c, NULL, "  second tail\n", 0, 2) == 0);
+  deadline = now() + 2;
+  do {
+    s = frame(&c);
+    if (s.column == 9)
+      break;
+    pump_once();
+  } while (now() < deadline);
+  REQUIRE(s.column == 9);
+  for (cycle = 0; cycle < 2; ++cycle) {
+    if (!cycle) {
+      /* Kill an owner with one acknowledged entry and one request still
+       * unobserved in its socket. Neither may be reoffered after restart. */
+      REQUIRE(kill(remote_owner_pid, SIGSTOP) == 0);
+      send_input(&c, "\033kuncertain-before-restart\r\033j\002\002\002\002");
+      REQUIRE(wait_frame(&c, "P 1 pending", "  second tail\n", 0, 2) == 0);
+      deadline = now() + 2;
+      do {
+        s = frame(&c);
+        if (s.column == 9)
+          break;
+        pump_once();
+      } while (now() < deadline);
+      REQUIRE(s.column == 9);
+    }
+    s = frame(&c);
+    column = s.column;
+    row = s.row - (long)v.adjustment_value(v.adjustment(c.screen.terminal));
+    if (!cycle) {
+      int status;
+      REQUIRE(kill(remote_owner_pid, SIGKILL) == 0);
+      REQUIRE(waitpid(remote_owner_pid, &status, 0) == remote_owner_pid);
+      remote_owner_pid = 0;
+    } else
+      stop_remote_owner();
+    REQUIRE(wait_frame(&c, "Disconnected;", "  second tail\n", 1, 2) == 0);
+    s = frame(&c);
+    REQUIRE(s.column == column &&
+            s.row - (long)v.adjustment_value(v.adjustment(c.screen.terminal)) ==
+                row);
+    REQUIRE(!strstr(s.text, "Thinking...") && !strstr(s.text, "Reasoning..."));
+    /* Multiple failed attempts leave the editor live and the draft intact. */
+    settle(.35);
+    REQUIRE(start_remote_owner_at(remote_owner_port) == 0);
+    REQUIRE(wait_frame(&c, NULL, "  second tail\n", 1, 2) == 0);
+    {
+      deadline = now() + 2;
+      do {
+        s = frame(&c);
+        if (!strstr(s.text, "Disconnected") &&
+            !strstr(s.text, "Reconnecting") &&
+            !strstr(s.text, "Q 1. queued-before-restart"))
+          break;
+        send_input(&c, "x\177");
+        pump_once();
+      } while (now() < deadline);
+    }
+    REQUIRE(wait_frame(&c, NULL, "  second tail\n", 1, 2) == 0);
+    s = frame(&c);
+    REQUIRE(!strstr(s.text, "Disconnected") && !strstr(s.text, "Reconnecting"));
+    REQUIRE(!strstr(s.text, "Q 1. queued-before-restart"));
+    REQUIRE(strstr(s.text, "1 unknown"));
+    REQUIRE(!strstr(s.text, "> uncertain-before-restart"));
+    REQUIRE(s.column == column &&
+            s.row - (long)v.adjustment_value(v.adjustment(c.screen.terminal)) ==
+                row);
+    send_input(&c, "X");
+    REQUIRE(wait_frame(&c, NULL, "  second Xtail\n", 1, 2) == 0);
+    send_input(&c, "\037");
+    REQUIRE(wait_frame(&c, NULL, "  second tail\n", 1, 2) == 0);
+  }
+  /* A restarted volatile owner has no accepted work to replay. New input
+   * must run normally, with the old draft still available through undo. */
+  send_input(&c, "\033nnew-after-reconnect\r");
+  REQUIRE(wait_frame(&c, "> new-after-reconnect", "> \n", -1, 2) == 0);
+  REQUIRE(wait_frame(&c, "Try another prompt.", "> \n", 1, 5) == 0);
+cleanup:
+  close_chat(&c);
+  unsetenv("SOFTLINE_CHAT_APPROVAL_DEMO");
+  unsetenv("SOFTLINE_CHAT_RECONNECT_MS");
+  return failed || errors;
+}
+
+static int offline_case(const char *example) {
+  struct chat c;
+  struct snapshot s;
+  double deadline;
+  int failed = 0;
+  setenv("SOFTLINE_CHAT_APPROVAL_DEMO", "0", 1);
+  setenv("SOFTLINE_CHAT_RECONNECT_MS", "100", 1);
+  setenv("SOFTLINE_CHAT_TEST_OFFLINE", "1", 1);
+  REQUIRE(start_chat(&c, example, "plain", 24, 1) == 0);
+  REQUIRE(wait_frame(&c, "Disconnected;", "> \n", 1, 2) == 0);
+  send_input(&c, "offline draft\r");
+  REQUIRE(wait_frame(&c, "Disconnected;", "> offline draft\n", 1, 2) == 0);
+  settle(.25);
+  REQUIRE(start_remote_owner_at(remote_owner_port) == 0);
+  deadline = now() + 2;
+  do {
+    s = frame(&c);
+    if (!strstr(s.text, "Disconnected") && !strstr(s.text, "Reconnecting") &&
+        !strstr(s.text, "P "))
+      break;
+    pump_once();
+  } while (now() < deadline);
+  REQUIRE(!strstr(s.text, "Disconnected") && !strstr(s.text, "Reconnecting"));
+  REQUIRE(!strcmp(last_row(s.text), "> offline draft\n"));
+  send_input(&c, "\r");
+  REQUIRE(wait_frame(&c, "Try another prompt.", "> \n", 1, 3) == 0);
+  s = transcript(&c.screen);
+  {
+    const char *at = strstr(s.text, "> offline draft\n");
+    REQUIRE(at && !strstr(at + 1, "> offline draft\n"));
+  }
+cleanup:
+  close_chat(&c);
+  unsetenv("SOFTLINE_CHAT_APPROVAL_DEMO");
+  unsetenv("SOFTLINE_CHAT_RECONNECT_MS");
+  unsetenv("SOFTLINE_CHAT_TEST_OFFLINE");
+  return failed || errors;
+}
+
+static int stalled_case(const char *example) {
+  struct chat c;
+  struct snapshot s;
+  double deadline;
+  int failed = 0;
+  setenv("SOFTLINE_CHAT_APPROVAL_DEMO", "0", 1);
+  setenv("SOFTLINE_CHAT_RECONNECT_MS", "100", 1);
+  setenv("SOFTLINE_CHAT_TEST_STALL_HELLO", "1", 1);
+  REQUIRE(start_chat(&c, example, "plain", 24, 1) == 0);
+  deadline = now() + 4;
+  do {
+    s = frame(&c);
+    if (!strstr(s.text, "P ") && !strstr(s.text, "Reconnecting") &&
+        !strstr(s.text, "Disconnected"))
+      break;
+    pump_once();
+  } while (now() < deadline);
+  REQUIRE(!strstr(s.text, "P ") && !strstr(s.text, "Reconnecting") &&
+          !strstr(s.text, "Disconnected"));
+  /* The fixture never answers the first HELLO: successful submission proves
+   * a timed retry occurred, without a key requesting reconnection. */
+  send_input(&c, "after-stalled-handshake\r");
+  REQUIRE(wait_frame(&c, "Try another prompt.", "> \n", 1, 3) == 0);
+cleanup:
+  close_chat(&c);
+  unsetenv("SOFTLINE_CHAT_APPROVAL_DEMO");
+  unsetenv("SOFTLINE_CHAT_RECONNECT_MS");
+  unsetenv("SOFTLINE_CHAT_TEST_STALL_HELLO");
+  return failed || errors;
+}
+
+static int completion_case(const char *example, const char *theme) {
+  struct chat c;
+  struct snapshot s;
+  int failed = 0;
+  setenv("SOFTLINE_CHAT_APPROVAL_DEMO", "1", 1);
+  setenv("SOFTLINE_CHAT_APPROVAL_MS", "100", 1);
+  REQUIRE(start_chat(&c, example, theme, 24, 10) == 0);
+  REQUIRE(wait_frame(&c, "Completion demo:", "> \n", 0, 2) == 0);
+  send_input(&c, "h");
+  REQUIRE(wait_frame(&c, NULL, "> hello world\n", 0, 2) == 0);
+  REQUIRE(wait_column(&c, 3) == 0);
+  send_input(&c, "el");
+  REQUIRE(wait_frame(&c, NULL, "> hello world\n", 0, 2) == 0);
+  REQUIRE(wait_column(&c, 5) == 0);
+  s = frame(&c);
+  REQUIRE(s.column == 5 && !strstr(s.text, "T hello"));
+  send_input(&c, "\t");
+  REQUIRE(wait_frame(&c, NULL, "> hello world\n", 0, 2) == 0);
+  send_input(&c, "\t");
+  REQUIRE(wait_frame(&c, NULL, "> hello there\n", 0, 2) == 0);
+  send_input(&c, "\t\nsay ver");
+  REQUIRE(wait_frame(&c, NULL, "  say verification\n", 0, 2) == 0);
+  s = frame(&c);
+  REQUIRE(s.column == 9);
+  send_input(&c, "\t");
+  REQUIRE(wait_frame(&c, NULL, "  say verification\n", 0, 2) == 0);
+  REQUIRE(coordinated_resize(&c, 24, 24, 1) == 0);
+  send_input(&c, "\033nsay say say say ver");
+  REQUIRE(wait_visible(&c, "> say say say say verifi\n  cation") == 0);
+  REQUIRE(wait_column(&c, 21) == 0);
+  REQUIRE(coordinated_resize(&c, 97, 24, 1) == 0);
+  send_input(&c, "\033n@CTestTestfile.cm");
+  REQUIRE(wait_frame(&c, NULL, "> @CTestTestfile.cmake\n", 0, 2) == 0);
+  send_input(&c, "\t ");
+  REQUIRE(wait_frame(&c, NULL, "> CTestTestfile.cmake \n", 0, 2) == 0);
+  send_input(&c, "\033n@tree/ne");
+  REQUIRE(wait_frame(&c, NULL, "> @tree/ne\n", 0, 2) == 0);
+  send_input(&c, "\t");
+  REQUIRE(wait_frame(&c, NULL, "> @tree/nested/\n", 0, 2) == 0);
+  send_input(&c, "source.\t");
+  REQUIRE(wait_frame(&c, NULL, "> @tree/nested/source.c\n", 0, 2) == 0);
+  send_input(&c, " ");
+  REQUIRE(wait_frame(&c, NULL, "> tree/nested/source.c \n", 0, 2) == 0);
+  send_input(&c, "\033n");
+  REQUIRE(wait_frame(&c, NULL, "> \n", 0, 2) == 0);
+  send_input(&c, "hello\r");
+  REQUIRE(wait_frame(&c, "Demo queued request #1:", "> \n", -1, 3) == 0);
+  REQUIRE(pause_producer(&c) == 0 && c.worker > 0);
+  send_input(&c, "ordinary-one\rordinary-two\rver");
+  REQUIRE(wait_frame(&c, NULL, "> verification\n", -1, 2) == 0);
+  s = frame(&c);
+  REQUIRE(s.column == 5 && !strstr(s.text, "T verification"));
+  REQUIRE(strstr(s.text, "\nQ "));
+  REQUIRE(row_distance(s.text, "ordinary-two", "\nA ") >= 0);
+  REQUIRE(row_distance(s.text, "\nA ",
+                       strstr(s.text, "Reasoning...") ? "Reasoning..."
+                                                      : "Thinking...") > 0);
+  REQUIRE(coordinated_resize(&c, 52, 18, 1) == 0);
+  REQUIRE(wait_frame(&c, NULL, "> verification\n", -1, 2) == 0);
+  send_input(&c, "\t");
+  REQUIRE(wait_frame(&c, "ordinary-two", "> verification\n", -1, 2) == 0);
+  REQUIRE(wait_column(&c, 14) == 0);
+  s = frame(&c);
+  REQUIRE(!strstr(s.text, "T verification"));
+  REQUIRE(strstr(s.text, "\nA ") &&
+          (strstr(s.text, "Reasoning...") || strstr(s.text, "Thinking...")) &&
+          s.column == 14);
+  send_input(&c, "\033n/app");
+  REQUIRE(wait_frame(&c, NULL, "> /approve\n", -1, 2) == 0);
+  s = frame(&c);
+  REQUIRE(s.column == 6);
+  send_input(&c, "\t\t\t");
+  REQUIRE(wait_frame(&c, NULL, "> /approve off\n", -1, 2) == 0);
+  send_input(&c, "\177");
+  REQUIRE(wait_frame(&c, NULL, "> /approve off\n", -1, 2) == 0);
+  REQUIRE(wait_column(&c, 13) == 0);
+  s = frame(&c);
+  REQUIRE(s.column == 13);
+  REQUIRE(coordinated_resize(&c, 97, 24, 1) == 0);
+  REQUIRE(wait_frame(&c, NULL, "> /approve off\n", -1, 2) == 0);
+  send_input(&c, "\t\037");
+  REQUIRE(wait_frame(&c, NULL, "> /approve off\n", -1, 2) == 0);
+  s = frame(&c);
+  REQUIRE(s.column == 13);
+cleanup:
+  if (failed) {
+    s = frame(&c);
+    fprintf(stderr, "Completion terminal frame:\n%s\n", s.text);
+  }
+  close_chat(&c);
+  return failed || errors;
+}
+
 int main(int argc, char **argv) {
   const char *themes[] = {"plain", "default", "gruvbox"};
   int theme, height, busy;
+  remote_owner = getenv("SOFTLINE_CHAT_TEST_OWNER");
   if (argc < 3 || load())
     return 2;
+  if (!strcmp(argv[1], "reconnect"))
+    return reconnect_case(argv[2]);
+  if (!strcmp(argv[1], "offline"))
+    return offline_case(argv[2]);
+  if (!strcmp(argv[1], "stalled"))
+    return stalled_case(argv[2]);
+  if (!strcmp(argv[1], "completion"))
+    return completion_case(argv[2], "plain") ||
+           completion_case(argv[2], "default");
   if (!strcmp(argv[1], "line-keys")) {
     for (theme = 0; theme < 2; ++theme)
       for (busy = 0; busy < 2; ++busy)

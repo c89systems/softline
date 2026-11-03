@@ -2,6 +2,7 @@
 #define SOFTLINE_INTERNAL_H
 
 #include "softline/softline.h"
+#include "softline_completion.h"
 #include "softline_edit.h"
 #include "softline_history.h"
 #include "softline_surface.h"
@@ -16,7 +17,7 @@
 #include <unistd.h>
 
 #define SL_BUF_INITIAL 256
-#define SL_LINE_DEFAULT_MAX 4096
+#define SL_LINE_DEFAULT_MAX (128u * 1024u)
 #define SL_HISTORY_DEFAULT_MAX 100
 #define SL_PROMPT_QUEUE_DEFAULT_MAX 64
 #define SL_PROMPT_QUEUE_DEFAULT_PREVIEWS 3
@@ -51,6 +52,7 @@ typedef struct sl_prompt_queue {
   int max_entries;
   int preview_entries;
   int enabled;
+  int remote;
   sl_prompt_id_t serial;
   sl_prompt_id_t last_id;
   sl_prompt_queue_mode_t last_mode;
@@ -73,6 +75,8 @@ typedef struct sl_prompt_queue {
   sl_prompt_queue_policy_callback_t policy_callback;
   void *policy_userdata;
 } sl_prompt_queue_t;
+
+typedef struct sl_backend sl_backend_t;
 
 typedef struct sl_statusline {
   char *elements[SL_STATUS_MAX_ELEMENTS];
@@ -119,6 +123,8 @@ typedef struct sl_history_search {
 } sl_history_search_t;
 
 typedef struct sl_impl {
+  struct sl_pty *terminal_children;
+  int terminal_active;
   int input_fd;
   int output_fd;
   int screen_width;
@@ -131,8 +137,9 @@ typedef struct sl_impl {
   int output_write_active;
   int output_trailing_newlines;
   int output_ansi_state;
-  /* Hold at most ESC [, 128 CSI bytes, and a terminator across writes. */
-  char output_pending[132];
+  sl_osc8_info_t osc8;
+  /* One bounded incomplete control/UTF-8 unit; never producer text. */
+  char output_pending[SL_OSC8_MAX_BYTES];
   size_t output_pending_len;
   sl_surface_t *output_surface;
   int cursor_position_probe;
@@ -149,6 +156,7 @@ typedef struct sl_impl {
   char *image_paste_path_template;
   size_t cursor;
   sl_edit_t edit;
+  sl_completion_state_t completion;
   int preferred_column;
   int preferred_column_width;
   int preferred_column_valid;
@@ -167,6 +175,7 @@ typedef struct sl_impl {
   int history_busy;
   int history_auto_add;
   sl_prompt_queue_t prompt_queue;
+  sl_backend_t *backend;
   sl_prompt_theme_t prompt_theme;
   char *quoted_prompt_prefix;
   sl_quote_style_t quoted_prompt_style;
@@ -193,6 +202,9 @@ typedef struct sl_impl {
   int rendered_width;
   int rendered_height;
   int native_prompt_rows;
+  /* First visual input row in the local editor viewport. Never producer text.
+   */
+  int editor_view_first;
   char **rendered_lines;
   size_t *rendered_lens;
   int *rendered_cols;
@@ -207,6 +219,7 @@ typedef struct sl_impl {
   sl_history_search_t suspended_search;
   int request_submit;
   int request_cancel;
+  int request_suspend;
   int request_queue_dispatch;
   int plain_pending;
   char plain_pending_ch;
@@ -225,5 +238,45 @@ typedef struct sl_impl {
   sl_key_binding_t key_bindings[SL_MAX_KEY_BINDINGS];
   char error[SL_ERROR_LEN];
 } sl_impl_t;
+
+void sl_terminal_reap(sl_impl_t *impl);
+void sl_terminal_cleanup(sl_impl_t *impl);
+void sl_terminal_abandon(sl_t *self);
+
+/* Internal editor/cache operations shared with the transport-independent queue
+ * adapter. These are not application queue admission or consumption seams. */
+int sl_queue_cached_edit_begin(sl_t *self, int index);
+void sl_queue_cached_edit_restore(sl_t *self);
+int sl_backend_create(sl_t *self, const sl_config_t *config);
+void sl_backend_destroy(sl_t *self);
+int sl_backend_callback_active(const sl_impl_t *impl);
+void sl_backend_pump(sl_t *self);
+int sl_backend_submit(sl_t *self, sl_prompt_queue_mode_t mode);
+int sl_backend_edit(sl_t *self, int index);
+int sl_backend_promote_newest(sl_t *self);
+int sl_backend_wait_edit(const sl_impl_t *impl);
+int sl_backend_wait_keys(const sl_impl_t *impl);
+int sl_backend_wait_key(const sl_impl_t *impl, int key);
+int sl_backend_reading_paste(const sl_impl_t *impl);
+int sl_backend_push_key(sl_t *self, int key, const char *bytes, size_t len,
+                        int binding_done);
+int sl_backend_pop_key(sl_impl_t *impl, int *key, char *bytes, size_t *len,
+                       int *binding_done);
+int sl_backend_action(sl_t *self, sl_prompt_id_t id,
+                      sl_queue_operation_t operation);
+int sl_backend_cancel_edit(sl_t *self);
+void sl_backend_cancel_waiting(sl_impl_t *impl);
+int sl_backend_unsupported(sl_t *self);
+int sl_backend_recover_newest(sl_t *self);
+int sl_backend_notice(const sl_impl_t *impl, char *text, size_t size);
+int sl_queue_backend_request_impl(sl_t *, const sl_queue_request_t *,
+                                  sl_queue_request_id_t *);
+int sl_queue_backend_result_impl(sl_t *, const sl_queue_result_t *);
+int sl_queue_backend_update_impl(sl_t *, const sl_queue_change_t *);
+int sl_queue_backend_info_impl(const sl_t *, sl_queue_backend_info_t *);
+int sl_queue_backend_entry_impl(const sl_t *, size_t, sl_queue_entry_t *);
+int sl_queue_backend_pending_impl(const sl_t *, size_t,
+                                  sl_queue_pending_info_t *);
+int sl_queue_backend_recover_impl(sl_t *, sl_queue_request_id_t);
 
 #endif

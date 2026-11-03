@@ -547,6 +547,35 @@ static int observed_pending_wrap_case(int handoff) {
   return failed;
 }
 
+static int hyperlink_wrap_case(const char *control, const char *tail) {
+  struct winsize size = {12, 40, 0, 0};
+  int master, slave, failed;
+  char bytes[2048], source[256];
+  sl_surface_t *surface;
+  if (openpty(&master, &slave, NULL, NULL, &size))
+    return 1;
+  (void)fcntl(master, F_SETFL, O_NONBLOCK);
+  surface = sl_surface_create_native(slave, 40, 10, 0, 0, 0);
+  if (!surface)
+    return 1;
+  sl_surface_set_osc8(surface, 1);
+  failed = sl_surface_native_write(surface,
+                                   "0123456789012345678901234567890123456789",
+                                   40, 10, 2) != 0;
+  (void)drain(master, bytes, sizeof(bytes));
+  snprintf(source, sizeof(source), "%s%s", control, tail);
+  failed |=
+      sl_surface_native_write(surface, source, strlen(source), 10, 2) != 0;
+  (void)drain(master, bytes, sizeof(bytes));
+  failed |= (strstr(bytes, "\r\033D") != NULL) != (*tail == 'X');
+  if (failed)
+    fprintf(stderr, "hyperlink changed pending wrap: %s\n", bytes);
+  sl_surface_destroy(surface);
+  close(master);
+  close(slave);
+  return failed;
+}
+
 int main(void) {
   static const int dimensions[][2] = {{16, 5},  {40, 5},  {80, 5}, {16, 12},
                                       {80, 12}, {16, 18}, {80, 18}};
@@ -593,6 +622,10 @@ int main(void) {
   failed |= observed_geometry_case();
   failed |= observed_pending_wrap_case(0);
   failed |= observed_pending_wrap_case(1);
+  failed |= hyperlink_wrap_case("\033]8;;https://xyz.test/\033\\", "X");
+  failed |= hyperlink_wrap_case("\033]8;;https://example.org/\007", "\n");
+  failed |= hyperlink_wrap_case("\033]8;;https://example.org/\033\\", "\r");
+  failed |= hyperlink_wrap_case("\033]8;;https://xyz.test/\007", "");
   if (!failed)
     puts("Physical resize and repeated clipping preserve line state; "
          "prompt growth still scrolls.");

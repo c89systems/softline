@@ -1,8 +1,10 @@
+#include "completion.h"
 #include "softline/softline.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 static int set_prompt_theme_from_environment(sl_t *sl,
                                              sl_prompt_theme_t fallback) {
@@ -56,6 +58,19 @@ int main(void) {
     fprintf(stderr, "failed to set prompt theme\n");
     sl->destroy(sl);
     return 1;
+  }
+  if (demo_completion_setup(sl, 0) != SL_OK) {
+    fprintf(stderr, "failed to set completions\n");
+    sl->destroy(sl);
+    return 1;
+  }
+  if (isatty(STDIN_FILENO) && isatty(STDOUT_FILENO)) {
+    puts("/ resolves commands; @ lists one directory at a time (except .git). "
+         "Tab accepts or continues; Enter or a separating space removes @.");
+    puts("Completion demo: type h for a dim suggestion; Tab accepts, more Tabs "
+         "cycle. Backspace restarts matching.");
+    puts("  Try say ver + Tab on any line; Ctrl-J adds a line; /q + Tab "
+         "completes /quit.");
   }
 
   for (;;) {

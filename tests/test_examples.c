@@ -787,13 +787,19 @@ test_chat_preserves_transcript_and_prompt_spacing(const char *path) {
               "editor missing");
   ASSERT_TRUE(term_contains(&t, "Enter sends or queues"),
               "introductory transcript missing");
+  ASSERT_TRUE(term_contains(&t, "Completion demo:"),
+              "completion guide missing");
   output_mark = t.raw_len;
   ASSERT_TRUE(write(fd, "hello\r", 6) == 6, "send failed");
   ASSERT_TRUE(wait_screen(&t, "A short answer", 3000) == 0,
               "response heading missing");
   note_row = term_row_of(&t, "Enter sends or queues");
-  note_last_row = term_row_of(&t, "your draft.");
   quote_row = term_row_of(&t, "> hello");
+  /* Startup help can grow or wrap; locate its actual final visible row. */
+  note_last_row = quote_row - 1;
+  while (note_last_row >= 0 &&
+         strspn(t.cells[note_last_row], " ") == (size_t)t.cols)
+    --note_last_row;
   answer_row = term_row_of(&t, "A short answer");
   ASSERT_TRUE(strstr(t.raw + output_mark, "\033[1;1H") == NULL,
               "submission repainted the full terminal viewport");
@@ -1072,6 +1078,7 @@ static void test_chat_native_lifecycle(const char *path, int initial_row) {
   char transcript[MAX_ROWS][MAX_COLS + 1];
   const char *draft =
       "abcdefghijklmnopqrstabcdefghijklmnopqrstabcdefghijklmnopqrst";
+  const char *shell_output;
   int fd;
   int status;
   int protected_rows;
@@ -1095,10 +1102,14 @@ static void test_chat_native_lifecycle(const char *path, int initial_row) {
   ASSERT_TRUE(wait_raw(&t, "\033[?2004h", CHAT_READY_TIMEOUT_MS) == 0 &&
                   wait_screen(&t, "> ", 3000) == 0,
               "initial prompt missing");
-  ASSERT_TRUE(t.row == 23 &&
-                  (initial_row != 4 ||
-                   strncmp(t.cells[0], "EXISTING SHELL OUTPUT", 21) == 0),
+  ASSERT_TRUE(t.row == 23,
               "initial prompt was not anchored at the terminal bottom");
+  /* Longer startup notes may legitimately scroll the original shell row into
+   * terminal history. Preserve it there as well as in the visible viewport. */
+  shell_output = t.scrolls ? t.history[0] : t.cells[0];
+  ASSERT_TRUE(initial_row != 4 ||
+                  strncmp(shell_output, "EXISTING SHELL OUTPUT", 21) == 0,
+              "startup lost existing terminal transcript");
   for (turn = 0; turn < 3; turn++) {
     mark = t.raw_len;
     ASSERT_TRUE(write(fd, "hello world\r", 12) == 12, "send failed");
@@ -1879,6 +1890,8 @@ int main(int argc, char **argv) {
       test_chat_resizes_while_streaming(argv[2]);
     else if (strcmp(argv[3], "word") == 0)
       test_chat_long_unbroken_editor_word(argv[2]);
+    else if (strcmp(argv[3], "spacing") == 0)
+      test_chat_preserves_transcript_and_prompt_spacing(argv[2]);
     else
       test_chat_native_lifecycle(argv[2],
                                  strcmp(argv[3], "bottom") == 0 ? 23 : 4);

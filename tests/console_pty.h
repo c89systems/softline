@@ -23,12 +23,16 @@ struct editor {
   int rows, columns, row, column, top, bottom;
   char escape[128], printed[65536];
   uint16_t print_rows[65536], print_columns[65536];
+  unsigned char print_output[65536];
   size_t escape_length, printed_length;
 };
 static const char *executable;
 static const char *root;
+static const char *working_directory;
 static int c_chat;
-static int test_rows = 8, test_columns = 40, test_echo;
+#include "remote_chat_owner.h"
+static int test_rows = 8, test_columns = 40, test_echo, test_no_flow;
+static int pump(struct editor *e, int timeout);
 static double now(void) {
   struct timespec t;
   clock_gettime(CLOCK_MONOTONIC, &t);
@@ -49,6 +53,7 @@ static void close_editor(struct editor *e) {
     close(e->master);
     e->master = -1;
   }
+  stop_remote_owner();
 }
 static int start(struct editor *e, const char *relative, const char *arg1,
                  const char *arg2) {
@@ -66,10 +71,17 @@ static int start(struct editor *e, const char *relative, const char *arg1,
   e->columns = test_columns;
   e->bottom = test_rows - 1;
   snprintf(script, sizeof(script), "%s/%s", root, relative);
+  if (start_remote_owner())
+    return 1;
+  if (remote_owner && getenv("SOFTLINE_CHAT_TEST_OFFLINE"))
+    stop_remote_owner();
   if (openpty(&e->master, &slave, NULL, NULL, &size))
     return 1;
-  if (!test_echo && tcgetattr(slave, &attributes) == 0) {
-    attributes.c_lflag &= (tcflag_t)~ECHO;
+  if ((!test_echo || test_no_flow) && tcgetattr(slave, &attributes) == 0) {
+    if (!test_echo)
+      attributes.c_lflag &= (tcflag_t)~ECHO;
+    if (test_no_flow)
+      attributes.c_iflag &= (tcflag_t)~IXON;
     tcsetattr(slave, TCSANOW, &attributes);
   }
   e->child = fork();
@@ -82,8 +94,12 @@ static int start(struct editor *e, const char *relative, const char *arg1,
     dup2(slave, 2);
     if (slave > 2)
       close(slave);
-    chdir(root);
-    if (c_chat)
+    if (chdir(working_directory ? working_directory : root))
+      _exit(126);
+    if (c_chat && remote_owner)
+      execl(executable, executable, "127.0.0.1", remote_owner_port,
+            (char *)NULL);
+    else if (c_chat)
       execl(executable, executable, (char *)NULL);
     else if (arg2)
       execl(executable, executable, script, arg1, arg2, (char *)NULL);
@@ -94,6 +110,28 @@ static int start(struct editor *e, const char *relative, const char *arg1,
     _exit(127);
   }
   close(slave);
+  if (e->child > 0 && c_chat && remote_owner &&
+      !getenv("SOFTLINE_CHAT_TEST_OFFLINE") &&
+      !getenv("SOFTLINE_CHAT_TEST_STALL_HELLO")) {
+    double deadline = now() + 2;
+    /* Initial queue operations require a synchronized subscription. The
+     * unavailable panel adds a row; wait for its removal after it was painted,
+     * without hiding startup/handshake waits in the product's input loop. */
+    do {
+      if (strstr(e->bytes, "P 0 pending") && !e->escape_length &&
+          e->bottom == e->rows - 4)
+        return 0;
+      {
+        int status = pump(e, 10);
+        /* start() reports a successful fork; negative startup fixtures
+         * inspect the child's exit status themselves. */
+        if (status)
+          return status < 0;
+      }
+    } while (now() < deadline);
+    fprintf(stderr, "Remote console did not synchronize\n");
+    return 1;
+  }
   return e->child < 0;
 }
 /* Only cursor/margin controls used by these ASCII shell interactions are
@@ -181,6 +219,7 @@ static int consume(struct editor *e, const char *bytes, size_t length) {
       e->printed[at] = (char)byte;
       e->print_rows[at] = (uint16_t)e->row;
       e->print_columns[at] = (uint16_t)e->column;
+      e->print_output[at] = (unsigned char)(e->row <= e->bottom);
       e->printed[++e->printed_length] = 0;
       ++e->column;
     }

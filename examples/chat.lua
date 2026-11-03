@@ -28,6 +28,7 @@ local worker_pid
 local watch_id
 local dispatch_next_queued
 local stream_open = false
+local terminal_unavailable = false
 
 local function is_shell_command(line)
   return line == "!sh" or line == "/shell"
@@ -90,19 +91,22 @@ local function handle_command(line)
   return true
 end
 
--- Only the idle owner loop may hand the terminal to another process. End the
--- session to release input/scrolling, then begin a fresh frame at the shell's
--- final cursor position (including after clear or resize). Keep the handle,
--- history and queue. Quote SHELL as one executable, never as shell commands.
+-- The local PTY adapter uses the same relay as remote adapters. Softline owns
+-- terminal release/restoration and preserves the suspended editor.
 local function run_shell(preserve_draft)
-  assert(sl:output_stream_end())
   stream_open = false
-  local ok, reason, status = os.execute('exec "${SHELL:-/bin/sh}" -i')
-  if not ok then
-    io.stderr:write("shell exited unsuccessfully (", tostring(reason), " ", tostring(status), ")\n")
-  end
-  assert(sl:output_stream_begin())
+  local ok, status, escaped = softline.terminal_local(sl)
   stream_open = true
+  local message
+  if not ok then
+    message = "shell handoff failed (" .. tostring(status) .. ")\n"
+  elseif status > 0 and not escaped then
+    message = "shell exited unsuccessfully (exit " .. tostring(status) .. ")\n"
+  end
+  if message and not sl:output_stream_write(message) then
+    terminal_unavailable = true
+    error("terminal output unavailable")
+  end
   if not preserve_draft then
     assert(sl:set_status_message_prefix(""))
     assert(sl:set_status_message(" "))
@@ -260,6 +264,7 @@ end
 
 local function run()
   sl = softline.new()
+  assert(dofile((arg[0]:match("^(.*[/])") or "") .. "completion.lua")(sl, true))
   assert(sl:history_open("softline.examples.chat", os.getenv("SOFTLINE_HISTORY_DIR")))
   assert(sl:history_set_auto_add(true))
   if interactive then
@@ -287,6 +292,10 @@ local function run()
     assert(sl:bind_key(softline.KEY_ESCAPE, function()
       return softline.KEY_ACTION_CANCEL
     end))
+    assert(sl:bind_key(softline.KEY_ALT_BASE + string.byte("q"), function()
+      exit_requested = true
+      return softline.KEY_ACTION_SUSPEND
+    end))
     assert(sl:bind_key(softline.KEY_ALT_BASE + string.byte("s"), function()
       if busy then
         assert(sl:set_status_message("Shell is available only between turns."))
@@ -297,8 +306,10 @@ local function run()
     set_chat_busy(false)
     assert(sl:output_stream_begin())
     stream_open = true
-    print_message({ "softline Lua turn processor. A staged operation streams for about four seconds. Enter sends while available and queues while an operation is running; Alt-Enter queues a steer for the next stage boundary; empty Alt-Enter marks the newest queued turn as steer; Alt-E edits it. Escape or Ctrl-C stops the operation; /quit leaves. !sh or /shell opens your shell between turns; Alt-S opens it while preserving your draft.\n" })
+    print_message({ "softline Lua turn processor. A staged operation streams for about four seconds. Enter sends while available and queues while an operation is running; Alt-Enter queues a steer for the next stage boundary; empty Alt-Enter marks the newest queued turn as steer; Alt-E edits it. Escape or Ctrl-C stops the operation; /quit or Alt-Q leaves. !sh or /shell opens your shell between turns; Alt-S opens it while preserving your draft.\n" })
     print_message({ "Policy demo: /status / /approve / /steer / /resume. Shell commands queue until the turn completes.\n" })
+    print_message({ "Completion demo: type h for a dim suggestion; Tab accepts, more Tabs cycle. Backspace restarts matching. Try say ver + Tab on any line; Ctrl-J adds a line; /q + Tab completes /quit.\n" })
+    print_message({ "/ resolves commands; @ lists one directory at a time (except .git). Tab accepts; Enter or a separating space removes @.\n" })
   else
     assert(sl:output_stream_begin())
     stream_open = true
@@ -367,6 +378,6 @@ if sl then
   sl:close()
 end
 if not ok then
-  io.stderr:write(err, "\n")
+  if not terminal_unavailable then io.stderr:write(err, "\n") end
   os.exit(1)
 end

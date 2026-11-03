@@ -8,12 +8,14 @@ fixture="$work/source"
 mkdir -p "$fixture"
 # An extracted-source context supplies its own manifest, even below a checkout.
 files=(LICENSE README.md softline.rockspec.in lua/README.md lua/softline_lua.c
+  lua/softline_queue_backend_lua.h
+  lua/softline_terminal_lua.h
   cmake/softline_workspace.cmake scripts/require-workspace.sh
   scripts/package-source.sh scripts/extract-release-source.sh scripts/release_lua_artifacts.sh scripts/stage_lua_rock_sources.sh
   scripts/build_lua_rock.sh scripts/require-host-bash.sh scripts/release_version.sh
   scripts/render_release_rockspec.sh scripts/render_lua_rockspec.sh
   include/softline/softline.h tests/lua_smoke.lua tests/lua_readline.lua
-  tests/lua_watch_file_gc.lua examples/simple.lua examples/chat.lua)
+  tests/lua_watch_file_gc.lua examples/simple.lua examples/chat.lua examples/completion.lua)
 for file in "${files[@]}"; do
   mkdir -p "$fixture/$(dirname "$file")"
   cp -p "$root/$file" "$fixture/$file"
@@ -42,7 +44,7 @@ for run in first second; do
   (cd "$fixture/dist"; sha256sum softline-* | LC_ALL=C sort) > "$work/$run"
 done
 cmp "$work/first" "$work/second"
-grep -Fxq '   url = "https://github.com/sa6mwa/softline/releases/download/v9.8.7/softline-lua-9.8.7.tar.gz",' \
+grep -Fxq '   url = "https://github.com/c89systems/softline/releases/download/v9.8.7/softline-lua-9.8.7.tar.gz",' \
   "$fixture/dist/softline-9.8.7-1.rockspec"
 mkdir "$work/extracted" "$work/lua"
 tar -xzf "$fixture/dist/softline-9.8.7.tar.gz" -C "$work/extracted"
