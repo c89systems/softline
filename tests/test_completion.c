@@ -813,6 +813,15 @@ int main(int argc, char **argv) {
     size_t cursor;
     int calls;
   } cases[] = {
+      {"", "ne\t\t\033[C\033[C\033[C\r", "next", 0, 0},
+      {"", "ne\t\t\006\006\006\r", "next", 0, 0},
+      {"", "ne\t\t\033[C\006\033[C\006\r", "next", 0, 0},
+      {"", "say\nne\t\t\006\006\006\r", "say\nnext", 0, 0},
+      {"", "café ne\t\t\006\033[C\006\r", "café next", 0, 0},
+      {"", "ne\t\t\006\006\006\037\r", "ne", 0, 0},
+      {"", "ne\t\t\006\006\006\177\t\r", "next steps", 0, 0},
+      {"", "ne\t\t\006\006\006\t\r", "next steps", 0, 0},
+      {"ne later", "\t\t\006\006!\r", "next !later", 2, 0},
       {"", "/sta\t\r", "/status", 0, 0},
       {"", "/sta\006\r", "/status", 0, 0},
       {"", "/sta\033[C\r", "/status", 0, 0},

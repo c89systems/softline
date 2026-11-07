@@ -7843,6 +7843,8 @@ static char *sl_readline_impl(sl_t *self, const char *prompt,
         if (impl->cursor < impl->len)
           impl->cursor +=
               sl_utf8_next_cluster_len(impl->buf, impl->len, impl->cursor);
+        else
+          completion_committed = impl->completion.committed;
         break;
       case SL_KEY_UP:
         if (!sl_move_visual(self, prompt, -1) && impl->cursor == impl->len)

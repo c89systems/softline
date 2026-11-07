@@ -802,6 +802,7 @@ its descendants. An empty or failed continuation suppresses competing parent
 ghosts. A nonmutating suspension preserves the preview and cached results.
 After committing a leaf with no continuation preview, Right/Ctrl-F resumes
 ordinary forward character movement.
+At the end of the draft, these keys preserve the commit and leave its text unchanged.
 These keys also accept a ghost at its token endpoint. Within existing text
 they retain normal character movement; explicit host bindings take precedence.
 Typing further into that directory, or Tab without a parent cycle,

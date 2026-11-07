@@ -481,6 +481,12 @@ static int completion(void) {
   REQUIRE(send_bytes(&e, "/status later\001\033f\006\006!\r") == 0);
   REQUIRE(wait_for(&e, "leaf-2> ", 0) == 0);
   REQUIRE(send_bytes(&e, "/status later\001\033f\033[C\033[C!\r") == 0);
+  REQUIRE(wait_for(&e, "leaf-noop-1> ", 0) == 0);
+  REQUIRE(send_bytes(&e, "ne\t\t\033[C\033[C\033[C\r") == 0);
+  REQUIRE(wait_for(&e, "leaf-noop-2> ", 0) == 0);
+  REQUIRE(send_bytes(&e, "ne\t\t\006\006\006\r") == 0);
+  REQUIRE(wait_for(&e, "leaf-noop-3> ", 0) == 0);
+  REQUIRE(send_bytes(&e, "ne\t\t\006\033[C\006\r") == 0);
   REQUIRE(wait_for(&e, "expand-overlap-1> ", 0) == 0);
   mark = e.length;
   REQUIRE(send_bytes(&e, "/app") == 0);
