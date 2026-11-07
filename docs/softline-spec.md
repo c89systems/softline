@@ -778,12 +778,13 @@ state but must not mutate/destroy it, retain the emitter or yield. No provider
 is invoked by rendering or a producer feed. Asynchronous resolution is not part
 of this interface; hosts provide a synchronous snapshot of their current data.
 
-Optional `expand(self, completed, emit, context, userdata)` runs only on Tab
-outside an active cycle, when actual text contains a completed candidate.
+Optional `expand(self, completed, emit, context, userdata)` runs on Right/Ctrl-F
+commit and on Tab outside an active cycle, when actual text contains a completed candidate.
 `completed` includes the trigger. It also works for a unique, fully present match, and for
 known ancestor candidates when the user has typed part of a child path. Emit
 full strings strictly extending that prefix. A nonempty result becomes a
-separate completion level and that Tab accepts its first matching candidate.
+separate completion level. Commit previews its first matching candidate;
+Tab accepts it. A Tab-triggered lookup accepts the candidate on that same Tab.
 An empty result retains normal completion or host Tab handling. No continuation
 is called for ghost text alone. An existing matching suggestion is accepted
 before trying a shorter ancestor continuation, including after each lazy lookup.
@@ -795,9 +796,10 @@ returns to the original parent list, rather than mixing parent candidates with
 descendants. Continuing inside a cached level does not call the provider again.
 Repeated Tabs stay within the current list, including a one-candidate list
 with a continuation provider. Right or Ctrl-F commits the selected candidate
-without moving the cursor or invoking a callback; the next Tab may continue it.
-Commit suppresses competing parent ghosts, including when a longer parent
-candidate shares the committed prefix. A nonmutating suspension preserves it.
+without moving the cursor, resolving that candidate's next list for an immediate
+ghost preview. It never inserts that next candidate or recursively resolves
+its descendants. An empty or failed continuation suppresses competing parent
+ghosts. A nonmutating suspension preserves the preview and cached results.
 These keys also accept a ghost at its token endpoint. Within existing text
 they retain normal character movement; explicit host bindings take precedence.
 Typing further into that directory, or Tab without a parent cycle,
@@ -821,7 +823,14 @@ those spaces do not end the activation. Other editing/navigation ends the Tab
 cycle and rematches the current prefix against the cached snapshot, without
 calling the provider.
 
-Matching is literal and case-sensitive. The first match appears as a dim inline
+If a phrase stops matching and the current word starts with another eligible
+registered trigger, that word starts a fresh activation. For example,
+`hello @` leaves the `hello world` phrase and starts the host's `@` provider.
+A still-matching phrase keeps ownership of embedded trigger characters, and
+start-only providers remain ineligible after whitespace.
+
+Matching is literal and case-sensitive, starting with the trigger itself.
+The first match appears as a dim inline
 suffix. Tab accepts that full candidate; further Tabs cycle the originally
 resolved matching set in list order, wrapping to the first. Thus
 `/` can cycle all slash commands, while Backspace from `/command1` to `/command`
@@ -866,8 +875,9 @@ and `@`. Slash callbacks provide the host's commands. `@` takes a fresh current
 directory snapshot on activation, accepts at word boundaries and removes its
 marker on exit/submission. It uses the same frontend in
 local/remote chat; the example host owns file discovery, not the Softline library.
-Directories end in `/`; commit one with Right/Ctrl-F, then Tab resolves only
-that directory through the same resolver, without scanning its descendants.
+Directories end in `/`; commit one with Right/Ctrl-F to preview its first child
+through the same resolver, without scanning descendants. Tab accepts/cycles
+that directory's children.
 The command resolver similarly
 extends `/approve` to `/approve on` and `/approve off`. Hidden entries are
 included, `.git` entries excluded, and symlinks listed without following them.

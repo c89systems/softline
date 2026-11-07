@@ -988,7 +988,9 @@ static int softline_lua_expand(sl_t *sl, const char *completed,
  * the input coroutine, and must not mutate/close the editor or yield. Lists are
  * copied and cached per activation; matching spaces keep phrase ghosts active.
  * Tab accepts then cycles. Right/Ctrl-F accepts a ghost or commits a selection;
- * a subsequent Tab may expand it. Enter submits actual text. nil clears the
+ * expand then previews the next list without inserting it. Suggestions appear
+ * from the trigger itself; a new word trigger can replace an unmatched phrase.
+ * Enter submits actual text. nil clears the
  * registrations. Invalid fields preserve the previous registrations.
  */
 static int softline_lua_set_completion_providers(lua_State *L) {

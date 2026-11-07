@@ -54,6 +54,7 @@ enum scenario {
   CLUSTER_LAST,
   HOST_ENQUEUE,
   PHRASE_WHITESPACE,
+  PHRASE_TRIGGER,
   RIGHT_OVERRIDE,
   CTRL_F_OVERRIDE
 };
@@ -130,7 +131,8 @@ static int run(int native, const char *initial, size_t cursor, const char *keys,
       {"end ", SL_COMPLETION_WORD},
       {"@hello world", SL_COMPLETION_WORD},
       {"@hello there", SL_COMPLETION_WORD},
-      {"@end ", SL_COMPLETION_WORD}};
+      {"@end ", SL_COMPLETION_WORD},
+      {"worldly", SL_COMPLETION_WORD}};
   CHECK(!openpty(&master, &slave, NULL, NULL, &size) && !pipe(wake));
   sl_config_init(&config);
   config.input_fd = config.output_fd = slave;
@@ -173,17 +175,18 @@ static int run(int native, const char *initial, size_t cursor, const char *keys,
   }
   if (scenario == CLEARED_LIST)
     CHECK(sl_set_completion_providers(sl, NULL, 0) == SL_OK);
-  if (scenario == PHRASE_WHITESPACE) {
+  if (scenario == PHRASE_WHITESPACE || scenario == PHRASE_TRIGGER) {
     sl_completion_provider_t providers[] = {
         {'h', SL_COMPLETION_WORD, 0, fixture_complete, NULL, NULL},
         {'@', SL_COMPLETION_WORD, 1, fixture_complete, NULL, NULL},
-        {'e', SL_COMPLETION_WORD, 0, fixture_complete, NULL, NULL}};
+        {'e', SL_COMPLETION_WORD, 0, fixture_complete, NULL, NULL},
+        {'w', SL_COMPLETION_WORD, 0, fixture_complete, NULL, NULL}};
     providers[0].userdata = providers[1].userdata = providers[2].userdata =
-        &fixture;
+        providers[3].userdata = &fixture;
     fixture.items = phrases;
     fixture.count = sizeof(phrases) / sizeof(phrases[0]);
     fixture.calls = 0;
-    CHECK(sl_set_completion_providers(sl, providers, 3) == SL_OK);
+    CHECK(sl_set_completion_providers(sl, providers, 4) == SL_OK);
     CHECK(sl_bind_key(sl, SL_KEY_CTRL_T, insert_space, NULL) == SL_OK);
   }
   if (scenario == CLUSTER_FIRST || scenario == CLUSTER_LAST) {
@@ -220,6 +223,8 @@ static int run(int native, const char *initial, size_t cursor, const char *keys,
   sl_free_string(sl, line);
   if (scenario == PHRASE_WHITESPACE)
     CHECK(fixture.calls == 1);
+  if (scenario == PHRASE_TRIGGER)
+    CHECK(fixture.calls == 2);
   if (scenario == HOST_ENQUEUE) {
     CHECK(d.phase == 1 && sl_prompt_queue_count(sl) == 1);
     CHECK(sl_prompt_queue_peek(sl, 0, &line) == SL_OK);
@@ -515,9 +520,10 @@ static int expansion_cases(int native) {
       {0, 2, 0, "", 0, "@\t\006\t\t\006\t\r", "lua/sub/deep.c"},
       {0, 1, 0, "", 0, "@l\033[C\t\r", "lua/source.c"},
       {0, 1, 0, "", 0, "@l\006\t\r", "lua/source.c"},
-      {0, 0, 0, "", 0, "@l\t\006\r", "lua/"},
-      {0, 0, 0, "", 0, "@l\t\006\037\r", "l"},
-      {0, 0, 0, "say @l later", 6, "\t\006!\r", "say lua/! later"},
+      {0, 1, 0, "", 0, "@l\t\006\r", "lua/"},
+      {0, 1, 0, "", 0, "@lua/\006\r", "lua/"},
+      {0, 1, 0, "", 0, "@l\t\006\037\r", "l"},
+      {0, 1, 0, "say @l later", 6, "\t\006!\r", "say lua/! later"},
       {0, 0, 0, "", 0, "@l\t\r", "lua/"},
       {0, 1, 0, "", 0, "@l\t\006\t\r", "lua/source.c"},
       {0, 1, 0, "", 0, "@lua/\t\r", "lua/source.c"},
@@ -531,9 +537,10 @@ static int expansion_cases(int native) {
       {0, 1, 0, "", 0, "@lua/\t\177\177\177\177\177\177\177\177\t\r",
        "lua/source.c"},
       {0, 1, 0, "", 0, "@lua/\t\037\t\r", "lua/source.c"},
-      {3, 1, 0, "", 0, "@l\t\006\t\177\177\177\177\t\t\r", "lib/"},
-      {4, 1, 0, "", 0, "@l\t\006\t\177\177\177\177\t\t\r", "lib/"},
-      {5, 1, 0, "", 0, "@l\t\006\t\177\177\177\177\t\t\r", "lib/"},
+      {3, 1, 0, "", 0, "@l\t\006\177\177\177\177\t\t\r", "lib/"},
+      {4, 1, 0, "", 0, "@l\t\006\177\177\177\177\t\t\r", "lib/"},
+      {5, 1, 0, "", 0, "@l\t\006\177\177\177\177\t\t\r", "lib/"},
+      {3, 1, 1, "", 0, "@l\t\006\t\r", "lua/#"},
       {2, 1, 1, "", 0, "@l\t\006\t\r", "lua/#"},
       {6, 0, 0, "", 0, "@l\t\t\r", "lib/"},
       {7, 0, 1, "", 0, "@l\t\t\r", "lua/#"},
@@ -547,7 +554,7 @@ static int expansion_cases(int native) {
       {10, 0, 0, "", 0, "@l\t\t\177\t\r", "lua/"},
       {10, 1, 0, "", 0, "@l\t\006\t\r", "lu-next"},
       {10, 1, 0, "", 0, "@l\006\t\r", "lu-next"},
-      {10, 0, 0, "", 0, "@l\t\006\177\t\t\r", "lua/"},
+      {10, 1, 0, "", 0, "@l\t\006\177\t\t\r", "lua/"},
       {12, 1, 0, "", 0, "@l\t\006\033s", "lu-next"},
       {11, 1, 0, "", 0, "@lua/app\t\r", "lua/apple"}};
   size_t i;
@@ -592,7 +599,7 @@ static int expansion_cases(int native) {
     if (data.kind == 12) {
       CHECK(!line && sl_last_readline_status(sl) == SL_READLINE_SUSPENDED);
       CHECK(!strcmp(sl_buffer(sl), "@lu") && sl_cursor(sl) == 3 &&
-            data.expansions == 0);
+            data.expansions == 1);
       data.driver.initial = NULL;
       data.driver.keys = "\t\r";
       CHECK(write(wake[1], "x", 1) == 1);
@@ -777,10 +784,17 @@ static int whitespace_cases(void) {
                {"helloX later", "\002\006 \t\r", "hello world later", 5, 0}};
   size_t i;
   int native;
-  for (native = 0; native <= 1; ++native)
+  for (native = 0; native <= 1; ++native) {
+    CHECK(!run(native, "", 0, "hello @\t\r", "hello hello world", 0, 131072,
+               PHRASE_TRIGGER));
+    CHECK(!run(native, "", 0, "hello\n@\t\r", "hello\nhello world", 0, 131072,
+               PHRASE_TRIGGER));
+    CHECK(!run(native, "", 0, "@hello @\t\r", "hello hello world", 0, 131072,
+               PHRASE_TRIGGER));
     for (i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i)
       CHECK(!run(native, cases[i].initial, cases[i].cursor, cases[i].keys,
                  cases[i].expected, cases[i].calls, 131072, PHRASE_WHITESPACE));
+  }
   return 0;
 }
 

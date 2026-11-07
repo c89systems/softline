@@ -492,7 +492,7 @@ static int completion(void) {
       char marker[32];
       snprintf(marker, sizeof(marker), "expand-error-%d> ", i);
       REQUIRE(wait_for(&e, marker, 0) == 0);
-      REQUIRE(send_bytes(&e, "@l\t\006\t\177\177\177\177\t\t\r") == 0);
+      REQUIRE(send_bytes(&e, "@l\t\006\177\177\177\177\t\t\r") == 0);
     }
   }
   {
@@ -527,7 +527,19 @@ static int example_completion(int chat) {
   REQUIRE(wait_for(&e, "Completion demo:", 0) == 0);
   REQUIRE(wait_for(&e, prompt, 0) == 0);
   mark = e.length;
-  REQUIRE(send_bytes(&e, "hel") == 0);
+  REQUIRE(send_bytes(&e, "h") == 0);
+  REQUIRE(wait_for(&e, "\033[2mello world", mark) == 0);
+  mark = e.length;
+  REQUIRE(send_bytes(&e, "\033n/") == 0);
+  REQUIRE(wait_for(&e, chat ? "\033[2mstatus" : "\033[2mquit", mark) == 0);
+  mark = e.length;
+  REQUIRE(send_bytes(&e, "\033n@") == 0);
+  REQUIRE(wait_for(&e, "\033[2m", mark) == 0);
+  mark = e.length;
+  REQUIRE(send_bytes(&e, "\033nhello @only\t\006") == 0);
+  REQUIRE(wait_for(&e, "\033[2mfile.txt", mark) == 0);
+  mark = e.length;
+  REQUIRE(send_bytes(&e, "\033nhel") == 0);
   REQUIRE(wait_for(&e, "\033[2mlo world", mark) == 0);
   mark = e.length;
   /* Native chat may append only the changed suffix. Assert the eventual

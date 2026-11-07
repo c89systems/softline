@@ -1453,8 +1453,23 @@ static void sl_completion_prepare(sl_t *self) {
   if (state->active) {
     if (state->start < impl->len &&
         impl->buf[state->start] == state->provider.trigger &&
-        impl->cursor > state->start && impl->cursor <= state->end)
-      return;
+        impl->cursor > state->start && impl->cursor <= state->end) {
+      sl_completion_match_t match;
+      start = impl->cursor;
+      while (start && !sl_completion_space((unsigned char)impl->buf[start - 1]))
+        --start;
+      /* A valid phrase owns its internal spaces. Once it stops matching, a
+       * registered word-boundary trigger can start a fresh activation. */
+      if (start <= state->start || start == impl->cursor ||
+          sl_completion_find(state, impl->buf, impl->cursor, &match))
+        return;
+      for (i = 0; i < state->provider_count; ++i)
+        if (state->providers[i].trigger == impl->buf[start] &&
+            state->providers[i].scope == SL_COMPLETION_WORD)
+          break;
+      if (i == state->provider_count)
+        return;
+    }
     if (sl_completion_finish(self) != SL_OK)
       return;
   }
@@ -6991,7 +7006,7 @@ static size_t sl_completion_end(const char *buf, size_t len, size_t cursor,
   return end;
 }
 
-static int sl_expand_completion(sl_t *self) {
+static int sl_expand_completion(sl_t *self, int commit) {
   sl_impl_t *impl = sl_impl(self);
   sl_completion_state_t *state = &impl->completion;
   sl_completion_level_t *level;
@@ -7000,16 +7015,22 @@ static int sl_expand_completion(sl_t *self) {
   if (impl->history_search_active || impl->bracketed_paste ||
       state->cycle.original)
     return 0;
+  if (!state->provider.expand) {
+    if (!commit)
+      state->committed = 0;
+    return 0;
+  }
   /* First accept the offered candidate. An overlapping shorter candidate is
    * not a reason to divert Tab into another context. Unique complete matches
    * have no offer and can continue immediately. */
-  if (!state->cycle.original && sl_current_completion(impl, &match))
+  if (!commit && sl_current_completion(impl, &match))
     return 0;
   state->committed = 0;
-  /* Typing below a completed directory is also lazy: resolve only the known
-   * ancestor prefixes needed for this Tab, never an entire subtree. */
-  while ((length = sl_completion_expand_prefix(state, impl->buf,
-                                               impl->cursor)) > previous) {
+  /* Commit resolves only the selected candidate. Typed suffixes resolve known
+   * ancestors lazily; neither path accepts any returned candidate. */
+  while ((length = commit ? impl->cursor - state->start
+                          : sl_completion_expand_prefix(
+                                state, impl->buf, impl->cursor)) > previous) {
     previous = length;
     for (level = state->levels; level; level = level->next)
       if (level->length == length &&
@@ -7051,9 +7072,11 @@ static int sl_expand_completion(sl_t *self) {
     }
     if (level->list.count) {
       if (sl_current_completion(impl, &match))
-        break;
+        return 0;
     }
   }
+  if (commit)
+    state->committed = 1;
   return 0;
 }
 
@@ -7064,7 +7087,7 @@ static int sl_complete_draft(sl_t *self) {
   size_t selected, end, removed, restore, i;
   const char *text;
   char *replacement = NULL;
-  if (sl_expand_completion(self) < 0) {
+  if (sl_expand_completion(self, 0) < 0) {
     sl_prompt_queue_bell(impl);
     return -1;
   }
@@ -7132,6 +7155,16 @@ failed:
   sl_completion_cycle_clear(cycle);
   sl_prompt_queue_bell(impl);
   return -1;
+}
+
+static void sl_commit_completion(sl_t *self) {
+  sl_impl_t *impl = sl_impl(self);
+  sl_completion_cycle_clear(&impl->completion.cycle);
+  impl->completion.committed = 1;
+  if (sl_expand_completion(self, 1) < 0) {
+    impl->completion.committed = 1;
+    sl_prompt_queue_bell(impl);
+  }
 }
 
 static char *sl_readline_impl(sl_t *self, const char *prompt,
@@ -7781,18 +7814,28 @@ static char *sl_readline_impl(sl_t *self, const char *prompt,
         if (!impl->history_search_active && !impl->bracketed_paste) {
           sl_completion_prepare(self);
           if (impl->completion.cycle.original) {
-            sl_completion_cycle_clear(&impl->completion.cycle);
-            impl->completion.committed = completion_committed = 1;
+            sl_commit_completion(self);
+            completion_committed = 1;
             break;
           }
           /* Accept a ghost at the token endpoint. Within existing text these
-           * keys retain normal character movement. Continuation belongs to
-           * a later Tab, never to the acceptance key itself. */
+           * keys retain normal character movement. Resolve the selected
+           * candidate's continuation for preview without inserting it. */
           if (impl->cursor == impl->completion.end &&
               sl_current_completion(impl, &completion)) {
-            if (sl_complete_draft(self) > 0)
-              impl->completion.committed = completion_committed = 1;
-            sl_completion_cycle_clear(&impl->completion.cycle);
+            if (sl_complete_draft(self) > 0) {
+              sl_commit_completion(self);
+              completion_committed = 1;
+            }
+            break;
+          }
+          if (impl->cursor == impl->completion.end &&
+              sl_completion_expand_prefix(&impl->completion, impl->buf,
+                                          impl->cursor) ==
+                  impl->cursor - impl->completion.start &&
+              impl->cursor > impl->completion.start) {
+            sl_commit_completion(self);
+            completion_committed = 1;
             break;
           }
         }
