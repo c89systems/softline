@@ -114,6 +114,18 @@ for i, expected in ipairs({"lua/", "lua/a.txt", "lua/sub/deep.txt"}) do
   assert(sl:next_prompt("commit-" .. i .. "> ") == expected)
   assert(count == i - 1)
 end
+local leaf_calls = 0
+assert(sl:set_completion_providers({{trigger="/",
+  complete=function() return {"/status"} end,
+  expand=function(prefix)
+    assert(prefix == "/status")
+    leaf_calls = leaf_calls + 1
+    return {}
+  end}}))
+for i = 1, 2 do
+  assert(sl:next_prompt("leaf-" .. i .. "> ") == "/status !later")
+  assert(leaf_calls == i)
+end
 local attempts = 0
 assert(sl:set_completion_providers({{trigger="/",
   complete=function() return {"/ap", "/apple"} end,

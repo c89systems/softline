@@ -1048,6 +1048,11 @@ static int completion_case(const char *example, const char *theme) {
   send_input(&c, "/");
   REQUIRE(wait_frame(&c, NULL, "> /status\n", 0, 2) == 0);
   REQUIRE(wait_column(&c, 3) == 0);
+  send_input(&c, "\033n/status later\001\033f");
+  REQUIRE(wait_column(&c, 9) == 0);
+  send_input(&c, "\006\033[C!");
+  REQUIRE(wait_frame(&c, NULL, "> /status !later\n", 0, 2) == 0);
+  REQUIRE(wait_column(&c, 11) == 0);
   send_input(&c, "\033n@only");
   REQUIRE(wait_frame(&c, NULL, "> @only/\n", 0, 2) == 0);
   send_input(&c, "\t\033[C");

@@ -7829,7 +7829,8 @@ static char *sl_readline_impl(sl_t *self, const char *prompt,
             }
             break;
           }
-          if (impl->cursor == impl->completion.end &&
+          if (!impl->completion.committed &&
+              impl->cursor == impl->completion.end &&
               sl_completion_expand_prefix(&impl->completion, impl->buf,
                                           impl->cursor) ==
                   impl->cursor - impl->completion.start &&

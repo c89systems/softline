@@ -477,6 +477,10 @@ static int completion(void) {
   REQUIRE(send_bytes(&e, "@l\033[C\t\t\t\r") == 0);
   REQUIRE(wait_for(&e, "commit-3> ", 0) == 0);
   REQUIRE(send_bytes(&e, "@\t\006\t\t\006\t\r") == 0);
+  REQUIRE(wait_for(&e, "leaf-1> ", 0) == 0);
+  REQUIRE(send_bytes(&e, "/status later\001\033f\006\006!\r") == 0);
+  REQUIRE(wait_for(&e, "leaf-2> ", 0) == 0);
+  REQUIRE(send_bytes(&e, "/status later\001\033f\033[C\033[C!\r") == 0);
   REQUIRE(wait_for(&e, "expand-overlap-1> ", 0) == 0);
   mark = e.length;
   REQUIRE(send_bytes(&e, "/app") == 0);

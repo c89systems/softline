@@ -513,6 +513,15 @@ static int expansion_cases(int native) {
     size_t cursor;
     const char *keys, *expected;
   } cases[] = {
+      {8, 1, 0, "/about later", 6, "\006\006!\r", "/about !later"},
+      {8, 1, 0, "/about later", 6, "\033[C\033[C!\r", "/about !later"},
+      {8, 1, 0, "/ab later", 3, "\t\006\033[C!\r", "/about !later"},
+      {8, 1, 0, "/ab later", 3, "\t\033[C\006!\r", "/about !later"},
+      {8, 1, 0, "/about\nlater", 6, "\006\006!\r", "/about\n!later"},
+      {8, 1, 0, "/about é later", 6, "\006\006\006!\r", "/about é! later"},
+      {8, 1, 0, "/about later", 6, "\006\006!\037\r", "/about later"},
+      {0, 2, 0, "@lua/so later", 7, "\t\006\033[C!\r", "lua/source.c !later"},
+      {3, 1, 0, "@lua/ later", 5, "\006\006!\r", "lua/ !later"},
       {0, 0, 0, "", 0, "@\t\t\t\r", "lua/"},
       {0, 0, 0, "", 0, "@\t\t\r", "lib/"},
       {1, 0, 0, "", 0, "@l\t\t\t\r", "lua/"},
