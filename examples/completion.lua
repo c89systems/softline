@@ -13,7 +13,7 @@ return function(sl, chat)
     local directory = #prefix > 1 and "./" .. prefix:sub(2) or "."
     local quoted = "'" .. directory:gsub("'", "'\\''") .. "'"
     -- NUL separators preserve spaces and linefeeds. Read only this directory;
-    -- later Tabs request its children through the very same callback.
+    -- after committing a selection, Tab requests its children with this callback.
     local pipe = assert(io.popen([[sh -c '
       cd "$1" || exit 1
       for file in ./* ./.[!.]* ./..?*; do

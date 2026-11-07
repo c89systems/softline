@@ -778,13 +778,13 @@ state but must not mutate/destroy it, retain the emitter or yield. No provider
 is invoked by rendering or a producer feed. Asynchronous resolution is not part
 of this interface; hosts provide a synchronous snapshot of their current data.
 
-Optional `expand(self, completed, emit, context, userdata)` runs only on Tab,
-before rotation, when actual text contains a completed candidate. `completed`
-includes the trigger. It also works for a unique, fully present match, and for
+Optional `expand(self, completed, emit, context, userdata)` runs only on Tab
+outside an active cycle, when actual text contains a completed candidate.
+`completed` includes the trigger. It also works for a unique, fully present match, and for
 known ancestor candidates when the user has typed part of a child path. Emit
 full strings strictly extending that prefix. A nonempty result becomes a
 separate completion level and that Tab accepts its first matching candidate.
-An empty result retains normal rotation or host Tab handling. No continuation
+An empty result retains normal completion or host Tab handling. No continuation
 is called for ghost text alone. An existing matching suggestion is accepted
 before trying a shorter ancestor continuation, including after each lazy lookup.
 
@@ -793,12 +793,18 @@ attempts. Softline keeps parent and child snapshots separate, choosing the most
 specific cached list with a candidate matching the draft. Backspace below its prefix
 returns to the original parent list, rather than mixing parent candidates with
 descendants. Continuing inside a cached level does not call the provider again.
-An already visited continuation does not interrupt a resumed parent-level Tab
-cycle. Typing further into that directory, or Tab without a parent cycle,
+Repeated Tabs stay within the current list, including a one-candidate list
+with a continuation provider. Right or Ctrl-F commits the selected candidate
+without moving the cursor or invoking a callback; the next Tab may continue it.
+Commit suppresses competing parent ghosts, including when a longer parent
+candidate shares the committed prefix. A nonmutating suspension preserves it.
+These keys also accept a ghost at its token endpoint. Within existing text
+they retain normal character movement; explicit host bindings take precedence.
+Typing further into that directory, or Tab without a parent cycle,
 reuses its cached children. This preserves cycling through the first list after
 Backspace while allowing repeated navigation into previously visited levels.
 Continuation failure discards only its new list, rings once and preserves the
-draft and prior candidates; subsequent Tabs can rotate normally. The initial
+draft and prior candidates; editing can rematch the parent list. The initial
 callback still runs only once per token. All snapshots end with that activation.
 
 Softline owns that snapshot while the token is active, including through typing,
@@ -860,8 +866,9 @@ and `@`. Slash callbacks provide the host's commands. `@` takes a fresh current
 directory snapshot on activation, accepts at word boundaries and removes its
 marker on exit/submission. It uses the same frontend in
 local/remote chat; the example host owns file discovery, not the Softline library.
-Directories end in `/`; further Tabs resolve only that directory through the
-same resolver, without scanning its descendants. The command resolver similarly
+Directories end in `/`; commit one with Right/Ctrl-F, then Tab resolves only
+that directory through the same resolver, without scanning its descendants.
+The command resolver similarly
 extends `/approve` to `/approve on` and `/approve off`. Hidden entries are
 included, `.git` entries excluded, and symlinks listed without following them.
 

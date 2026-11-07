@@ -28,7 +28,7 @@ void sl_completion_reset(sl_completion_state_t *state) {
     free(level->prefix);
     free(level);
   }
-  state->active = state->failed = 0;
+  state->active = state->failed = state->committed = 0;
   state->start = state->end = 0;
 }
 int sl_completion_add(sl_completion_list_t *list, const char *text) {

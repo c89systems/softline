@@ -464,20 +464,26 @@ static int completion(void) {
   REQUIRE(wait_for(&e, "provider-5> ", 0) == 0);
   REQUIRE(send_bytes(&e, "@e\t\r") == 0);
   REQUIRE(wait_for(&e, "expand-1> ", 0) == 0);
-  REQUIRE(send_bytes(&e, "@l\t\t\r") == 0);
+  REQUIRE(send_bytes(&e, "@l\t\006\t\r") == 0);
   REQUIRE(wait_for(&e, "expand-2> ", 0) == 0);
   REQUIRE(send_bytes(&e, "@lua/sub/de\t\r") == 0);
   REQUIRE(wait_for(&e, "expand-3> ", 0) == 0);
   REQUIRE(send_bytes(&e, "@lua/\t\177\177\177\177\177\177\177\177\t\t\r") == 0);
   REQUIRE(wait_for(&e, "expand-4> ", 0) == 0);
-  REQUIRE(send_bytes(&e, "@l\t\t\r") == 0);
+  REQUIRE(send_bytes(&e, "@l\t\033[C\t\r") == 0);
+  REQUIRE(wait_for(&e, "commit-1> ", 0) == 0);
+  REQUIRE(send_bytes(&e, "@\t\t\t\r") == 0);
+  REQUIRE(wait_for(&e, "commit-2> ", 0) == 0);
+  REQUIRE(send_bytes(&e, "@l\033[C\t\t\t\r") == 0);
+  REQUIRE(wait_for(&e, "commit-3> ", 0) == 0);
+  REQUIRE(send_bytes(&e, "@\t\006\t\t\006\t\r") == 0);
   REQUIRE(wait_for(&e, "expand-overlap-1> ", 0) == 0);
   mark = e.length;
   REQUIRE(send_bytes(&e, "/app") == 0);
   REQUIRE(wait_for(&e, "\033[2mle", mark) == 0);
   REQUIRE(send_bytes(&e, "\t\r") == 0);
   REQUIRE(wait_for(&e, "expand-overlap-2> ", 0) == 0);
-  REQUIRE(send_bytes(&e, "/a\t\t\177\177\177\177\177\177p\t\r") == 0);
+  REQUIRE(send_bytes(&e, "/a\t\006\t\177\177\177\177\177\177p\t\r") == 0);
   REQUIRE(wait_for(&e, "expand-overlap-3> ", 0) == 0);
   REQUIRE(send_bytes(&e, "/root/app\t\r") == 0);
   {
@@ -486,7 +492,7 @@ static int completion(void) {
       char marker[32];
       snprintf(marker, sizeof(marker), "expand-error-%d> ", i);
       REQUIRE(wait_for(&e, marker, 0) == 0);
-      REQUIRE(send_bytes(&e, "@l\t\t\t\r") == 0);
+      REQUIRE(send_bytes(&e, "@l\t\006\t\177\177\177\177\t\t\r") == 0);
     }
   }
   {
@@ -560,7 +566,7 @@ static int example_completion(int chat) {
   REQUIRE(send_bytes(&e, "@tree/ne\t") == 0);
   REQUIRE(wait_for(&e, "sted/", mark) == 0);
   mark = e.length;
-  REQUIRE(send_bytes(&e, "source.\t\r") == 0);
+  REQUIRE(send_bytes(&e, "\t\t\006source.\t\r") == 0);
   if (chat) {
     double deadline = now() + 3;
     while (!contains(&e, "[turn] tree/nested/source.c", mark) &&

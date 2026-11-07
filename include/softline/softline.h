@@ -121,13 +121,15 @@ typedef int (*sl_completion_callback_t)(sl_t *self, char trigger,
                                         sl_completion_emit_t emit,
                                         void *context, void *userdata);
 
-/** Continue an already completed candidate before Tab rotates. completed
- * includes the trigger. It may also be a completed ancestor of a partially
+/** Continue an already completed candidate on Tab outside a cycling session.
+ * Right/Ctrl-F commits the selected candidate and ends cycling; a later Tab
+ * may request its continuation. completed includes the trigger. It may also
+ * be a completed ancestor of a partially
  * typed child. Emit full strings strictly extending it, or emit no strings to
- * retain normal rotation/host Tab handling. Results, including empty/failed
+ * retain normal completion/host Tab handling. Results, including empty/failed
  * attempts, are cached per prefix until activation ends. Parent lists remain
- * available after Backspace; visited continuations do not interrupt a resumed
- * parent cycle. Type further into their prefix to reuse their cached lists.
+ * available after Backspace. Repeated Tabs stay within the current list, even
+ * for a single candidate; typing or committing ends that cycle.
  * Failure discards only this continuation list.
  * Same owner-thread and lifetime rules as the initial callback apply. */
 typedef int (*sl_completion_expand_callback_t)(sl_t *self,
@@ -1869,15 +1871,17 @@ int sl_set_quoted_prompt_style(sl_t *self, const sl_quote_style_t *style);
  * Candidates include the trigger and contain printable UTF-8, LF/Tab, bounded
  * by line_max_len. The first match is a dim
  * inline ghost; Tab accepts it and repeated Tabs cycle the original matches.
+ * Right/Ctrl-F accepts a ghost at its token endpoint or commits a Tab selection
+ * without moving the cursor. Elsewhere it retains ordinary cursor movement.
  * Editing/navigation resets that cycle but retains the activation list inside
  * its token. Enter submits actual text, never the ghost. strip_trigger is
  * undoable and applied on normal exit or submission; replacing/discarding the
  * draft needs no extra deletion. Failed providers are not retried until another
- * activation. Optional expand callbacks run on Tab before rotation, including
- * for fully present unique candidates. Deeper lists are separate snapshots;
- * Backspace selects the original parent list. Without further candidates, a
- * fully present unique match or no match lets Tab reach ordinary host/queue
- * handling. */
+ * activation. Optional expand callbacks run on Tab outside an active cycle,
+ * including for fully present unique candidates. Deeper lists are separate
+ * snapshots; Backspace selects the original parent list. Without further
+ * candidates, a fully present unique match or no match lets Tab reach ordinary
+ * host/queue handling. */
 int sl_set_completion_providers(sl_t *self,
                                 const sl_completion_provider_t *providers,
                                 size_t count);

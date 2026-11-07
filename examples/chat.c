@@ -1113,7 +1113,8 @@ int main(int argc, char **argv) {
             "`/q` + Tab completes `/quit`. "
             "`/` resolves commands; `@` lists one directory at a time (except "
             ".git). "
-            "Tab accepts or continues; Enter or a separating space removes "
+            "Tab cycles; Right/Ctrl-F commits, then Tab continues. "
+            "Enter or a separating space removes "
             "`@`. "
             "[Hyperlink demo](https://pkt.systems).") != 0) {
       report_failure(&state, "completion demo output");

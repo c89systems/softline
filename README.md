@@ -216,16 +216,22 @@ and print a `Completion demo:` guide when interactive. Try them with
 - Type `/q`, then Tab to complete `/quit`; Enter exits.
 - Type `@REA`, then Tab to complete `@README.md` from the current directory.
   Only the current directory is listed, including hidden entries except `.git`.
-  Directories end in `/`: after accepting one, Tab lists and completes its
-  children before cycling. You can also type a child prefix, then Tab.
+  Directories end in `/`; repeated Tabs cycle the current list without entering
+  them. Press Right or Ctrl-F to commit a directory, then Tab to complete and
+  cycle its children. You can also type a child prefix, then Tab.
   Backspace restores the cached parent list. Directory symlinks are listed
   without a trailing `/` and are not traversed.
   Enter or a separating space removes `@`; spaces that continue a matching
   filename keep completion active. Each new `@` activation fetches a fresh file
   list.
-- Chat completes `/app` to `/approve`; the next Tab resolves `/approve on`,
-  then rotates to `/approve off`. The same optional continuation callback is
+- Chat completes `/app` to `/approve`; commit with Right/Ctrl-F, then Tab
+  resolves `/approve on` and further Tabs rotate to `/approve off`.
+  The same optional continuation callback is
   used for command and file examples.
+
+Right or Ctrl-F also accepts a ghost at the current token's endpoint. Inside
+existing text, these keys retain normal character movement. Explicit host key
+bindings take precedence over this default acceptance behavior.
 
 The inline ghost appears before Tab and is not submitted until accepted. These callbacks belong to the example
 hosts; applications using `readline()` or `next_prompt()` register their own

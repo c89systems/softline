@@ -1076,7 +1076,9 @@ static int completion_case(const char *example, const char *theme) {
   REQUIRE(wait_frame(&c, NULL, "> @tree/ne\n", 0, 2) == 0);
   send_input(&c, "\t");
   REQUIRE(wait_frame(&c, NULL, "> @tree/nested/\n", 0, 2) == 0);
-  send_input(&c, "source.\t");
+  send_input(&c, "\t\t");
+  REQUIRE(wait_frame(&c, NULL, "> @tree/nested/\n", 0, 2) == 0);
+  send_input(&c, "\006source.\t");
   REQUIRE(wait_frame(&c, NULL, "> @tree/nested/source.c\n", 0, 2) == 0);
   send_input(&c, " ");
   REQUIRE(wait_frame(&c, NULL, "> tree/nested/source.c \n", 0, 2) == 0);
@@ -1108,7 +1110,7 @@ static int completion_case(const char *example, const char *theme) {
   REQUIRE(wait_frame(&c, NULL, "> /approve\n", -1, 2) == 0);
   s = frame(&c);
   REQUIRE(s.column == 6);
-  send_input(&c, "\t\t\t");
+  send_input(&c, "\t\006\t\t");
   REQUIRE(wait_frame(&c, NULL, "> /approve off\n", -1, 2) == 0);
   send_input(&c, "\177");
   REQUIRE(wait_frame(&c, NULL, "> /approve off\n", -1, 2) == 0);

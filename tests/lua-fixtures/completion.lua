@@ -106,6 +106,14 @@ local expanding = coroutine.create(function()
 end)
 assert(coroutine.resume(expanding))
 assert(coroutine.status(expanding) == "dead")
+for i, expected in ipairs({"lua/", "lua/a.txt", "lua/sub/deep.txt"}) do
+  local count = 0
+  assert(sl:set_completion_providers({{trigger="@", strip_trigger=true,
+    complete=function() return {"@lua/", "@lib/"} end,
+    expand=function(prefix) count=count+1; return more(prefix) end}}))
+  assert(sl:next_prompt("commit-" .. i .. "> ") == expected)
+  assert(count == i - 1)
+end
 local attempts = 0
 assert(sl:set_completion_providers({{trigger="/",
   complete=function() return {"/ap", "/apple"} end,

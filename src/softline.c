@@ -1231,6 +1231,7 @@ static void sl_completion_changed(sl_impl_t *impl, size_t at, size_t removed,
   int same_trigger;
   if (!state->active || state->finishing || state->cycle.updating)
     return;
+  state->committed = 0;
   same_trigger = undo && at == state->start && inserted && at < impl->len &&
                  impl->buf[at] == state->provider.trigger;
   if ((!same_trigger && at <= state->start) || at > state->end ||
@@ -1282,8 +1283,10 @@ static int sl_buf_replace(sl_t *self, size_t at, size_t removed,
   }
   if (!removed && !inserted)
     return 0;
-  if (!impl->completion.cycle.updating)
+  if (!impl->completion.cycle.updating) {
     sl_completion_cycle_clear(&impl->completion.cycle);
+    impl->completion.committed = 0;
+  }
   if (removed == inserted && !memcmp(impl->buf + at, text, inserted))
     return 0;
   len = impl->len - removed + inserted;
@@ -1513,6 +1516,7 @@ static int sl_set_cursor_method(sl_t *self, size_t cursor) {
   if (!impl)
     return SL_ERROR_INVALID;
   sl_completion_cycle_clear(&impl->completion.cycle);
+  impl->completion.committed = 0;
   if (cursor > impl->len)
     cursor = impl->len;
   impl->cursor = sl_utf8_clamp_cluster_boundary(impl->buf, impl->len, cursor);
@@ -3403,7 +3407,8 @@ static int sl_render_append_queue_panel(sl_t *self, sl_render_t *render,
 /* A hint is a view of the draft, never an edit or a queue operation. */
 static int sl_current_completion(sl_impl_t *impl,
                                  sl_completion_match_t *match) {
-  if (impl->history_search_active || impl->bracketed_paste ||
+  if (impl->completion.committed || impl->history_search_active ||
+      impl->bracketed_paste ||
       !sl_completion_find(&impl->completion, impl->buf, impl->cursor, match))
     return 0;
   return match->count > 1 ||
@@ -6992,13 +6997,15 @@ static int sl_expand_completion(sl_t *self) {
   sl_completion_level_t *level;
   sl_completion_match_t match;
   size_t length, previous = 0;
-  if (impl->history_search_active || impl->bracketed_paste)
+  if (impl->history_search_active || impl->bracketed_paste ||
+      state->cycle.original)
     return 0;
   /* First accept the offered candidate. An overlapping shorter candidate is
    * not a reason to divert Tab into another context. Unique complete matches
    * have no offer and can continue immediately. */
   if (!state->cycle.original && sl_current_completion(impl, &match))
     return 0;
+  state->committed = 0;
   /* Typing below a completed directory is also lazy: resolve only the known
    * ancestor prefixes needed for this Tab, never an entire subtree. */
   while ((length = sl_completion_expand_prefix(state, impl->buf,
@@ -7008,11 +7015,6 @@ static int sl_expand_completion(sl_t *self) {
       if (level->length == length &&
           !memcmp(level->prefix, impl->buf + state->start, length))
         break;
-    /* After Backspace, keep a resumed parent cycle intact. Already visited
-     * children remain available by typing into their prefix again. */
-    if (level && level->list.count && state->cycle.original &&
-        state->cycle.list != &level->list)
-      break;
     if (!level) {
       sl_completion_sink_t sink;
       int status;
@@ -7048,8 +7050,6 @@ static int sl_expand_completion(sl_t *self) {
       }
     }
     if (level->list.count) {
-      if (state->cycle.list != &level->list)
-        sl_completion_cycle_clear(&state->cycle);
       if (sl_current_completion(impl, &match))
         break;
     }
@@ -7066,7 +7066,7 @@ static int sl_complete_draft(sl_t *self) {
   char *replacement = NULL;
   if (sl_expand_completion(self) < 0) {
     sl_prompt_queue_bell(impl);
-    return 1;
+    return -1;
   }
   if (!cycle->original) {
     sl_completion_match_t match;
@@ -7125,13 +7125,13 @@ static int sl_complete_draft(sl_t *self) {
   impl->completion.end = impl->cursor;
   impl->preferred_column_valid = 0;
   impl->edit.yank_valid = 0;
-  if (cycle->count == 1)
+  if (cycle->count == 1 && !impl->completion.provider.expand)
     sl_completion_cycle_clear(cycle);
   return 1;
 failed:
   sl_completion_cycle_clear(cycle);
   sl_prompt_queue_bell(impl);
-  return 1;
+  return -1;
 }
 
 static char *sl_readline_impl(sl_t *self, const char *prompt,
@@ -7245,6 +7245,7 @@ static char *sl_readline_impl(sl_t *self, const char *prompt,
     int replayed = 0, waiting_edit;
     int deferred_input = 0;
     int binding_done = 0;
+    int completion_committed = 0;
     sl_completion_match_t completion;
     sl_key_action_t action;
     sl_backend_pump(self);
@@ -7777,6 +7778,24 @@ static char *sl_readline_impl(sl_t *self, const char *prompt,
         break;
       case SL_KEY_RIGHT:
       case SL_KEY_CTRL_F:
+        if (!impl->history_search_active && !impl->bracketed_paste) {
+          sl_completion_prepare(self);
+          if (impl->completion.cycle.original) {
+            sl_completion_cycle_clear(&impl->completion.cycle);
+            impl->completion.committed = completion_committed = 1;
+            break;
+          }
+          /* Accept a ghost at the token endpoint. Within existing text these
+           * keys retain normal character movement. Continuation belongs to
+           * a later Tab, never to the acceptance key itself. */
+          if (impl->cursor == impl->completion.end &&
+              sl_current_completion(impl, &completion)) {
+            if (sl_complete_draft(self) > 0)
+              impl->completion.committed = completion_committed = 1;
+            sl_completion_cycle_clear(&impl->completion.cycle);
+            break;
+          }
+        }
         if (impl->cursor < impl->len)
           impl->cursor +=
               sl_utf8_next_cluster_len(impl->buf, impl->len, impl->cursor);
@@ -7894,8 +7913,11 @@ static char *sl_readline_impl(sl_t *self, const char *prompt,
     /* A nonmutating suspension preserves the Tab cycle as well as its cached
      * provider list. Wait for the binding outcome before ending the cycle;
      * buffer/cursor mutations already invalidate it at their mutation sites. */
-    if (key != SL_KEY_NONE && key != SL_KEY_TAB && !suspended)
+    if (key != SL_KEY_NONE && key != SL_KEY_TAB && !suspended) {
       sl_completion_cycle_clear(&impl->completion.cycle);
+      if (!completion_committed)
+        impl->completion.committed = 0;
+    }
     if (done && !failed && !cancelled && !interrupted && !suspended && !eof &&
         !promoted && !queued && sl_completion_finish(self) != SL_OK)
       failed = 1;

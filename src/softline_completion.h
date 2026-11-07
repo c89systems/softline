@@ -47,7 +47,7 @@ typedef struct sl_completion_state {
   sl_completion_cycle_t cycle;
   sl_completion_provider_t provider;
   size_t start, end, limit;
-  int active, resolving, finishing, failed;
+  int active, resolving, finishing, failed, committed;
 } sl_completion_state_t;
 
 void sl_completion_clear(sl_completion_list_t *list);
