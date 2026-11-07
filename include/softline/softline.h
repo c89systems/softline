@@ -130,7 +130,9 @@ typedef int (*sl_completion_callback_t)(sl_t *self, char trigger,
  * until activation ends. Parent lists remain available after Backspace.
  * Repeated Tabs stay within the current list, even for a single candidate;
  * typing or committing ends that cycle. Failure discards only this continuation
- * list. Same owner-thread and lifetime rules as the initial callback apply. */
+ * list. After an empty/failed continuation, forward keys resume movement;
+ * at the draft end, no-op forward keys preserve the committed text. Same
+ * owner-thread and lifetime rules as the initial callback apply. */
 typedef int (*sl_completion_expand_callback_t)(sl_t *self,
                                                const char *completed,
                                                sl_completion_emit_t emit,
@@ -240,9 +242,10 @@ typedef enum sl_key {
   SL_KEY_CTRL_B = 2,
   /** Ctrl-E, move to the current newline-delimited line's end. */
   SL_KEY_CTRL_E = 5,
-  /** Ctrl-F, move forward by one UTF-8 cluster. */
+  /** Ctrl-F, accept/commit an active completion at its token endpoint;
+   * otherwise move forward by one UTF-8 cluster. */
   SL_KEY_CTRL_F = 6,
-  /** Tab key. */
+  /** Tab, accept/cycle matching completions before host bindings/queue keys. */
   SL_KEY_TAB = 9,
   /** Ctrl-J, insert a literal newline. */
   SL_KEY_CTRL_J = 10,
@@ -290,7 +293,7 @@ typedef enum sl_key {
   SL_KEY_DOWN = 1001,
   /** Left arrow. */
   SL_KEY_LEFT = 1002,
-  /** Right arrow. */
+  /** Right arrow, the same completion/forward action as Ctrl-F. */
   SL_KEY_RIGHT = 1003,
   /** Home key, move to the current newline-delimited line's beginning. */
   SL_KEY_HOME = 1004,
@@ -1873,7 +1876,8 @@ int sl_set_quoted_prompt_style(sl_t *self, const sl_quote_style_t *style);
  * Tabs cycle the original matches. A new eligible word-boundary trigger starts
  * a fresh activation when the previous phrase stops matching.
  * Right/Ctrl-F accepts a ghost at its token endpoint or commits a Tab selection
- * without moving the cursor. Elsewhere it retains ordinary cursor movement.
+ * without moving the cursor. With no further preview, it resumes ordinary
+ * movement; a no-op at the draft end preserves the commit and its text.
  * Editing/navigation resets that cycle but retains the activation list inside
  * its token. Enter submits actual text, never the ghost. strip_trigger is
  * undoable and applied on normal exit or submission; replacing/discarding the

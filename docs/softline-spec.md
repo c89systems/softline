@@ -74,7 +74,9 @@ The editor supports these built-in behaviors:
 - `Ctrl-A` / Home moves to the start of the current newline-delimited line.
 - `Ctrl-E` / End moves to the end of the current newline-delimited line.
   Soft wrapping does not create line boundaries for either command.
-- `Ctrl-B` / Left and `Ctrl-F` / Right move by common UTF-8 cluster boundaries.
+- `Ctrl-B` / Left moves backward by common UTF-8 cluster boundaries. `Ctrl-F` /
+  Right moves forward, or accepts/commits an active completion at its token
+  endpoint; see [completion providers](#completion-providers).
 - Up and Down navigate visual rows first, then history where applicable.
   Consecutive vertical movements retain their preferred screen column across
   short or empty rows. Other navigation, editing and width changes reset it;
@@ -779,9 +781,10 @@ is invoked by rendering or a producer feed. Asynchronous resolution is not part
 of this interface; hosts provide a synchronous snapshot of their current data.
 
 Optional `expand(self, completed, emit, context, userdata)` runs on Right/Ctrl-F
-commit and on Tab outside an active cycle, when actual text contains a completed candidate.
-`completed` includes the trigger. It also works for a unique, fully present match, and for
-known ancestor candidates when the user has typed part of a child path. Emit
+commit and on Tab outside an active cycle, when actual text contains a completed
+candidate. `completed` includes the trigger. It also works for a unique, fully
+present match, and for known ancestor candidates when the user has typed part
+of a child path. Emit
 full strings strictly extending that prefix. A nonempty result becomes a
 separate completion level. Commit previews its first matching candidate;
 Tab accepts it. A Tab-triggered lookup accepts the candidate on that same Tab.
@@ -791,9 +794,9 @@ before trying a shorter ancestor continuation, including after each lazy lookup.
 
 Each prefix is resolved at most once per activation, including empty and failed
 attempts. Softline keeps parent and child snapshots separate, choosing the most
-specific cached list with a candidate matching the draft. Backspace below its prefix
-returns to the original parent list, rather than mixing parent candidates with
-descendants. Continuing inside a cached level does not call the provider again.
+specific cached list with a candidate matching the draft. Backspace below its
+prefix returns to the original parent list, rather than mixing parent candidates
+with descendants. Continuing inside a cached level does not call the provider again.
 Repeated Tabs stay within the current list, including a one-candidate list
 with a continuation provider. Right or Ctrl-F commits the selected candidate
 without moving the cursor, resolving that candidate's next list for an immediate
@@ -801,9 +804,9 @@ ghost preview. It never inserts that next candidate or recursively resolves
 its descendants. An empty or failed continuation suppresses competing parent
 ghosts. A nonmutating suspension preserves the preview and cached results.
 After committing a leaf with no continuation preview, Right/Ctrl-F resumes
-ordinary forward character movement.
-At the end of the draft, these keys preserve the commit and leave its text unchanged.
-These keys also accept a ghost at its token endpoint. Within existing text
+ordinary forward character movement. At the end of the draft, no-op forward
+keys preserve the commit and leave its text unchanged.
+These keys also accept a ghost at its token endpoint. Within an existing word
 they retain normal character movement; explicit host bindings take precedence.
 Typing further into that directory, or Tab without a parent cycle,
 reuses its cached children. This preserves cycling through the first list after
@@ -822,9 +825,10 @@ remaining matching suffix ends the activation. Bracketed paste,
 deleting the trigger, moving outside the token, submission,
 queueing, replacing the draft or replacing registrations ends the activation.
 Accepted candidates and restored undo text may themselves contain spaces;
-those spaces do not end the activation. Other editing/navigation ends the Tab
-cycle and rematches the current prefix against the cached snapshot, without
-calling the provider.
+those spaces do not end the activation. Other edits or movement end the Tab
+cycle and rematch the current prefix against the cached snapshot. A new trigger
+activation or an explicit continuation lookup can call the host; ordinary
+redraws do not.
 
 If a phrase stops matching and the current word starts with another eligible
 registered trigger, that word starts a fresh activation. For example,
@@ -833,13 +837,14 @@ A still-matching phrase keeps ownership of embedded trigger characters, and
 start-only providers remain ineligible after whitespace.
 
 Matching is literal and case-sensitive, starting with the trigger itself.
-The first match appears as a dim inline
-suffix. Tab accepts that full candidate; further Tabs cycle the originally
-resolved matching set in list order, wrapping to the first. Thus
+The first match appears as a dim inline suffix. Tab accepts that full candidate;
+further Tabs cycle the originally resolved matching set in list order, wrapping
+to the first. Thus
 `/` can cycle all slash commands, while Backspace from `/command1` to `/command`
 restricts the next cycle to that prefix. No whitespace is appended. With no
-active cycle, a unique fully present completion or no match lets normal host
-bindings and queue mappings receive Tab. Matching completion precedes both.
+active cycle and no available continuation, a unique fully present completion
+or no match lets normal host bindings and queue mappings receive Tab. Matching
+completion precedes both.
 Reverse search and bracketed paste retain their existing key/literal semantics.
 With providers configured, Tab during acquisition of a backend edit hold
 waits for that outcome and earlier deferred typing. It then completes the actual
@@ -848,20 +853,22 @@ host control bindings remain responsive while the hold is pending.
 
 Completion inside text replaces the remaining current whitespace-delimited
 word while preserving subsequent unrelated text. A complete already-present
-phrase suffix is reused. An entire Tab cycle is one undoable edit, separate from adjacent
-typing, and retains queue/approval identity, holds and order. An expansion over
-the draft limit leaves the draft/cursor unchanged and consumes Tab with a bell.
+phrase suffix is reused. An entire Tab cycle is one undoable edit, separate from
+adjacent typing, and retains queue/approval identity, holds and order. Accepting
+a candidate over the draft limit leaves the draft/cursor unchanged and consumes
+the acceptance key with a bell.
 If reused phrase bytes join an existing combining-mark or emoji continuation,
 the cursor advances past the resulting whole cluster; those existing bytes are
 preserved. Subsequent movement, deletion and undo keep their cluster semantics.
 
 Ghost text is a display-only projection inside the multiline editor, wrapping
 and paging with it. It does not change the draft, actual cursor, undo journal,
-queue/approval entries or host status/reasoning. Enter submits only actual text;
-Tab is required to accept a suggestion. Existing matching text after the cursor
-is reused in the preview; unrelated text remains visible. Navigation operates
-on the actual draft. There is no separate completion panel. Ghosts follow
-cursor moves, host list changes, undo, suspension and resize. No producer
+queue/approval entries or host status/reasoning. Enter submits only actual text.
+Tab or Right/Ctrl-F at the token endpoint accepts a suggestion; only Tab starts
+cycling. Existing matching text after the cursor is reused in the preview;
+unrelated text remains visible. Other navigation operates on the actual draft.
+There is no separate completion panel. Ghosts follow cursor moves, host list
+changes, undo, suspension and resize. No producer
 transcript is retained.
 
 `strip_trigger` is off by default. When enabled, normal completion exit or
@@ -880,9 +887,8 @@ marker on exit/submission. It uses the same frontend in
 local/remote chat; the example host owns file discovery, not the Softline library.
 Directories end in `/`; commit one with Right/Ctrl-F to preview its first child
 through the same resolver, without scanning descendants. Tab accepts/cycles
-that directory's children.
-The command resolver similarly
-extends `/approve` to `/approve on` and `/approve off`. Hidden entries are
+that directory's children. The command resolver similarly extends `/approve`
+to `/approve on` and `/approve off`. Hidden entries are
 included, `.git` entries excluded, and symlinks listed without following them.
 
 ## Gap List Toward A More Complete Multiline Readline Alternative

@@ -41,8 +41,10 @@ Currently implemented:
 - Enter submits the current buffer.
 - `Ctrl-J` inserts a newline.
 - Trigger callbacks supply current completions as inline dimmed suggestions.
-  Tab accepts the suggestion and cycles matches. Each trigger registration
-  selects draft-start or whitespace-boundary matching.
+  Suggestions start with the trigger itself. Tab accepts and cycles the current
+  list; Right/Ctrl-F commits a selection and previews its continuation without
+  inserting it. Each registration selects draft-start or whitespace-boundary
+  matching; the host supplies all candidates and continuation rules.
   See `sl_set_completion_providers()` and the [completion contract](docs/softline-spec.md#completion-providers).
 - OSC 8 feed hyperlinks are opt-in: OFF by default, ON by host choice, or AUTO
   with conservative passive detection. `sl_get_osc8_info()` exposes the effective
@@ -230,16 +232,20 @@ and print a `Completion demo:` guide when interactive. Try them with
   list.
 - Chat completes `/app` to `/approve`; Right/Ctrl-F previews `/approve on`.
   Tab accepts it and further Tabs rotate to `/approve off`.
-  The same optional continuation callback is
-  used for command and file examples.
+  The same optional continuation callback is used for command and file examples.
 
-Right or Ctrl-F also accepts a ghost at the current token's endpoint. Inside
-existing text, these keys retain normal character movement. Explicit host key
+Right or Ctrl-F also accepts a ghost at the current token's endpoint. Within
+an existing word, these keys retain normal character movement. Explicit host key
 bindings take precedence over this default acceptance behavior.
+After committing a leaf with no continuation, another Right/Ctrl-F moves forward
+if text follows. At the end of the draft, repeated presses preserve the committed
+text and do not revive a competing suggestion. Tab or further editing can start
+matching again.
 
-The inline ghost appears before Tab and is not submitted until accepted. These callbacks belong to the example
-hosts; applications using `readline()` or `next_prompt()` register their own
-with `set_completion_providers()` / `sl_set_completion_providers()`.
+The inline ghost is not submitted until explicitly accepted. These callbacks
+belong to the example hosts; applications using `readline()` or `next_prompt()`
+register their own providers with `set_completion_providers()` /
+`sl_set_completion_providers()`.
 
 `example_chat` is the C streaming Markdown demo. It links pinned
 [libmdf 0.23.0](https://github.com/c89systems/libmdf/releases/tag/v0.23.0)

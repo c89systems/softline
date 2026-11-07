@@ -990,8 +990,9 @@ static int softline_lua_expand(sl_t *sl, const char *completed,
  * Tab accepts then cycles. Right/Ctrl-F accepts a ghost or commits a selection;
  * expand then previews the next list without inserting it. Suggestions appear
  * from the trigger itself; a new word trigger can replace an unmatched phrase.
- * Enter submits actual text. nil clears the
- * registrations. Invalid fields preserve the previous registrations.
+ * After a leaf commit, forward keys resume movement; no-op forward keys at
+ * draft end preserve the committed text. Enter submits actual text. nil clears
+ * the registrations. Invalid fields preserve the previous registrations.
  */
 static int softline_lua_set_completion_providers(lua_State *L) {
   softline_lua_handle_t *handle = softline_lua_check(L, 1);
