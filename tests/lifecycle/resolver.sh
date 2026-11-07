@@ -46,7 +46,7 @@ check hosts6.test '2001:db8::9 6010'
 check dns.test '192.0.2.10 6010'
 [[ ! -e "$work/queries" ]]
 : > "$work/hosts"
-for name in dns.test alias.test short tcp.test; do check "$name" $'192.0.2.51 6010\n2001:db8::51 6010'; done
+for name in dns.test alias.test short tcp.test wrong-port.test cross.test; do check "$name" $'192.0.2.51 6010\n2001:db8::51 6010'; done
 grep -q 'tcp.test .* 1$' "$work/queries"
 grep -q 'short.suffix.test ' "$work/queries"
 reject absent.test
@@ -55,5 +55,5 @@ reject silent.test 120
 reject dns.test 0
 servers='not a server'; reject dns.test
 servers="[::1]:$(cat "$work/port6")"
-check dns.test $'192.0.2.51 6010\n2001:db8::51 6010'
-echo 'Resolver literal/host/DNS precedence, IPv6, CNAME/search, TCP fallback and failure cases passed.'
+for name in dns.test wrong-port.test cross.test; do check "$name" $'192.0.2.51 6010\n2001:db8::51 6010'; done
+echo 'Resolver precedence, IPv6, CNAME/search, TCP fallback, reply origin and failure cases passed.'

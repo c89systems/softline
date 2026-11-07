@@ -99,7 +99,7 @@ The editor supports these built-in behaviors:
   at the cursor. The image file persists after the handle closes. On Linux,
   X11 is accessed directly over Unix or TCP sockets with Xauthority credentials,
   including a `DISPLAY` forwarded by `ssh -Y`. No host X11 library is required.
-  Both Linux library forms embed MIT-licensed c-ares 1.34.8 privately. TCP
+  Both Linux library forms embed MIT-licensed c-ares 1.34.9 privately. TCP
   display hosts support literal IPv4/IPv6, `/etc/hosts`, then DNS configured by
   `/etc/resolv.conf`, including search domains. Lookup shares the clipboard's
   10-second deadline and uses no libc NSS modules or additional link libraries.

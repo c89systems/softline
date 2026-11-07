@@ -985,7 +985,7 @@ displays.
 
 Package smoke links fully static GNU and musl consumers with fatal linker
 warnings. Linux X11 hostname lookup uses privately bundled MIT-licensed c-ares
-1.34.8 (with its BSD-3-Clause sorting helper) in both static and shared libraries:
+1.34.9 (with its BSD-3-Clause sorting helper) in both static and shared libraries:
 literal IPv4/IPv6 addresses (including IPv6 interface qualifiers), `/etc/hosts`,
 then DNS configured by `/etc/resolv.conf` (including search
 domains). It does not use libc NSS or load hostname modules. No additional

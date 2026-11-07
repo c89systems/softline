@@ -61,7 +61,7 @@ target_include_directories(sl_lib_obj SYSTEM PRIVATE
   "${_sl_cares_source}/include" "${_sl_cares_binary}")
 set(SL_PRIVATE_RESOLVER_OBJECTS "$<TARGET_OBJECTS:sl_cares_obj>")
 set(SL_BUNDLED_DEPENDENCIES
-  "[{\"name\":\"c-ares\",\"version\":\"1.34.8\",\"license\":\"MIT AND BSD-3-Clause\",\"provenance\":\"share/softline/licenses/c-ares/provenance.json\"}]")
+  "[{\"name\":\"c-ares\",\"version\":\"1.34.9\",\"license\":\"MIT AND BSD-3-Clause\",\"provenance\":\"share/softline/licenses/c-ares/provenance.json\"}]")
 
 if(SL_INSTALL)
   install(FILES "${_sl_cares_source}/LICENSE.md"
