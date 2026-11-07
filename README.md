@@ -238,7 +238,7 @@ hosts; applications using `readline()` or `next_prompt()` register their own
 with `set_completion_providers()` / `sl_set_completion_providers()`.
 
 `example_chat` is the C streaming Markdown demo. It links pinned
-[libmdf 0.19.0](https://github.com/c89systems/libmdf/releases/tag/v0.19.0)
+[libmdf 0.23.0](https://github.com/c89systems/libmdf/releases/tag/v0.23.0)
 only as an example dependency: libsoftline and its installed package remain
 independent of libmdf. The composer gives libmdf a two-column left margin and its default
 ANSI palette for terminal output (escape-free when redirected), updating both
