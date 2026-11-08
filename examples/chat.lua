@@ -309,7 +309,7 @@ local function run()
     print_message({ "softline Lua turn processor. A staged operation streams for about four seconds. Enter sends while available and queues while an operation is running; Alt-Enter queues a steer for the next stage boundary; empty Alt-Enter marks the newest queued turn as steer; Alt-E edits it. Escape or Ctrl-C stops the operation; /quit or Alt-Q leaves. !sh or /shell opens your shell between turns; Alt-S opens it while preserving your draft.\n" })
     print_message({ "Policy demo: /status / /approve / /steer / /resume. Shell commands queue until the turn completes.\n" })
     print_message({ "Completion demo: type h for a dim suggestion; Tab accepts, more Tabs cycle. Backspace restarts matching. Try say ver + Tab on any line; Ctrl-J adds a line; /q + Tab completes /quit.\n" })
-    print_message({ "/ resolves commands; @ lists one directory at a time (except .git). Tab accepts; Enter or a separating space removes @.\n" })
+    print_message({ "/ resolves commands; @ lists one directory at a time (except .git). Tab cycles; Right/Ctrl-F commits and previews the next list. Enter or a separating space removes @.\n" })
   else
     assert(sl:output_stream_begin())
     stream_open = true

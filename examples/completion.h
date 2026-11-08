@@ -6,7 +6,8 @@
 #include <string.h>
 #include <sys/stat.h>
 
-/* Only this directory is read. Descendants are resolved by later Tabs. */
+/* Only this directory is read. Commit a selection before Tab resolves children.
+ */
 static int demo_complete_files(const char *prefix, sl_completion_emit_t emit,
                                void *context) {
   size_t prefix_length = strlen(prefix);
@@ -56,7 +57,7 @@ static int demo_complete_files(const char *prefix, sl_completion_emit_t emit,
 
 /* Both initial and continuation callbacks use the same host resolver. Emit
  * full strings including the trigger; matching spaces continue phrase ghosts.
- * Directory children are resolved on demand before subsequent Tab rotation. */
+ * Directory children are resolved on demand after committing the selection. */
 static int demo_resolve(sl_t *sl, const char *prefix, sl_completion_emit_t emit,
                         void *context, void *userdata) {
   static const char *const simple[] = {"/quit", "hello world", "hello there",

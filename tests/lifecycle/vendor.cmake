@@ -3,8 +3,8 @@ set(vendor "${ROOT}/vendor/c-ares")
 file(READ "${vendor}/provenance.json" manifest)
 string(JSON version GET "${manifest}" version)
 string(JSON digest GET "${manifest}" sha256)
-if(NOT version STREQUAL "1.34.8" OR NOT digest STREQUAL
-    "c222b6d681096f9444d2c4863d2c1174019e27cacca0a4a5c114d36dd7d7bf78")
+if(NOT version STREQUAL "1.34.9" OR NOT digest STREQUAL
+    "9364b70a12eb59a06830fb488d9357f90100dff0d98b23ea3593a183d43e6f2f")
   message(FATAL_ERROR "Unexpected vendored c-ares identity")
 endif()
 string(JSON count LENGTH "${manifest}" files)

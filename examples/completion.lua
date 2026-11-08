@@ -13,7 +13,7 @@ return function(sl, chat)
     local directory = #prefix > 1 and "./" .. prefix:sub(2) or "."
     local quoted = "'" .. directory:gsub("'", "'\\''") .. "'"
     -- NUL separators preserve spaces and linefeeds. Read only this directory;
-    -- later Tabs request its children through the very same callback.
+    -- committing a selection requests its children with this callback.
     local pipe = assert(io.popen([[sh -c '
       cd "$1" || exit 1
       for file in ./* ./.[!.]* ./..?*; do
@@ -31,7 +31,7 @@ return function(sl, chat)
     return result
   end
   -- Each callback returns full strings including its trigger. Phrase spaces
-  -- keep matching active; expand resolves a new directory only on a later Tab.
+  -- keep matching active; expand previews the committed directory's children.
   return sl:set_completion_providers({
     {trigger = "/", complete = commands, expand = commands},
     {trigger = "h", complete = function() return {"hello world", "hello there"} end},

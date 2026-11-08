@@ -20,7 +20,7 @@ function(prepare target libdir)
     foreach(notice AUTHORS LICENSE.md LICENSE.BSD-3-Clause README.softline.md provenance.json softline.patch)
       list(APPEND files "share/softline/licenses/c-ares/${notice}")
     endforeach()
-    set(dependencies "[{\"name\":\"c-ares\",\"version\":\"1.34.8\",\"license\":\"MIT AND BSD-3-Clause\",\"provenance\":\"share/softline/licenses/c-ares/provenance.json\"}]")
+    set(dependencies "[{\"name\":\"c-ares\",\"version\":\"1.34.9\",\"license\":\"MIT AND BSD-3-Clause\",\"provenance\":\"share/softline/licenses/c-ares/provenance.json\"}]")
   else()
     list(APPEND files ${libdir}/libsoftline.dylib ${libdir}/libsoftline.1.dylib
       ${libdir}/libsoftline.1.2.3.dylib)

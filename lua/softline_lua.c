@@ -987,9 +987,12 @@ static int softline_lua_expand(sl_t *sl, const char *completed,
  * Callbacks return full strings including the trigger, run synchronously on
  * the input coroutine, and must not mutate/close the editor or yield. Lists are
  * copied and cached per activation; matching spaces keep phrase ghosts active.
- * Tab accepts then cycles; Enter submits actual text. expand runs on a later
- * Tab before rotation, including for a unique complete match. nil clears the
- * registrations. Invalid fields preserve the previous registrations.
+ * Tab accepts then cycles. Right/Ctrl-F accepts a ghost or commits a selection;
+ * expand then previews the next list without inserting it. Suggestions appear
+ * from the trigger itself; a new word trigger can replace an unmatched phrase.
+ * After a leaf commit, forward keys resume movement; no-op forward keys at
+ * draft end preserve the committed text. Enter submits actual text. nil clears
+ * the registrations. Invalid fields preserve the previous registrations.
  */
 static int softline_lua_set_completion_providers(lua_State *L) {
   softline_lua_handle_t *handle = softline_lua_check(L, 1);

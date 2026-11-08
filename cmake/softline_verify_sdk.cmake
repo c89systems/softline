@@ -23,7 +23,7 @@ endif()
 
 set(dependencies "[]")
 if(SDK_TARGET MATCHES "-linux-")
-  set(dependencies "[{\"name\":\"c-ares\",\"version\":\"1.34.8\",\"license\":\"MIT AND BSD-3-Clause\",\"provenance\":\"share/softline/licenses/c-ares/provenance.json\"}]")
+  set(dependencies "[{\"name\":\"c-ares\",\"version\":\"1.34.9\",\"license\":\"MIT AND BSD-3-Clause\",\"provenance\":\"share/softline/licenses/c-ares/provenance.json\"}]")
 endif()
 string(JSON expected_dependencies GET "${dependencies}")
 string(JSON dependency_type TYPE "${metadata}" bundled_dependencies)

@@ -66,7 +66,8 @@ int main(void) {
   }
   if (isatty(STDIN_FILENO) && isatty(STDOUT_FILENO)) {
     puts("/ resolves commands; @ lists one directory at a time (except .git). "
-         "Tab accepts or continues; Enter or a separating space removes @.");
+         "Tab cycles; Right/Ctrl-F commits and previews the next list. "
+         "Enter or a separating space removes @.");
     puts("Completion demo: type h for a dim suggestion; Tab accepts, more Tabs "
          "cycle. Backspace restarts matching.");
     puts("  Try say ver + Tab on any line; Ctrl-J adds a line; /q + Tab "

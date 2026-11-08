@@ -121,15 +121,18 @@ typedef int (*sl_completion_callback_t)(sl_t *self, char trigger,
                                         sl_completion_emit_t emit,
                                         void *context, void *userdata);
 
-/** Continue an already completed candidate before Tab rotates. completed
- * includes the trigger. It may also be a completed ancestor of a partially
- * typed child. Emit full strings strictly extending it, or emit no strings to
- * retain normal rotation/host Tab handling. Results, including empty/failed
- * attempts, are cached per prefix until activation ends. Parent lists remain
- * available after Backspace; visited continuations do not interrupt a resumed
- * parent cycle. Type further into their prefix to reuse their cached lists.
- * Failure discards only this continuation list.
- * Same owner-thread and lifetime rules as the initial callback apply. */
+/** Continue a completed candidate on Right/Ctrl-F commit, or on Tab outside a
+ * cycling session. Commit previews the first returned candidate without
+ * inserting it; Tab accepts that ghost. completed includes the trigger. It may
+ * also be a completed ancestor of a partially typed child. Emit full strings
+ * strictly extending it, or emit no strings to retain normal completion/host
+ * Tab handling. Results, including empty/failed attempts, are cached per prefix
+ * until activation ends. Parent lists remain available after Backspace.
+ * Repeated Tabs stay within the current list, even for a single candidate;
+ * typing or committing ends that cycle. Failure discards only this continuation
+ * list. After an empty/failed continuation, forward keys resume movement;
+ * at the draft end, no-op forward keys preserve the committed text. Same
+ * owner-thread and lifetime rules as the initial callback apply. */
 typedef int (*sl_completion_expand_callback_t)(sl_t *self,
                                                const char *completed,
                                                sl_completion_emit_t emit,
@@ -239,9 +242,10 @@ typedef enum sl_key {
   SL_KEY_CTRL_B = 2,
   /** Ctrl-E, move to the current newline-delimited line's end. */
   SL_KEY_CTRL_E = 5,
-  /** Ctrl-F, move forward by one UTF-8 cluster. */
+  /** Ctrl-F, accept/commit an active completion at its token endpoint;
+   * otherwise move forward by one UTF-8 cluster. */
   SL_KEY_CTRL_F = 6,
-  /** Tab key. */
+  /** Tab, accept/cycle matching completions before host bindings/queue keys. */
   SL_KEY_TAB = 9,
   /** Ctrl-J, insert a literal newline. */
   SL_KEY_CTRL_J = 10,
@@ -289,7 +293,7 @@ typedef enum sl_key {
   SL_KEY_DOWN = 1001,
   /** Left arrow. */
   SL_KEY_LEFT = 1002,
-  /** Right arrow. */
+  /** Right arrow, the same completion/forward action as Ctrl-F. */
   SL_KEY_RIGHT = 1003,
   /** Home key, move to the current newline-delimited line's beginning. */
   SL_KEY_HOME = 1004,
@@ -1868,16 +1872,21 @@ int sl_set_quoted_prompt_style(sl_t *self, const sl_quote_style_t *style);
  * outside its token, and submitting/replacing/queueing the draft also end it.
  * Candidates include the trigger and contain printable UTF-8, LF/Tab, bounded
  * by line_max_len. The first match is a dim
- * inline ghost; Tab accepts it and repeated Tabs cycle the original matches.
+ * inline ghost immediately after the trigger; Tab accepts it and repeated
+ * Tabs cycle the original matches. A new eligible word-boundary trigger starts
+ * a fresh activation when the previous phrase stops matching.
+ * Right/Ctrl-F accepts a ghost at its token endpoint or commits a Tab selection
+ * without moving the cursor. With no further preview, it resumes ordinary
+ * movement; a no-op at the draft end preserves the commit and its text.
  * Editing/navigation resets that cycle but retains the activation list inside
  * its token. Enter submits actual text, never the ghost. strip_trigger is
  * undoable and applied on normal exit or submission; replacing/discarding the
  * draft needs no extra deletion. Failed providers are not retried until another
- * activation. Optional expand callbacks run on Tab before rotation, including
- * for fully present unique candidates. Deeper lists are separate snapshots;
- * Backspace selects the original parent list. Without further candidates, a
- * fully present unique match or no match lets Tab reach ordinary host/queue
- * handling. */
+ * activation. Optional expand callbacks run on Right/Ctrl-F commit and on Tab
+ * outside an active cycle, including for fully present unique candidates.
+ * Deeper lists are separate snapshots; Backspace selects the original parent
+ * list. Without further candidates, a fully present unique match or no match
+ * lets Tab reach ordinary host/queue handling. */
 int sl_set_completion_providers(sl_t *self,
                                 const sl_completion_provider_t *providers,
                                 size_t count);

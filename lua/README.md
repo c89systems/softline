@@ -579,12 +579,13 @@ The Lua chat example demonstrates queue delivery without libmdf.
 
 The exact commands `!sh` and `/shell` open `$SHELL -i` (`/bin/sh -i` when
 unset or empty), only between turns on an interactive terminal. Enter or idle
-Alt-Enter launches the shell; busy submissions and attempts to queue/steer it
-are blocked, keeping the draft editable. Arguments are not interpreted as shell
-commands. The example uses the local PTY adapter, ending its output session and
-beginning a new session on return. Clear and resize inside the shell are allowed;
-history, queue and settings survive, and the transcript is never replayed. Failed launches
-and nonzero exits report an error and return to chat.
+Alt-Enter launches the shell. Busy shell submissions remain queued and editable
+until the turn ends; steering cannot bypass that execution hold. Arguments are
+not interpreted as shell commands. The example uses the local PTY adapter,
+ending its output session and beginning a new session on return. Clear and
+resize inside the shell are allowed; history, queue and settings survive, and
+the transcript is never replayed. Failed launches and nonzero exits report an
+error and return to chat.
 
 Alt-S uses that same shell handoff between turns while keeping the draft,
 cursor, undo, kill ring, history search and queue-edit/approval state. The
@@ -827,7 +828,8 @@ See the [feed contract](../docs/softline-spec.md#osc-8-hyperlinks).
 nil or an empty table clears them. Each specifies `trigger`, optional `scope`
 (default `softline.COMPLETION_START`), optional `strip_trigger` (default false)
 and `complete(trigger)`, which returns an array of full candidate strings.
-Optional `expand(completed)` supplies further candidates before Tab rotation.
+Optional `expand(completed)` supplies further candidates when Right/Ctrl-F
+commits a selection, or when Tab resolves a completed candidate outside a cycle.
 `softline.COMPLETION_WORD` also permits the trigger after ASCII whitespace.
 
 ```lua
@@ -847,31 +849,51 @@ assert(sl:set_completion_providers({
 }))
 ```
 
-The callback runs once per active token and returns the host's current snapshot.
-It may read the editor but must not mutate/close it or yield. Softline copies the
-strings, caches them through typing/Backspace/Undo, and shows the first match as a
-dimmed inline ghost. Tab accepts it; repeated Tabs cycle the original matches.
+The initial `complete(trigger)` callback runs once per activation and returns
+the host's current snapshot. It may read the editor but must not mutate/close
+it or yield. Softline copies the strings, caches them through
+typing/Backspace/Undo, and shows the first match as a dimmed inline ghost from
+the first trigger character.
+
+Tab accepts the ghost; repeated Tabs stay within the original matching list,
+including a single candidate when `expand` is configured. Right/Ctrl-F accepts
+a ghost at its token endpoint or
+commits the current selection without moving the cursor. Commit resolves only
+that candidate's continuation and previews its first match; it does not insert
+the child or recursively enter further levels. Tab accepts the preview and
+then cycles that new list. Within an existing word, Right/Ctrl-F moves by UTF-8
+clusters; explicit key bindings take precedence over this default behavior.
+An empty or failed continuation keeps competing parent ghosts suppressed.
+Once a leaf is committed, Right/Ctrl-F resumes ordinary movement when text
+follows. At the end of the draft, no-op forward keys preserve the commit and
+draft text. Tab or actual editing can restart matching.
+
 Suspension preserves the activation, Tab cycle, trigger and cursor through
 terminal handoff. Resuming uses the same cached list without calling the
 provider again; suspension does not strip the trigger.
 Other edits or movement reset cycling while retaining the snapshot inside its
 token. Typed, yanked or host-inserted whitespace keeps completion active when
 it matches a candidate with a suffix remaining: typing `hello ` can still offer
-`world`. Whitespace without such a continuation, deleting the trigger,
+`world`. If the phrase stops matching and the current word starts with another
+eligible trigger, that word starts a new activation: `hello @` leaves the
+`hello world` phrase and starts the `@` provider. A still-matching phrase retains
+embedded trigger characters. Start-only providers remain ineligible after
+whitespace. Whitespace without a matching suffix, deleting the trigger,
 leaving the token, queueing/submitting or replacing the draft ends completion.
 `strip_trigger` then removes the marker
-as an undoable edit. Enter submits actual text, never a ghost. Errors, invalid
-UTF-8/NUL/control-bearing candidates or callback exceptions discard the list,
-preserve typed text including its marker and suppress retries for that token.
+as an undoable edit. Enter submits actual text, never a ghost. Initial provider
+errors, invalid UTF-8/NUL/control-bearing candidates or callback exceptions
+discard that list, preserve typed text including its marker and suppress
+retries for that token.
 No provider runs from a feed/render operation. Callback closures are owned by
 the editor userdata and remain collectable even when they capture that editor.
 The optional continuation receives the full completed string including its
 trigger, even for a unique match. It must return candidates strictly extending
-that string, or `{}` to allow normal rotation/host Tab handling. It can also
-resolve a completed ancestor of a partially typed child path. Each prefix is
-cached separately until activation ends; Backspace selects the parent list.
-Visited continuations do not interrupt resumed parent cycling; type further
-into their prefix to reuse the cached children.
+that string, or `{}` to leave ordinary completion/host Tab handling available.
+It can also resolve a completed ancestor of a partially typed child path.
+Each prefix is cached separately until activation ends; Backspace selects the parent list.
+Continuations do not interrupt Tab cycling. Commit a parent again or type
+further into its prefix to reuse cached children without another callback.
 Continuation errors discard only their new list and preserve the draft and
 earlier candidates. The examples use this for one-directory-at-a-time file
 lookup and `/approve` subcommands, through the same callback functions.

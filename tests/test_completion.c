@@ -53,7 +53,10 @@ enum scenario {
   CLUSTER_FIRST,
   CLUSTER_LAST,
   HOST_ENQUEUE,
-  PHRASE_WHITESPACE
+  PHRASE_WHITESPACE,
+  PHRASE_TRIGGER,
+  RIGHT_OVERRIDE,
+  CTRL_F_OVERRIDE
 };
 static void enqueue_completed(sl_t *sl, void *data) {
   struct driver *d = data;
@@ -128,7 +131,8 @@ static int run(int native, const char *initial, size_t cursor, const char *keys,
       {"end ", SL_COMPLETION_WORD},
       {"@hello world", SL_COMPLETION_WORD},
       {"@hello there", SL_COMPLETION_WORD},
-      {"@end ", SL_COMPLETION_WORD}};
+      {"@end ", SL_COMPLETION_WORD},
+      {"worldly", SL_COMPLETION_WORD}};
   CHECK(!openpty(&master, &slave, NULL, NULL, &size) && !pipe(wake));
   sl_config_init(&config);
   config.input_fd = config.output_fd = slave;
@@ -160,6 +164,10 @@ static int run(int native, const char *initial, size_t cursor, const char *keys,
     CHECK(sl_set_idle_callback(sl, enqueue_completed, &d) == SL_OK);
   if (scenario != QUEUE_TAB)
     CHECK(sl_bind_key(sl, SL_KEY_TAB, host_tab, &d) == SL_OK);
+  if (scenario == RIGHT_OVERRIDE || scenario == CTRL_F_OVERRIDE)
+    CHECK(sl_bind_key(sl,
+                      scenario == RIGHT_OVERRIDE ? SL_KEY_RIGHT : SL_KEY_CTRL_F,
+                      host_tab, &d) == SL_OK);
   if (scenario == COPIED_LIST) {
     fixture.items = copied;
     fixture.count = 2;
@@ -167,17 +175,18 @@ static int run(int native, const char *initial, size_t cursor, const char *keys,
   }
   if (scenario == CLEARED_LIST)
     CHECK(sl_set_completion_providers(sl, NULL, 0) == SL_OK);
-  if (scenario == PHRASE_WHITESPACE) {
+  if (scenario == PHRASE_WHITESPACE || scenario == PHRASE_TRIGGER) {
     sl_completion_provider_t providers[] = {
         {'h', SL_COMPLETION_WORD, 0, fixture_complete, NULL, NULL},
         {'@', SL_COMPLETION_WORD, 1, fixture_complete, NULL, NULL},
-        {'e', SL_COMPLETION_WORD, 0, fixture_complete, NULL, NULL}};
+        {'e', SL_COMPLETION_WORD, 0, fixture_complete, NULL, NULL},
+        {'w', SL_COMPLETION_WORD, 0, fixture_complete, NULL, NULL}};
     providers[0].userdata = providers[1].userdata = providers[2].userdata =
-        &fixture;
+        providers[3].userdata = &fixture;
     fixture.items = phrases;
     fixture.count = sizeof(phrases) / sizeof(phrases[0]);
     fixture.calls = 0;
-    CHECK(sl_set_completion_providers(sl, providers, 3) == SL_OK);
+    CHECK(sl_set_completion_providers(sl, providers, 4) == SL_OK);
     CHECK(sl_bind_key(sl, SL_KEY_CTRL_T, insert_space, NULL) == SL_OK);
   }
   if (scenario == CLUSTER_FIRST || scenario == CLUSTER_LAST) {
@@ -214,6 +223,8 @@ static int run(int native, const char *initial, size_t cursor, const char *keys,
   sl_free_string(sl, line);
   if (scenario == PHRASE_WHITESPACE)
     CHECK(fixture.calls == 1);
+  if (scenario == PHRASE_TRIGGER)
+    CHECK(fixture.calls == 2);
   if (scenario == HOST_ENQUEUE) {
     CHECK(d.phase == 1 && sl_prompt_queue_count(sl) == 1);
     CHECK(sl_prompt_queue_peek(sl, 0, &line) == SL_OK);
@@ -443,7 +454,7 @@ static int expansion_root(sl_t *sl, char trigger, sl_completion_emit_t emit,
   int status;
   (void)sl;
   ++data->roots;
-  if (data->kind == 10) {
+  if (data->kind == 10 || data->kind == 12) {
     status = emit("@lu", context);
     return status == SL_OK ? emit("@lua/", context) : status;
   }
@@ -459,7 +470,7 @@ static int expansion_more(sl_t *sl, const char *prefix,
   int status;
   ++data->expansions;
   CHECK(sl_set_completion_providers(sl, NULL, 0) == SL_ERROR_NOT_READY);
-  if (data->kind == 10)
+  if (data->kind == 10 || data->kind == 12)
     return emit("@lu-next", context);
   if (data->kind == 11) {
     if (!strcmp(prefix, "@lua/")) {
@@ -502,33 +513,58 @@ static int expansion_cases(int native) {
     size_t cursor;
     const char *keys, *expected;
   } cases[] = {
+      {8, 1, 0, "/about later", 6, "\006\006!\r", "/about !later"},
+      {8, 1, 0, "/about later", 6, "\033[C\033[C!\r", "/about !later"},
+      {8, 1, 0, "/ab later", 3, "\t\006\033[C!\r", "/about !later"},
+      {8, 1, 0, "/ab later", 3, "\t\033[C\006!\r", "/about !later"},
+      {8, 1, 0, "/about\nlater", 6, "\006\006!\r", "/about\n!later"},
+      {8, 1, 0, "/about é later", 6, "\006\006\006!\r", "/about é! later"},
+      {8, 1, 0, "/about later", 6, "\006\006!\037\r", "/about later"},
+      {0, 2, 0, "@lua/so later", 7, "\t\006\033[C!\r", "lua/source.c !later"},
+      {3, 1, 0, "@lua/ later", 5, "\006\006!\r", "lua/ !later"},
+      {0, 0, 0, "", 0, "@\t\t\t\r", "lua/"},
+      {0, 0, 0, "", 0, "@\t\t\r", "lib/"},
+      {1, 0, 0, "", 0, "@l\t\t\t\r", "lua/"},
+      {0, 1, 0, "", 0, "@\t\006\t\t\t\r", "lua/source.c"},
+      {0, 2, 0, "", 0, "@\t\006\t\t\006\t\r", "lua/sub/deep.c"},
+      {0, 1, 0, "", 0, "@l\033[C\t\r", "lua/source.c"},
+      {0, 1, 0, "", 0, "@l\006\t\r", "lua/source.c"},
+      {0, 1, 0, "", 0, "@l\t\006\r", "lua/"},
+      {0, 1, 0, "", 0, "@lua/\006\r", "lua/"},
+      {0, 1, 0, "", 0, "@l\t\006\037\r", "l"},
+      {0, 1, 0, "say @l later", 6, "\t\006!\r", "say lua/! later"},
       {0, 0, 0, "", 0, "@l\t\r", "lua/"},
-      {0, 1, 0, "", 0, "@l\t\t\r", "lua/source.c"},
+      {0, 1, 0, "", 0, "@l\t\006\t\r", "lua/source.c"},
       {0, 1, 0, "", 0, "@lua/\t\r", "lua/source.c"},
       {0, 1, 0, "", 0, "@lua/so\t\r", "lua/source.c"},
       {0, 2, 0, "", 0, "@lua/sub/de\t\r", "lua/sub/deep.c"},
-      {0, 2, 0, "", 0, "@l\t\t\t\r", "lua/sub/"},
-      {0, 3, 0, "", 0, "@l\t\t\t\t\r", "lua/sub/deep.c"},
-      {1, 2, 0, "", 0, "@l\t\t\t\r", "lua/sub/deep.c"},
+      {0, 1, 0, "", 0, "@l\t\006\t\t\r", "lua/sub/"},
+      {0, 2, 0, "", 0, "@l\t\006\t\t\033[C\t\r", "lua/sub/deep.c"},
+      {1, 2, 0, "", 0, "@l\t\006\t\006\t\r", "lua/sub/deep.c"},
       {0, 1, 0, "", 0, "@lua/\t\177\177\177\177\177\177\177\177\177\177\t\r",
        "lua/"},
       {0, 1, 0, "", 0, "@lua/\t\177\177\177\177\177\177\177\177\t\r",
        "lua/source.c"},
       {0, 1, 0, "", 0, "@lua/\t\037\t\r", "lua/source.c"},
-      {3, 1, 0, "", 0, "@l\t\t\t\r", "lib/"},
-      {4, 1, 0, "", 0, "@l\t\t\t\r", "lib/"},
-      {5, 1, 0, "", 0, "@l\t\t\t\r", "lib/"},
-      {2, 1, 0, "", 0, "@l\t\t\r", "lib/"},
+      {3, 1, 0, "", 0, "@l\t\006\177\177\177\177\t\t\r", "lib/"},
+      {4, 1, 0, "", 0, "@l\t\006\177\177\177\177\t\t\r", "lib/"},
+      {5, 1, 0, "", 0, "@l\t\006\177\177\177\177\t\t\r", "lib/"},
+      {3, 1, 1, "", 0, "@l\t\006\t\r", "lua/#"},
+      {2, 1, 1, "", 0, "@l\t\006\t\r", "lua/#"},
       {6, 0, 0, "", 0, "@l\t\t\r", "lib/"},
       {7, 0, 1, "", 0, "@l\t\t\r", "lua/#"},
-      {9, 1, 1, "", 0, "@l\t\t\r", "lua/#"},
-      {0, 1, 0, "say @luX later", 7, "\t\t\r", "say lua/source.c later"},
-      {8, 2, 0, "", 0, "/app\t\t\t\r", "/approve off"},
-      {8, 1, 0, "", 0, "/app\t\t\177\177\177 of\t\r", "/approve off"},
+      {9, 1, 1, "", 0, "@l\t\006\t\r", "lua/#"},
+      {0, 1, 0, "say @luX later", 7, "\t\006\t\r", "say lua/source.c later"},
+      {8, 1, 0, "", 0, "/app\t\006\t\t\r", "/approve off"},
+      {8, 1, 0, "", 0, "/app\t\006\t\177\177\177 of\t\r", "/approve off"},
       {0, 1, 0, "", 0,
        "@lua/\t\177\177\177\177\177\177\177\177\177\177\177\t\t\r", "lib/"},
       {10, 0, 0, "", 0, "@lua\t\r", "lua/"},
-      {10, 1, 0, "", 0, "@l\t\t\177\177\177\177\177a\t\r", "lua/"},
+      {10, 0, 0, "", 0, "@l\t\t\177\t\r", "lua/"},
+      {10, 1, 0, "", 0, "@l\t\006\t\r", "lu-next"},
+      {10, 1, 0, "", 0, "@l\006\t\r", "lu-next"},
+      {10, 1, 0, "", 0, "@l\t\006\177\t\t\r", "lua/"},
+      {12, 1, 0, "", 0, "@l\t\006\033s", "lu-next"},
       {11, 1, 0, "", 0, "@lua/app\t\r", "lua/apple"}};
   size_t i;
   for (i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
@@ -561,12 +597,23 @@ static int expansion_cases(int native) {
     provider.userdata = &data;
     CHECK(sl_set_completion_providers(sl, &provider, 1) == SL_OK);
     CHECK(sl_bind_key(sl, SL_KEY_TAB, host_tab, &data.driver) == SL_OK);
+    if (data.kind == 12)
+      CHECK(sl_bind_key(sl, SL_KEY_ALT_BASE + 's', suspend_key, NULL) == SL_OK);
     CHECK(sl_watch_add(sl, wake[0], SL_WATCH_READ, drive, &data.driver,
                        &watch) == SL_OK);
     CHECK(write(wake[1], "x", 1) == 1);
     if (native)
       CHECK(sl_output_stream_begin(sl) == SL_OK);
     line = sl_readline(sl, "> ");
+    if (data.kind == 12) {
+      CHECK(!line && sl_last_readline_status(sl) == SL_READLINE_SUSPENDED);
+      CHECK(!strcmp(sl_buffer(sl), "@lu") && sl_cursor(sl) == 3 &&
+            data.expansions == 1);
+      data.driver.initial = NULL;
+      data.driver.keys = "\t\r";
+      CHECK(write(wake[1], "x", 1) == 1);
+      line = sl_readline(sl, "> ");
+    }
     if (!line || strcmp(line, cases[i].expected) || data.roots != 1 ||
         data.expansions != cases[i].expansions ||
         data.driver.calls != cases[i].host_calls) {
@@ -746,10 +793,17 @@ static int whitespace_cases(void) {
                {"helloX later", "\002\006 \t\r", "hello world later", 5, 0}};
   size_t i;
   int native;
-  for (native = 0; native <= 1; ++native)
+  for (native = 0; native <= 1; ++native) {
+    CHECK(!run(native, "", 0, "hello @\t\r", "hello hello world", 0, 131072,
+               PHRASE_TRIGGER));
+    CHECK(!run(native, "", 0, "hello\n@\t\r", "hello\nhello world", 0, 131072,
+               PHRASE_TRIGGER));
+    CHECK(!run(native, "", 0, "@hello @\t\r", "hello hello world", 0, 131072,
+               PHRASE_TRIGGER));
     for (i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i)
       CHECK(!run(native, cases[i].initial, cases[i].cursor, cases[i].keys,
                  cases[i].expected, cases[i].calls, 131072, PHRASE_WHITESPACE));
+  }
   return 0;
 }
 
@@ -759,7 +813,25 @@ int main(int argc, char **argv) {
     size_t cursor;
     int calls;
   } cases[] = {
+      {"", "ne\t\t\033[C\033[C\033[C\r", "next", 0, 0},
+      {"", "ne\t\t\006\006\006\r", "next", 0, 0},
+      {"", "ne\t\t\033[C\006\033[C\006\r", "next", 0, 0},
+      {"", "say\nne\t\t\006\006\006\r", "say\nnext", 0, 0},
+      {"", "café ne\t\t\006\033[C\006\r", "café next", 0, 0},
+      {"", "ne\t\t\006\006\006\037\r", "ne", 0, 0},
+      {"", "ne\t\t\006\006\006\177\t\r", "next steps", 0, 0},
+      {"", "ne\t\t\006\006\006\t\r", "next steps", 0, 0},
+      {"ne later", "\t\t\006\006!\r", "next !later", 2, 0},
       {"", "/sta\t\r", "/status", 0, 0},
+      {"", "/sta\006\r", "/status", 0, 0},
+      {"", "/sta\033[C\r", "/status", 0, 0},
+      {"/app", "\006\t\r", "/approve on#", 4, 1},
+      {"/app", "\033[C\t\r", "/approve on#", 4, 1},
+      {"/sta", "\006\037\r", "/sta", 4, 0},
+      {"say ver later", "\006!\r", "say verification! later", 7, 0},
+      {"say verX later", "\006!\r", "say verX! later", 7, 0},
+      {"say ver", "\002\006!\r", "say ver!", 7, 0},
+      {"caf", "\006\t\r", "caféclair#", 3, 1},
       {"/status", "\t\r", "/status#", 7, 1},
       {"", "\t\r", "#", 0, 1},
       {"/bad", "\t\r", "/bad#", 4, 1},
@@ -819,11 +891,18 @@ int main(int argc, char **argv) {
   for (native = 0; native <= 1; ++native) {
     CHECK(!expansion_cases(native));
     CHECK(!provider_cases(native));
+    CHECK(
+        !run(native, "/sta", 4, "\006\r", "/sta#", 1, 131072, CTRL_F_OVERRIDE));
+    CHECK(!run(native, "/sta", 4, "\033[C\r", "/sta#", 1, 131072,
+               RIGHT_OVERRIDE));
     for (i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i)
       CHECK(!run(native, cases[i].initial, cases[i].cursor, cases[i].keys,
                  cases[i].expected, cases[i].calls, 131072, 0));
     CHECK(!run(native, "x ver", 5, "\t\r", "x ver", 0, 12, 0));
+    CHECK(!run(native, "x ver", 5, "\006\t\r", "x ver", 0, 12, 0));
     CHECK(!run(native, "", 0, "\033e\t\r\033s", "verification", 0, 131072, 1));
+    CHECK(
+        !run(native, "", 0, "\033e\006\r\033s", "verification", 0, 131072, 1));
     CHECK(!run(native, "ver", 3, "\t\r", "verification", 0, 131072, QUEUE_TAB));
     CHECK(!run(native, "verification", 12, "\t\r", "", 0, 131072, QUEUE_TAB));
     CHECK(!run(native, "x ver", 5, "\t\r", "x verification", 0, 131072,

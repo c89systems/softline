@@ -1,6 +1,6 @@
 # Private X11 resolver
 
-This is the Linux CMake/library/header subset of c-ares 1.34.8 (MIT), with
+This is the Linux CMake/library/header subset of c-ares 1.34.9 (MIT), with
 a BSD-3-Clause address-sorting helper. Both license notices ship in the SDK.
 The unused APSL Apple header is excluded; this resolver is built only on Linux.
 `provenance.json` records the release URL, verified archive SHA-256, and retained

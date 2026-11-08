@@ -41,8 +41,10 @@ Currently implemented:
 - Enter submits the current buffer.
 - `Ctrl-J` inserts a newline.
 - Trigger callbacks supply current completions as inline dimmed suggestions.
-  Tab accepts the suggestion and cycles matches. Each trigger registration
-  selects draft-start or whitespace-boundary matching.
+  Suggestions start with the trigger itself. Tab accepts and cycles the current
+  list; Right/Ctrl-F commits a selection and previews its continuation without
+  inserting it. Each registration selects draft-start or whitespace-boundary
+  matching; the host supplies all candidates and continuation rules.
   See `sl_set_completion_providers()` and the [completion contract](docs/softline-spec.md#completion-providers).
 - OSC 8 feed hyperlinks are opt-in: OFF by default, ON by host choice, or AUTO
   with conservative passive detection. `sl_get_osc8_info()` exposes the effective
@@ -215,24 +217,38 @@ and print a `Completion demo:` guide when interactive. Try them with
   Ctrl-J adds a real newline; the same word completion works on that next line.
 - Type `/q`, then Tab to complete `/quit`; Enter exits.
 - Type `@REA`, then Tab to complete `@README.md` from the current directory.
+  Typing just `@` already shows the first candidate as dim ghost text, as `/`
+  and every other registered trigger do. Typing `hello @` switches from the
+  unmatched phrase to file completion.
   Only the current directory is listed, including hidden entries except `.git`.
-  Directories end in `/`: after accepting one, Tab lists and completes its
-  children before cycling. You can also type a child prefix, then Tab.
+  Directories end in `/`; repeated Tabs cycle the current list without entering
+  them. Press Right or Ctrl-F to commit a directory and preview its first
+  child immediately; Tab accepts it and further Tabs cycle the children.
+  You can also type a child prefix, then Tab.
   Backspace restores the cached parent list. Directory symlinks are listed
   without a trailing `/` and are not traversed.
   Enter or a separating space removes `@`; spaces that continue a matching
   filename keep completion active. Each new `@` activation fetches a fresh file
   list.
-- Chat completes `/app` to `/approve`; the next Tab resolves `/approve on`,
-  then rotates to `/approve off`. The same optional continuation callback is
-  used for command and file examples.
+- Chat completes `/app` to `/approve`; Right/Ctrl-F previews `/approve on`.
+  Tab accepts it and further Tabs rotate to `/approve off`.
+  The same optional continuation callback is used for command and file examples.
 
-The inline ghost appears before Tab and is not submitted until accepted. These callbacks belong to the example
-hosts; applications using `readline()` or `next_prompt()` register their own
-with `set_completion_providers()` / `sl_set_completion_providers()`.
+Right or Ctrl-F also accepts a ghost at the current token's endpoint. Within
+an existing word, these keys retain normal character movement. Explicit host key
+bindings take precedence over this default acceptance behavior.
+After committing a leaf with no continuation, another Right/Ctrl-F moves forward
+if text follows. At the end of the draft, repeated presses preserve the committed
+text and do not revive a competing suggestion. Tab or further editing can start
+matching again.
+
+The inline ghost is not submitted until explicitly accepted. These callbacks
+belong to the example hosts; applications using `readline()` or `next_prompt()`
+register their own providers with `set_completion_providers()` /
+`sl_set_completion_providers()`.
 
 `example_chat` is the C streaming Markdown demo. It links pinned
-[libmdf 0.19.0](https://github.com/c89systems/libmdf/releases/tag/v0.19.0)
+[libmdf 0.23.0](https://github.com/c89systems/libmdf/releases/tag/v0.23.0)
 only as an example dependency: libsoftline and its installed package remain
 independent of libmdf. The composer gives libmdf a two-column left margin and its default
 ANSI palette for terminal output (escape-free when redirected), updating both
@@ -969,7 +985,7 @@ displays.
 
 Package smoke links fully static GNU and musl consumers with fatal linker
 warnings. Linux X11 hostname lookup uses privately bundled MIT-licensed c-ares
-1.34.8 (with its BSD-3-Clause sorting helper) in both static and shared libraries:
+1.34.9 (with its BSD-3-Clause sorting helper) in both static and shared libraries:
 literal IPv4/IPv6 addresses (including IPv6 interface qualifiers), `/etc/hosts`,
 then DNS configured by `/etc/resolv.conf` (including search
 domains). It does not use libc NSS or load hostname modules. No additional
