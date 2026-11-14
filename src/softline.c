@@ -5731,12 +5731,15 @@ static ssize_t sl_read_input_byte(sl_t *self, char *ch, int timeout_ms) {
   int poll_timeout_ms;
   int deadline_valid;
   int image_was_pending;
-  struct timeval deadline_started;
+  struct timespec deadline_started;
   if (!self || !ch)
     return -1;
   impl = sl_impl(self);
   if (!impl)
     return -1;
+  deadline_valid =
+      timeout_ms > 0 && clock_gettime(CLOCK_MONOTONIC, &deadline_started) == 0;
+retry:
   image_was_pending = sl_image_pending(impl);
   (void)sl_image_pump(self);
   /* Completion can retire the last deadline. Paint its edit before a
@@ -5781,7 +5784,21 @@ static ssize_t sl_read_input_byte(sl_t *self, char *ch, int timeout_ms) {
     slots[count++] = 0;
   }
   poll_timeout_ms = timeout_ms;
-  if (image_wait.timeout_ms >= 0 &&
+  if (deadline_valid) {
+    struct timespec now;
+    int64_t elapsed_ms;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) == 0) {
+      elapsed_ms = (int64_t)(now.tv_sec - deadline_started.tv_sec) * 1000 +
+                   (now.tv_nsec - deadline_started.tv_nsec) / 1000000;
+      if (elapsed_ms >= timeout_ms)
+        return sl_read_terminal_byte(impl, ch, 0);
+      poll_timeout_ms = timeout_ms - (int)elapsed_ms;
+    } else
+      deadline_valid = 0;
+  }
+  /* Acquisition deadlines wake internal work, not the input continuation's
+   * caller. If the clock is unavailable, retain a bounded terminal wait. */
+  if ((timeout_ms <= 0 || deadline_valid) && image_wait.timeout_ms >= 0 &&
       (poll_timeout_ms < 0 || image_wait.timeout_ms < poll_timeout_ms))
     poll_timeout_ms = image_wait.timeout_ms;
   if (poll_timeout_ms < 0 &&
@@ -5809,10 +5826,16 @@ static ssize_t sl_read_input_byte(sl_t *self, char *ch, int timeout_ms) {
     if (poll_timeout_ms < 0 || delay < poll_timeout_ms)
       poll_timeout_ms = delay;
   }
-  if (count == 1)
-    return sl_read_terminal_byte(impl, ch, poll_timeout_ms);
-  deadline_valid = timeout_ms > 0 && gettimeofday(&deadline_started, NULL) == 0;
+  if (count == 1) {
+    ssize_t input_ready;
+    input_ready = sl_read_terminal_byte(impl, ch, poll_timeout_ms);
+    if (input_ready == 0 && deadline_valid)
+      goto retry;
+    return input_ready;
+  }
   ready = poll(fds, (nfds_t)count, poll_timeout_ms);
+  if (ready == 0 && deadline_valid)
+    goto retry;
   if (ready <= 0)
     return ready;
   /* Reconcile an input-owned resize before handing ready data to producers.
@@ -5876,30 +5899,13 @@ static ssize_t sl_read_input_byte(sl_t *self, char *ch, int timeout_ms) {
   }
   if (fds[0].revents != 0)
     return read(impl->input_fd, ch, 1);
-  /* A watch may arrive in the middle of an escape/UTF-8/paste sequence. Keep
-   * its original bounded continuation wait instead of treating the watch wake
-   * itself as a missing terminal byte. */
+  /* Continue servicing watches and acquisition during a bounded sequence,
+   * retaining the original deadline across every internal wakeup. */
   if (timeout_ms > 0) {
-    int remaining_ms;
     ssize_t input_ready;
-    if (deadline_valid) {
-      struct timeval now;
-      long elapsed_ms;
-      if (gettimeofday(&now, NULL) == 0) {
-        elapsed_ms = (long)(now.tv_sec - deadline_started.tv_sec) * 1000L +
-                     (long)(now.tv_usec - deadline_started.tv_usec) / 1000L;
-        if (elapsed_ms >= (long)timeout_ms) {
-          errno = 0;
-          return 0;
-        }
-        remaining_ms = timeout_ms - (int)elapsed_ms;
-      } else {
-        remaining_ms = timeout_ms;
-      }
-    } else {
-      remaining_ms = timeout_ms;
-    }
-    input_ready = sl_read_terminal_byte(impl, ch, remaining_ms);
+    if (deadline_valid)
+      goto retry;
+    input_ready = sl_read_terminal_byte(impl, ch, timeout_ms);
     if (input_ready == 0)
       errno = 0;
     return input_ready;

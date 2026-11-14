@@ -672,8 +672,13 @@ static int sl_capture_connect(sl_clipboard_t *c) {
     c->x.fd =
         socket(c->address->ai_family, SOCK_STREAM, c->address->ai_protocol);
   }
-  if (c->x.fd < 0)
+  if (c->x.fd < 0) {
+    if (!c->display.local) {
+      c->address = c->address->ai_next;
+      return 0;
+    }
     return sl_capture_fail(c, "cannot open X11 connection");
+  }
   flags = fcntl(c->x.fd, F_GETFL, 0);
   if (flags < 0 || fcntl(c->x.fd, F_SETFL, flags | O_NONBLOCK) < 0 ||
       fcntl(c->x.fd, F_SETFD, FD_CLOEXEC) < 0)

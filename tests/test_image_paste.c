@@ -24,6 +24,7 @@
   } while (0)
 extern size_t image_fixture_size, image_fixture_reads;
 extern int image_fixture_gate, image_fixture_fail;
+extern int image_fixture_idle, image_fixture_fd;
 extern const char *image_fixture_mime;
 unsigned char image_fixture_byte(size_t);
 struct image_api {
@@ -668,6 +669,214 @@ cleanup:
   free(output);
   return failed;
 }
+/* Split input must retain its own deadline across immediate acquisition work,
+ * readable acquisition descriptors, and application watch callbacks. */
+struct input_host {
+  struct host image;
+  int events, mode, kind;
+};
+static int input_command(sl_t *sl, const sl_watch_event_t *event,
+                         void *context) {
+  struct input_host *h = context;
+  char command;
+  int result = SL_OK;
+  if (read(event->fd, &command, 1) != 1)
+    return SL_ERROR_IO;
+  if (command == 'S') {
+    if (h->mode)
+      result = sl_image_paste_start(sl, &h->image.id);
+    command = 'R';
+  } else if (command == 'P') {
+    /* A partial UTF-8 character must not reach the editor. */
+    if (*sl_buffer(sl))
+      return SL_ERROR;
+  } else if (command == 'C') {
+    if (strcmp(sl_buffer(sl), h->kind == 1 ? "\342\202\254" : ""))
+      return SL_ERROR;
+    if (h->mode)
+      result = sl_image_paste_cancel(sl, h->image.id);
+    return result == SL_OK ? sl_submit(sl) : result;
+  } else
+    return SL_ERROR;
+  return result == SL_OK && write(h->events, &command, 1) == 1 ? SL_OK
+                                                               : SL_ERROR;
+}
+static int input_key(sl_t *sl, sl_key_t key, void *context,
+                     sl_key_action_t *action) {
+  struct input_host *h = context;
+  char notice = key == SL_KEY_LEFT ? 'L' : 'E';
+  *action = SL_KEY_ACTION_HANDLED;
+  if (key == SL_KEY_CTRL_T) {
+    if (sl_image_paste_start(sl, &h->image.id) != SL_OK)
+      return SL_ERROR;
+    notice = 'R';
+  } else if (h->mode == 3) {
+    if (sl_image_paste_cancel(sl, h->image.id) != SL_OK)
+      return SL_ERROR;
+  }
+  return write(h->events, &notice, 1) == 1 ? SL_OK : SL_ERROR_IO;
+}
+static int split_input(int mode, int kind) {
+  int master = -1, slave = -1, commands[2] = {-1, -1}, events[2] = {-1, -1};
+  int source[2] = {-1, -1}, failed = 1, submitted = 0, suffix = 0, status;
+  int launched = 0;
+  pid_t child = -1;
+  char *output = calloc(1, 8192);
+  size_t used = 0, scanned = 0;
+  double started = 0, deadline = redraw_time() + 3;
+  struct winsize size;
+  memset(&size, 0, sizeof(size));
+  size.ws_row = 24;
+  size.ws_col = 100;
+  if (!output || openpty(&master, &slave, NULL, NULL, &size) ||
+      pipe(commands) || pipe(events) || pipe(source) ||
+      write(source[1], "x", 1) != 1)
+    goto cleanup;
+  child = fork();
+  if (!child) {
+    struct input_host h;
+    sl_config_t config;
+    sl_watch_id_t watch;
+    char *line;
+    close(master);
+    close(commands[1]);
+    close(events[0]);
+    close(source[1]);
+    memset(&h, 0, sizeof(h));
+    h.events = events[1];
+    h.mode = mode;
+    h.kind = kind;
+    image_fixture_idle = 1;
+    image_fixture_fd = mode == 2 ? source[0] : -1;
+    sl_config_init(&config);
+    config.input_fd = config.output_fd = slave;
+    config.image_paste_callback = receive_image;
+    config.image_paste_context = &h.image;
+    h.image.sl = sl_create_with_config(&config);
+    if (!h.image.sl ||
+        (mode != 3 && sl_watch_add(h.image.sl, commands[0], SL_WATCH_READ,
+                                   input_command, &h, &watch) != SL_OK) ||
+        sl_bind_key(h.image.sl, SL_KEY_CTRL_T, input_key, &h) != SL_OK ||
+        sl_bind_key(h.image.sl, SL_KEY_LEFT, input_key, &h) != SL_OK ||
+        sl_bind_key(h.image.sl, SL_KEY_ESCAPE, input_key, &h) != SL_OK)
+      _exit(2);
+    line = sl_readline(h.image.sl, "input> ");
+    status = !line || strcmp(line, kind == 1 ? "\342\202\254" : "") ||
+             h.image.failed || h.image.aborts != (mode != 0);
+    sl_free_string(h.image.sl, line);
+    sl_destroy(h.image.sl);
+    _exit(status ? 2 : 0);
+  }
+  if (child < 0)
+    goto cleanup;
+  close(slave);
+  slave = -1;
+  close(commands[0]);
+  commands[0] = -1;
+  close(events[1]);
+  events[1] = -1;
+  if (mode != 3 && write(commands[1], "S", 1) != 1)
+    goto cleanup;
+  do {
+    struct pollfd fds[2];
+    pid_t exited;
+    double now;
+    fds[0].fd = master;
+    fds[0].events = POLLIN;
+    fds[0].revents = 0;
+    fds[1].fd = events[0];
+    fds[1].events = POLLIN;
+    fds[1].revents = 0;
+    if (poll(fds, 2, 2) < 0 && errno != EINTR)
+      goto cleanup;
+    if (fds[0].revents & POLLIN) {
+      const char *query;
+      ssize_t count = read(master, output + used, 8191 - used);
+      if (count > 0)
+        used += (size_t)count;
+      output[used] = 0;
+      if (used == 8191)
+        goto cleanup;
+      while ((query = strstr(output + scanned, "\033[6n")) != NULL) {
+        if (write(master, "\033[1;1R", 6) != 6)
+          goto cleanup;
+        scanned = (size_t)(query - output) + 4;
+      }
+    }
+    now = redraw_time();
+    if (mode == 3 && !launched && strstr(output, "input> ")) {
+      if (write(master, "\024", 1) != 1)
+        goto cleanup;
+      launched = 1;
+    }
+    if (fds[1].revents & POLLIN) {
+      char notice;
+      if (read(events[0], &notice, 1) != 1)
+        goto cleanup;
+      if (notice == 'R') {
+        started = now;
+        if (write(master, kind == 1 ? "\342" : "\033", 1) != 1)
+          goto cleanup;
+      } else if (notice == 'P' && kind == 1) {
+        if (write(master, "\202\254", 2) != 2)
+          goto cleanup;
+        suffix = 2;
+      } else {
+        if (!started || notice != (kind == 0 ? 'L' : 'E') ||
+            (kind == 2 && (now - started < .08 || now - started > .5)) ||
+            kind == 1 ||
+            (mode == 3 ? write(master, "\r", 1) : write(commands[1], "C", 1)) !=
+                1)
+          goto cleanup;
+        submitted = 1;
+      }
+    }
+    if (started && !suffix && kind != 2 && now - started >= .02) {
+      if ((kind == 0 && write(master, "[D", 2) != 2) ||
+          (kind == 1 && write(commands[1], "P", 1) != 1))
+        goto cleanup;
+      suffix = 1;
+    }
+    if (kind == 1 && suffix == 2 && !submitted &&
+        strstr(output, "\342\202\254")) {
+      if (write(commands[1], "C", 1) != 1)
+        goto cleanup;
+      submitted = 1;
+    }
+    exited = waitpid(child, &status, WNOHANG);
+    if (exited == child) {
+      child = -1;
+      failed = !submitted || !WIFEXITED(status) || WEXITSTATUS(status);
+      break;
+    }
+  } while (redraw_time() < deadline);
+cleanup:
+  if (failed)
+    fprintf(stderr, "split input failed (image mode=%d, input=%d)\n%s\n", mode,
+            kind, output ? output : "");
+  if (child > 0) {
+    kill(child, SIGKILL);
+    waitpid(child, NULL, 0);
+  }
+  if (master >= 0)
+    close(master);
+  if (slave >= 0)
+    close(slave);
+  if (commands[0] >= 0)
+    close(commands[0]);
+  if (commands[1] >= 0)
+    close(commands[1]);
+  if (events[0] >= 0)
+    close(events[0]);
+  if (events[1] >= 0)
+    close(events[1]);
+  if (source[0] >= 0)
+    close(source[0]);
+  if (source[1] >= 0)
+    close(source[1]);
+  free(output);
+  return failed;
+}
 static void *worker(void *unused) {
   int result;
   pthread_attr_t attributes;
@@ -691,6 +900,14 @@ int main(int argc, char **argv) {
 #endif
   if (argc == 2 && !strcmp(argv[1], "redraw"))
     return watched_redraw(0) || watched_redraw(1);
+  if (argc == 2 && !strcmp(argv[1], "input")) {
+    int mode, kind, failed = 0;
+    for (mode = 0; mode < 4; ++mode)
+      for (kind = 0; kind < 3; ++kind)
+        if (mode != 3 || kind != 1)
+          failed |= split_input(mode, kind);
+    return failed;
+  }
 #if defined(__GLIBC__)
   CHECK(pthread_getattr_default_np(&attributes) == 0);
   CHECK(pthread_attr_setstacksize(&attributes, 128u * 1024u) == 0);

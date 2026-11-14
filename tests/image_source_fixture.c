@@ -6,6 +6,7 @@
 size_t image_fixture_size = 64;
 size_t image_fixture_reads;
 int image_fixture_gate, image_fixture_fail;
+int image_fixture_idle, image_fixture_fd = -1;
 const char *image_fixture_mime = "image/png";
 struct sl_clipboard {
   unsigned char data[16384];
@@ -25,6 +26,8 @@ int sl_clipboard_next(sl_clipboard_t *c, sl_image_paste_event_t *event) {
   size_t i, count;
   if (image_fixture_fail)
     return -1;
+  if (image_fixture_idle)
+    return 0;
   memset(event, 0, sizeof(*event));
   event->media_type = image_fixture_mime;
   event->filename =
@@ -59,8 +62,13 @@ int sl_clipboard_next(sl_clipboard_t *c, sl_image_paste_event_t *event) {
 int sl_clipboard_prepare(sl_clipboard_t *c, struct pollfd *fds, size_t capacity,
                          int *timeout_ms) {
   (void)c;
-  (void)fds;
-  (void)capacity;
+  if (image_fixture_fd >= 0 && capacity) {
+    fds[0].fd = image_fixture_fd;
+    fds[0].events = POLLIN;
+    fds[0].revents = 0;
+    *timeout_ms = -1;
+    return 1;
+  }
   *timeout_ms = image_fixture_gate ? -1 : 0;
   return 0;
 }

@@ -50,6 +50,8 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     softline_local_runtime(test_image_paste)
     add_test(NAME softline_image_paste COMMAND test_image_paste)
     add_test(NAME softline_image_paste_redraw COMMAND test_image_paste redraw)
+    add_test(NAME softline_image_paste_input COMMAND test_image_paste input)
+    set_tests_properties(softline_image_paste_input PROPERTIES LABELS "unit;clipboard;editing;memcheck" TIMEOUT 15)
     set_tests_properties(softline_image_paste_redraw PROPERTIES LABELS "unit;clipboard;editing;memcheck" TIMEOUT 15)
     set_tests_properties(softline_image_paste PROPERTIES LABELS "unit;clipboard;editing;memcheck" TIMEOUT 15)
     set_property(TEST softline_image_paste APPEND PROPERTY ENVIRONMENT "GLIBC_TUNABLES=glibc.pthread.stack_cache_size=0")
@@ -276,11 +278,14 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     "${PROJECT_SOURCE_DIR}/src/softline_resolver.c"
     $<TARGET_OBJECTS:sl_cares_obj>)
   add_dependencies(clipboard_protocol_fixture sl_cares_namespace)
+  target_link_options(clipboard_protocol_fixture PRIVATE "-Wl,--wrap=socket")
   target_include_directories(clipboard_protocol_fixture PRIVATE "${PROJECT_SOURCE_DIR}/include")
   target_include_directories(clipboard_protocol_fixture SYSTEM PRIVATE
     "${PROJECT_SOURCE_DIR}/vendor/c-ares/include" "${PROJECT_BINARY_DIR}/private-cares")
   softline_apply_warnings(clipboard_protocol_fixture)
   softline_local_runtime(clipboard_protocol_fixture)
+  add_test(NAME softline_clipboard_connect_fallback COMMAND clipboard_protocol_fixture connect-fallback)
+  set_tests_properties(softline_clipboard_connect_fallback PROPERTIES LABELS "unit;clipboard;memcheck" TIMEOUT 5)
   set(clipboard_inputs "${CMAKE_CURRENT_BINARY_DIR}/clipboard-inputs")
   add_custom_command(OUTPUT "${clipboard_inputs}/small.png" "${clipboard_inputs}/large.png"
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/clipboard_images.py" "${clipboard_inputs}"
