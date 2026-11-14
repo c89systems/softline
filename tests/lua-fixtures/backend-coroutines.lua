@@ -107,6 +107,39 @@ local function run(method, construct_on_main, collect_constructor, read_on_main,
   assert(detached == 1)
 end
 
+local function image_errors(method)
+  local editor, failed, pass = nil, false, 0
+  editor = assert(softline.new {image_paste_callback=function(_, event)
+    assert(event.operation == softline.IMAGE_PASTE_ABORT)
+    failed = true
+    if pass < 2 then error("image coroutine exception") end
+    return true
+  end})
+  local id = assert(editor:image_paste_start())
+  assert(editor:image_paste_cancel(id))
+  assert(editor:last_error():find("image coroutine exception", 1, true))
+  failed = false
+  assert(editor:set_idle_callback(function()
+    if pass == 0 then
+      assert(not (editor:last_error() or ""):find("image coroutine exception", 1, true))
+      pass = 1
+      assert(editor:print_above("image-ready-" .. method .. "\n"))
+    elseif failed and pass == 1 then
+      assert(editor:last_error():find("image coroutine exception", 1, true))
+      failed = false
+      pass = 2
+      assert(editor:print_above("image-retry-" .. method .. "\n"))
+    elseif failed and pass == 2 then
+      assert(editor:last_error():find("DISPLAY", 1, true))
+      assert(not editor:last_error():find("image coroutine exception", 1, true))
+      assert(editor:cancel())
+    end
+  end))
+  local line, status = editor[method](editor, "image-errors> ")
+  assert(line == nil and status == softline.READLINE_CANCELLED and pass == 2)
+  editor:close()
+end
+
 for _, method in ipairs({"readline", "next_prompt"}) do
   -- Keep the first constructor alive so a regression fails without dereferencing
   -- a collected Lua state; subsequent cases prove collection is safe too.
@@ -119,5 +152,6 @@ for _, method in ipairs({"readline", "next_prompt"}) do
   run(method, false, true, false, "nested")
   run(method, true, false, true, "nested-error")
   run(method, false, true, false, "nested-collected")
+  if os.getenv("SOFTLINE_TEST_IMAGE_ERRORS") then image_errors(method) end
 end
 print("lua backend coroutine dispatch passed")

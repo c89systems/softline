@@ -42,6 +42,9 @@ typedef struct softline_lua_handle {
   int image_callback_active;
   const sl_image_paste_event_t *image_event;
   char image_error[SOFTLINE_LUA_IDLE_ERROR_LEN];
+  char image_native_error[SOFTLINE_LUA_IDLE_ERROR_LEN];
+  sl_image_paste_id_t image_id;
+  int image_error_pending;
   int policy_callback_active;
   int idle_callback_active;
   int idle_callback_failed;
@@ -58,6 +61,19 @@ typedef struct softline_lua_stream {
   int index;
   int base_top;
 } softline_lua_stream_t;
+
+/* Pair a Lua exception with the native diagnostic from the same operation.
+ * Snapshot only after the callback has returned to its native caller. */
+static void softline_lua_capture_image_error(softline_lua_handle_t *handle) {
+  const char *error;
+  if (!handle || !handle->sl || !handle->image_error_pending ||
+      handle->image_callback_active)
+    return;
+  error = sl_last_error(handle->sl);
+  (void)snprintf(handle->image_native_error, sizeof(handle->image_native_error),
+                 "%s", error ? error : "");
+  handle->image_error_pending = 0;
+}
 
 static softline_lua_handle_t *softline_lua_check(lua_State *L, int index) {
   softline_lua_handle_t *handle;
@@ -82,9 +98,11 @@ static int softline_lua_dispatch(lua_State *L) {
   int arguments = lua_gettop(L), status;
   lua_pushvalue(L, lua_upvalueindex(1));
   lua_insert(L, 1);
+  softline_lua_capture_image_error(handle);
   if (handle)
     handle->L = L;
   status = lua_pcall(L, arguments, LUA_MULTRET, 0);
+  softline_lua_capture_image_error(handle);
   if (handle)
     handle->L = previous;
   if (status != LUA_OK)
@@ -141,6 +159,11 @@ static int softline_lua_image_callback(void *context,
   softline_lua_handle_t *h = context;
   lua_State *L = h->L;
   int base = lua_gettop(L), status = SL_ERROR;
+  if (h->image_id != event->id) {
+    h->image_id = event->id;
+    h->image_error[0] = '\0';
+    h->image_error_pending = 0;
+  }
   h->image_event = event;
   h->image_callback_active = 1;
   if (lua_checkstack(L, 5)) {
@@ -159,6 +182,7 @@ static int softline_lua_image_callback(void *context,
           lua_type(L, -1) == LUA_TSTRING ? lua_tostring(L, -1) : NULL;
       (void)snprintf(h->image_error, sizeof(h->image_error), "%s",
                      message ? message : "image callback failed");
+      h->image_error_pending = 1;
     }
   }
   lua_settop(L, base);
@@ -179,6 +203,7 @@ static int softline_lua_image_start(lua_State *L) {
   sl_image_paste_id_t id;
   int status;
   h->image_error[0] = '\0';
+  h->image_error_pending = 0;
   status = sl_image_paste_start(h->sl, &id);
   if (status != SL_OK)
     return softline_lua_status(L, status);
@@ -750,6 +775,8 @@ static int softline_lua_readline(lua_State *L) {
   softline_lua_clear_idle_error(handle);
   softline_lua_clear_watch_error(handle);
   handle->history_callback_error[0] = '\0';
+  handle->image_error[0] = '\0';
+  handle->image_error_pending = 0;
   previous = handle->history_caller;
   handle->history_caller = L;
   line = sl_readline(handle->sl, prompt);
@@ -789,6 +816,8 @@ static int softline_lua_next_prompt(lua_State *L) {
   softline_lua_clear_idle_error(handle);
   softline_lua_clear_watch_error(handle);
   handle->history_callback_error[0] = '\0';
+  handle->image_error[0] = '\0';
+  handle->image_error_pending = 0;
   source = SL_PROMPT_SOURCE_NONE;
   previous = handle->history_caller;
   handle->history_caller = L;
@@ -2118,17 +2147,19 @@ static int softline_lua_last_error(lua_State *L) {
   softline_lua_handle_t *handle;
   const char *error;
   handle = softline_lua_check(L, 1);
-  if (handle->image_error[0]) {
+  error = sl_last_error(handle->sl);
+  if (handle->image_error[0] &&
+      !strcmp(error ? error : "", handle->image_native_error)) {
     lua_pushstring(L, handle->image_error);
     return 1;
   }
+  handle->image_error[0] = '\0';
   if (handle->idle_callback_failed || handle->watch_callback_failed) {
     lua_pushstring(L, handle->watch_callback_failed
                           ? handle->watch_callback_error
                           : handle->idle_callback_error);
     return 1;
   }
-  error = sl_last_error(handle->sl);
   if (!error) {
     lua_pushnil(L);
     return 1;

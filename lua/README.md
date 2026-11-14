@@ -1001,6 +1001,8 @@ callback returns.
 Native callbacks run on the coroutine making the active native call. Nested
 accessors, validation errors, and calls from another coroutine restore the
 previous caller on return; they cannot redirect subsequent readline callbacks.
+Image callback exceptions remain available through `last_error()` until a new
+transfer, input call, or native diagnostic supersedes the failed operation.
 
 Mutation methods return true or nil, status. Stale IDs, duplicate notifications
 and invalid ordering return softline.ERROR_INVALID. Metadata/paths are literal;

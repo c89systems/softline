@@ -246,19 +246,18 @@ static int render_user_prompt(struct chat_state *state, const char *line) {
  * acquisition never set status text or allocate a separate upload row. */
 static int refresh_chat_activity(struct chat_state *state) {
   const char *message = NULL;
+  int active = state->busy || state->image_active;
   if (state->image_active)
     message = state->image_storing ? "Saving image..." : "Uploading image...";
   else if (state->busy)
     message = state->response_bytes >= 15 ? "Reasoning..." : "Thinking...";
-  return sl_set_status_spinner(state->sl, state->busy || state->image_active) ==
-                     SL_OK &&
+  return sl_set_status_busy(state->sl, active) == SL_OK &&
+                 sl_set_status_spinner(state->sl, active) == SL_OK &&
                  set_chat_message(state->sl, message) == SL_OK
              ? 0
              : -1;
 }
 static int set_busy(struct chat_state *state, int busy) {
-  if (sl_set_status_busy(state->sl, busy) != SL_OK)
-    return -1;
   state->busy = busy;
   if (refresh_chat_activity(state))
     return -1;

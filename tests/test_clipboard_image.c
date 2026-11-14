@@ -656,6 +656,7 @@ static int chat_case(const char *chat, const char *owner, const char *build,
     if (slave > 2)
       close(slave);
     setenv("TERM", "xterm-256color", 1);
+    setenv("SOFTLINE_PROMPT_THEME", "plain", 1);
     setenv("XDG_CACHE_HOME", frontend, 1);
     setenv("SOFTLINE_HISTORY_DIR", frontend, 1);
     execl(chat, chat, "127.0.0.1", port, (char *)NULL);
@@ -699,7 +700,9 @@ static int chat_case(const char *chat, const char *owner, const char *build,
       CHECK(write(master, "image \026", 7) == 7);
       phase = 2;
     } else if (phase == 2 && image.deliveries &&
-               strstr(output + upload_start, "Uploading image...")) {
+               strstr(output + upload_start, "Uploading image...") &&
+               strstr(output + upload_start, "/ streaming demo") &&
+               strstr(output + upload_start, "- streaming demo")) {
       CHECK(chat_region(output + upload_start, size.ws_row - 3) >= 0);
       cancel_start = used;
       CHECK(write(master, "\003kept", 5) == 5);

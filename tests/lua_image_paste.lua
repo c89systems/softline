@@ -60,4 +60,23 @@ end
 cycle()
 collectgarbage("collect");collectgarbage("collect")
 assert(weak[1]==nil,"image callback cycle rooted the editor")
+
+local throw = true
+local errors = assert(softline.new {image_paste_callback=function()
+  if throw then error("image exception sentinel") end
+  return true
+end})
+assert(errors:image_paste_start())
+assert(errors:image_paste_pump()) -- No DISPLAY: the abort callback throws.
+assert(errors:last_error():find("image exception sentinel", 1, true))
+assert(errors:buffer() == "") -- Successful accessors preserve the diagnostic.
+assert(errors:last_error():find("image exception sentinel", 1, true))
+assert(select(2, errors:set_status_message("\27")) == softline.ERROR_INVALID)
+assert(errors:last_error():find("status message", 1, true))
+assert(not errors:last_error():find("image exception sentinel", 1, true))
+throw = false
+assert(errors:image_paste_start())
+assert(errors:image_paste_pump())
+assert(errors:last_error():find("DISPLAY", 1, true))
+errors:close()
 print("lua image paste passed")

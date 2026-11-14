@@ -619,8 +619,20 @@ static int backend_coroutines(void) {
           0);
   REQUIRE(wait_for(&e, "backend-ready-readline", 0) == 0);
   REQUIRE(send_bytes(&e, "\024\r") == 0);
+  if (getenv("SOFTLINE_TEST_IMAGE_ERRORS")) {
+    REQUIRE(wait_for(&e, "image-ready-readline", 0) == 0);
+    REQUIRE(send_bytes(&e, "\026") == 0);
+    REQUIRE(wait_for(&e, "image-retry-readline", 0) == 0);
+    REQUIRE(send_bytes(&e, "\026") == 0);
+  }
   REQUIRE(wait_for(&e, "backend-ready-next_prompt", 0) == 0);
   REQUIRE(send_bytes(&e, "\024\r") == 0);
+  if (getenv("SOFTLINE_TEST_IMAGE_ERRORS")) {
+    REQUIRE(wait_for(&e, "image-ready-next_prompt", 0) == 0);
+    REQUIRE(send_bytes(&e, "\026") == 0);
+    REQUIRE(wait_for(&e, "image-retry-next_prompt", 0) == 0);
+    REQUIRE(send_bytes(&e, "\026") == 0);
+  }
   REQUIRE(wait_for(&e, "lua backend coroutine dispatch passed", 0) == 0);
   REQUIRE(finish(&e) == 0);
 cleanup:
