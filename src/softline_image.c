@@ -29,17 +29,16 @@ static sl_impl_t *image_impl(sl_t *self) {
   return impl && !impl->image_callback_active ? impl : NULL;
 }
 
-static void image_notice(sl_impl_t *impl, const char *reason) {
+static void image_error(sl_impl_t *impl, const char *reason) {
   size_t i = 0;
   if (!reason)
     reason = "image upload failed";
-  while (i + 1 < sizeof(impl->image_notice) && reason[i]) {
+  while (i + 1 < sizeof(impl->error) && reason[i]) {
     unsigned char ch = (unsigned char)reason[i];
-    impl->image_notice[i] = ch >= 32 && ch < 127 ? (char)ch : '?';
+    impl->error[i] = ch >= 32 && ch < 127 ? (char)ch : '?';
     ++i;
   }
-  impl->image_notice[i] = '\0';
-  (void)snprintf(impl->error, sizeof(impl->error), "%s", impl->image_notice);
+  impl->error[i] = '\0';
 }
 
 static int image_callback(sl_impl_t *impl, sl_image_paste_event_t *event) {
@@ -65,16 +64,18 @@ void sl_image_invalidate(sl_t *self, const char *reason) {
   sl_impl_t *impl = image_impl(self);
   sl_image_t *image;
   sl_image_paste_event_t event;
+  char diagnostic[SL_ERROR_LEN];
   if (!impl || !sl_image_pending(impl))
     return;
   image = impl->image;
-  image_notice(impl, reason);
+  image_error(impl, reason);
+  (void)snprintf(diagnostic, sizeof(diagnostic), "%s", impl->error);
   memset(&event, 0, sizeof(event));
   event.operation = SL_IMAGE_PASTE_ABORT;
   event.offset = image->offset;
   event.media_type = image->chunk.media_type;
   event.filename = image->chunk.filename;
-  event.reason = impl->image_notice;
+  event.reason = diagnostic;
   /* Close acquisition before notifying the host. No callbacks may reenter. */
   sl_clipboard_close(image->source);
   image->source = NULL;
@@ -103,7 +104,7 @@ int sl_image_start(sl_t *self, sl_image_paste_id_t *id) {
     return SL_ERROR_INVALID;
   image->source = sl_clipboard_open(impl->image_limit);
   if (!image->source) {
-    image_notice(impl, sl_clipboard_error_text(NULL));
+    image_error(impl, sl_clipboard_error_text(NULL));
     return SL_ERROR;
   }
   image->id = ++image->serial;
@@ -111,8 +112,6 @@ int sl_image_start(sl_t *self, sl_image_paste_id_t *id) {
   image->offset = 0;
   image->phase = 1;
   image->started = image->progress = now;
-  (void)snprintf(impl->image_notice, sizeof(impl->image_notice),
-                 "image upload pending (Ctrl-C cancels)");
   *id = image->id;
   return SL_OK;
 }
@@ -198,7 +197,6 @@ int sl_image_pump(sl_t *self) {
       event.filename = image->chunk.filename;
       (void)image_callback(impl, &event);
       image_clear(image);
-      impl->image_notice[0] = '\0';
     }
     return SL_OK;
   }
@@ -232,21 +230,13 @@ int sl_image_pump(sl_t *self) {
     return SL_OK;
   }
   image->progress = image_now();
-  if (event.operation == SL_IMAGE_PASTE_DATA) {
+  if (event.operation == SL_IMAGE_PASTE_DATA)
     image->offset += event.length;
-    if (image->offset == event.length ||
-        image->offset / 1048576u != (image->offset - event.length) / 1048576u)
-      (void)snprintf(impl->image_notice, sizeof(impl->image_notice),
-                     "image upload: %lu bytes (Ctrl-C cancels)",
-                     (unsigned long)image->offset);
-  }
   image->chunk.operation = 0;
   if (event.operation == SL_IMAGE_PASTE_END) {
     image->phase = 3;
     sl_clipboard_close(image->source);
     image->source = NULL;
-    (void)snprintf(impl->image_notice, sizeof(impl->image_notice),
-                   "image upload: waiting for backend (Ctrl-C cancels)");
   }
   return SL_OK;
 }

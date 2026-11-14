@@ -990,6 +990,11 @@ abort the upload; the exception is available through `sl:last_error()`.
   Ctrl-C does this while an upload is pending; ordinary interrupt behavior
   applies otherwise. Enter/Alt-Enter retain drafts with pending uploads.
 
+The host owns upload status presentation. Image handover adds no row and never
+changes status-message text or spinner state. Record lifecycle updates in the
+callback, then use the normal status-message APIs from the owner loop after the
+callback returns.
+
 Mutation methods return true or nil, status. Stale IDs, duplicate notifications
 and invalid ordering return softline.ERROR_INVALID. Metadata/paths are literal;
 no completion, prompt submission, history append or server-file deletion occurs

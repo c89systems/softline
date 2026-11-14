@@ -276,6 +276,9 @@ path after storing the image. Completed images are retained; cancelled partial
 uploads are removed. `SOFTLINE_CHAT_IMAGE_MAX_BYTES` configures the 32 MiB default
 independently on each process.
 
+Upload feedback is chosen by the chat host and uses its existing italic
+Thinking/Reasoning message row. Image handover itself adds no status row or text.
+
 While available, Enter dispatches a turn; while its operation is running,
 Enter queues a follow-up in Softline. While busy, Alt-Enter queues a steer
 entry or marks the newest queued entry as steer when the editor is empty. The

@@ -131,7 +131,6 @@ typedef struct sl_impl {
   int image_source_timeout, image_host_timeout, image_total_timeout;
   int image_callback_active;
   int image_literal;
-  char image_notice[SL_ERROR_LEN];
   struct sl_pty *terminal_children;
   int terminal_active;
   int input_fd;

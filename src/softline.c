@@ -3361,11 +3361,6 @@ static int sl_render_append_queue_panel(sl_t *self, sl_render_t *render,
   impl = sl_impl(self);
   if (!impl || !render)
     return 0;
-  if (impl->image_notice[0] &&
-      (sl_render_new_row_at(render, 0, 0) != 0 ||
-       sl_queue_row_append_preview(&render->rows[render->count - 1],
-                                   impl->image_notice, width, "") != 0))
-    return -1;
   if (!sl_prompt_queue_enabled(impl))
     return 0;
   queue = &impl->prompt_queue;

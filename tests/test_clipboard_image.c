@@ -553,8 +553,23 @@ cleanup:
   rmdir(base);
   return failed;
 }
+static int chat_region(const char *bytes, int expected) {
+  const char *p = bytes;
+  int last = 0;
+  while ((p = strstr(p, "\033[1;")) != NULL) {
+    char *end;
+    long row = strtol(p + 4, &end, 10);
+    if (*end == 'r') {
+      last = (int)row;
+      if (expected && row != expected)
+        return -1;
+    }
+    ++p;
+  }
+  return last;
+}
 static int chat_case(const char *chat, const char *owner, const char *build,
-                     const char *inputs, int jpeg) {
+                     const char *inputs, int mode) {
   char base[4096] = {0}, backend[4096], frontend[4096], input[4096],
        path[4096] = {0}, port[32], listen[128];
   char *output = calloc(1, 1024u * 1024u), *name;
@@ -562,9 +577,10 @@ static int chat_case(const char *chat, const char *owner, const char *build,
   struct result result;
   struct winsize size;
   struct pollfd ready;
-  size_t used = 0;
+  size_t used = 0, upload_start = 0, cancel_start = 0, retry_start = 0;
   int server_output[2] = {-1, -1}, master = -1, slave = -1, failed = 0,
       phase = 0, status = 0;
+  int gate[2] = {-1, -1}, jpeg = mode == 1;
   unsigned number;
   pid_t server = -1, editor = -1, waited;
   FILE *stream = NULL;
@@ -585,12 +601,22 @@ static int chat_case(const char *chat, const char *owner, const char *build,
                  jpeg ? "sample.jpeg" : "small.png") < (int)sizeof(input));
   CHECK(image_load(&image, input, jpeg ? "image/jpeg" : "image/png") == 0);
   CHECK(offer(&image) == 0 && pipe(server_output) == 0);
+  if (mode == 2)
+    CHECK(pipe(gate) == 0);
   server = fork();
   if (!server) {
     close(server_output[0]);
     if (dup2(server_output[1], 1) < 0 || chdir(jpeg ? frontend : backend))
       _exit(2);
     close(server_output[1]);
+    if (mode == 2) {
+      close(gate[1]);
+      if (dup2(gate[0], 3) < 0)
+        _exit(2);
+      if (gate[0] != 3)
+        close(gate[0]);
+      setenv("SOFTLINE_CHAT_GATE_FD", "3", 1);
+    }
     if (jpeg)
       setenv("SOFTLINE_CHAT_IMAGE_DIR", backend, 1);
     else
@@ -600,6 +626,10 @@ static int chat_case(const char *chat, const char *owner, const char *build,
     _exit(127);
   }
   CHECK(server > 0);
+  if (gate[0] >= 0) {
+    close(gate[0]);
+    gate[0] = -1;
+  }
   close(server_output[1]);
   server_output[1] = -1;
   ready.fd = server_output[0];
@@ -653,19 +683,36 @@ static int chat_case(const char *chat, const char *owner, const char *build,
     if (!phase && strstr(output, "\033[?2004h")) {
       CHECK(write(master, "/status\r", 8) == 8);
       phase = 1;
-    } else if (phase == 1 && strstr(output, "Status:")) {
+    } else if (phase == 1 && strstr(output, "Status:") &&
+               chat_region(output, 0) == size.ws_row - 3) {
+      if (mode == 2) {
+        CHECK(write(master, "hello\r", 6) == 6);
+        phase = 10;
+      } else
+        phase = 11;
+    } else if (phase == 10 && strstr(output, "Thinking...") &&
+               chat_region(output, 0) == size.ws_row - 3) {
+      phase = 11;
+    } else if (phase == 11) {
       CHECK(kill(server, SIGSTOP) == 0);
+      upload_start = used;
       CHECK(write(master, "image \026", 7) == 7);
       phase = 2;
-    } else if (phase == 2 && image.deliveries) {
+    } else if (phase == 2 && image.deliveries &&
+               strstr(output + upload_start, "Uploading image...")) {
+      CHECK(chat_region(output + upload_start, size.ws_row - 3) >= 0);
+      cancel_start = used;
       CHECK(write(master, "\003kept", 5) == 5);
       CHECK(kill(server, SIGCONT) == 0);
       phase = 3;
-    } else if (phase == 3 && strstr(output, "image upload cancelled") &&
+    } else if (phase == 3 &&
+               strstr(output + cancel_start,
+                      mode == 2 ? "Thinking..." : "image upload cancelled") &&
                strstr(output, "kept")) {
       struct file_set entries;
       CHECK(inventory(backend, &entries) == 0);
       if (!entries.count) {
+        retry_start = used;
         CHECK(write(master, "\025image \026", 8) == 8);
         phase = 4;
       }
@@ -681,9 +728,14 @@ static int chat_case(const char *chat, const char *owner, const char *build,
       closedir(d);
       if (*path) {
         name = strrchr(path, '/') + 1;
-        if (strstr(output, name)) {
+        if (strstr(output, name) &&
+            (mode != 2 || strstr(output + retry_start, "Thinking..."))) {
           CHECK(bytes_equal(path, &image));
-          CHECK(!strstr(output, "Thinking..."));
+          CHECK(mode == 2 || !strstr(output, "Thinking..."));
+          CHECK(!strstr(output, "Operation cancelled"));
+          CHECK(!strstr(output, "image upload pending") &&
+                !strstr(output, "image upload:"));
+          CHECK(chat_region(output + upload_start, size.ws_row - 3) >= 0);
           CHECK(write(master, "\025/quit\r", 7) == 7);
           phase = 5;
         }
@@ -717,6 +769,10 @@ cleanup:
     close(server_output[0]);
   if (server_output[1] >= 0)
     close(server_output[1]);
+  if (gate[0] >= 0)
+    close(gate[0]);
+  if (gate[1] >= 0)
+    close(gate[1]);
   if (master >= 0)
     close(master);
   if (slave >= 0)
@@ -736,7 +792,8 @@ int main(int argc, char **argv) {
     return 2;
   if (argc == 6 && !strcmp(argv[4], "chat"))
     return chat_case(argv[1], argv[5], argv[2], argv[3], 0) ||
-           chat_case(argv[1], argv[5], argv[2], argv[3], 1);
+           chat_case(argv[1], argv[5], argv[2], argv[3], 1) ||
+           chat_case(argv[1], argv[5], argv[2], argv[3], 2);
   if (argc == 5 && !strcmp(argv[4], "transport"))
     return forwarded_cases(argv[1], argv[2], argv[3]) ||
            auth_server(argv[0], argv[1], argv[2], argv[3]);

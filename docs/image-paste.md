@@ -87,8 +87,14 @@ template behavior, using the same X11 acquisition machinery.
 
 ## Editing and event-loop integration
 
-One transfer can be pending per editor. Pending status is rendered outside prompt
-text. Typing remains available; edits before the insertion anchor move it, while
+One transfer can be pending per editor. The host owns all progress, status and
+error presentation through lifecycle callbacks and the existing status-message
+APIs. Image handover allocates no UI row and never changes status text, prefixes,
+colors or spinner state. Failure diagnostics remain available through
+`sl_last_error()` and the ABORT event. Callback handlers defer any editor/status
+calls until the owner-thread event loop resumes, outside the callback.
+
+Typing remains available; edits before the insertion anchor move it, while
 typing exactly at the anchor follows the future image path. A deletion across the
 anchor, draft replacement, history recall, queued-edit replacement/cancellation
 or editor destruction aborts the transfer. Hosts switching sessions/workspaces
@@ -129,6 +135,12 @@ server acknowledgement at a time. The frontend creates no image file. Typing
 continues during a transfer; Ctrl-C cancels the image without submitting the draft
 or cancelling the simulated response. A disconnected upload is aborted rather
 than retried on a different connection.
+
+The chat host explicitly presents upload activity in its existing italic
+Thinking/Reasoning message row using `sl_set_status_message()` and the usual
+spinner. The adapter only delivers lifecycle notifications from its owner-thread
+watch; it does not set UI state. Finishing or cancelling an upload restores the
+host's current response activity without adding a row.
 
 The server saves images in its starting working directory by default.
 `make run-chat-queue-server` starts it inside the checkout's `build/` directory,

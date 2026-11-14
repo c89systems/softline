@@ -293,7 +293,20 @@ struct observation {
   sl_image_paste_callback_t callback;
   void *context;
   int begin, data, end, done, aborts;
+  sl_t *editor;
+  int notifications;
+  char reason[160];
 };
+static int host_image_event(void *context, int kind, const char *text) {
+  struct observation *o = context;
+  if (kind < DEMO_IMAGE_STARTED || kind > DEMO_IMAGE_FAILED)
+    return SL_OK;
+  ++o->notifications;
+  if (kind == DEMO_IMAGE_FAILED)
+    (void)snprintf(o->reason, sizeof(o->reason), "%s", text ? text : "");
+  /* This must run after the acquisition callback, when host UI calls work. */
+  return sl_set_status_message(o->editor, "HOST OWNS STATUS");
+}
 static int observe(void *context, const sl_image_paste_event_t *e) {
   struct observation *o = context;
   int result = o->callback(o->context, e);
@@ -355,6 +368,32 @@ static pid_t server(const char *executable, const char *root, const char *limit,
   *port = (unsigned short)number;
   return child;
 }
+static void stop_view(sl_t *sl, void *context) {
+  (void)context;
+  (void)sl_cancel(sl);
+}
+static int default_status_unchanged(sl_t *sl, int master) {
+  char output[8192];
+  size_t used = 0;
+  ssize_t count;
+  if (sl_set_idle_callback(sl, stop_view, NULL) != SL_OK ||
+      sl_readline(sl, "> ") != NULL || fcntl(master, F_SETFL, O_NONBLOCK))
+    return -1;
+  while (used + 1 < sizeof(output)) {
+    count = read(master, output + used, sizeof(output) - used - 1);
+    if (count < 0 && errno == EINTR)
+      continue;
+    if (count <= 0)
+      break;
+    used += (size_t)count;
+  }
+  output[used] = 0;
+  return strstr(output, "HOST OWNS STATUS") &&
+                 !strstr(output, "image upload") &&
+                 !strstr(output, "server byte limit")
+             ? 0
+             : -1;
+}
 static int network_case(const char *executable, const char *build, int mode) {
   char root[4096] = {0}, path[4096], expected[8192];
   size_t bytes = 0, reads;
@@ -372,7 +411,8 @@ static int network_case(const char *executable, const char *build, int mode) {
   CHECK(snprintf(root, sizeof(root), "%s/chat-image-network-XXXXXX", build) <
         (int)sizeof(root));
   CHECK(mkdtemp(root) != NULL);
-  child = server(executable, root, mode == 3 ? "16384" : NULL, &port);
+  child =
+      server(executable, root, mode == 3 || mode == 8 ? "16384" : NULL, &port);
   CHECK(child > 0);
   CHECK(unsetenv("SOFTLINE_CHAT_IMAGE_MAX_BYTES") == 0);
   client = demo_client_create("127.0.0.1", port);
@@ -400,6 +440,11 @@ static int network_case(const char *executable, const char *build, int mode) {
     CHECK(sl_queue_backend_info(sl, &info) == SL_OK);
   } while (!info.synchronized && milliseconds() < deadline);
   CHECK(info.synchronized);
+  if (mode == 8) {
+    observation.editor = sl;
+    demo_client_events(client, host_image_event, &observation);
+  }
+  CHECK(sl_set_status_message(sl, "HOST OWNS STATUS") == SL_OK);
   CHECK(sl_set_buffer(sl, "draft ") == SL_OK);
   image_fixture_size = 65541;
   image_fixture_reads = 0;
@@ -477,7 +522,7 @@ static int network_case(const char *executable, const char *build, int mode) {
       CHECK(demo_client_service(client, 1) == SL_OK);
     } while (!observation.done && !observation.aborts &&
              milliseconds() < deadline);
-    if (mode == 3 || mode == 6 || mode == 7) {
+    if (mode == 3 || mode == 6 || mode == 7 || mode == 8) {
       CHECK(kill(child, SIGCONT) == 0);
       CHECK(observation.aborts == 1 && !observation.done);
       CHECK(!strcmp(sl_buffer(sl), "draft tail"));
@@ -488,6 +533,9 @@ static int network_case(const char *executable, const char *build, int mode) {
             files(root, 1, path, sizeof(path), &bytes);
       } while (i && milliseconds() < deadline);
       CHECK(i == 0);
+      if (mode == 8)
+        CHECK(observation.notifications >= 2 &&
+              strstr(observation.reason, "server byte limit"));
       CHECK(files(root, 0, path, sizeof(path), &bytes) == 0);
     } else {
       CHECK(observation.done == 1 && !observation.aborts &&
@@ -505,6 +553,8 @@ static int network_case(const char *executable, const char *build, int mode) {
     }
     CHECK(files(root, 1, path, sizeof(path), &bytes) == 0);
   }
+  if (sl)
+    CHECK(default_status_unchanged(sl, master) == 0);
   failed = 0;
 cleanup:
   if (sl)
@@ -531,7 +581,7 @@ int main(int argc, char **argv) {
     return store_tests(argv[2]);
   if (argc != 3)
     return 2;
-  for (mode = 0; mode < 8; ++mode)
+  for (mode = 0; mode < 9; ++mode)
     if (network_case(argv[1], argv[2], mode))
       return 1;
   return 0;

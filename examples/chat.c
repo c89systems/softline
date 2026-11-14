@@ -47,6 +47,7 @@ struct chat_state {
   unsigned int approval_seed;
   int remote_shell, shell_requested;
   int remote_state, reconnect_fd;
+  int image_active, image_storing;
   sl_watch_id_t reconnect_watch;
   unsigned int reconnect_ms;
   double connecting_since;
@@ -241,12 +242,26 @@ static int render_user_prompt(struct chat_state *state, const char *line) {
                                                                         : -1;
 }
 
+/* The host presents transfers in its existing reasoning row. Transport and
+ * acquisition never set status text or allocate a separate upload row. */
+static int refresh_chat_activity(struct chat_state *state) {
+  const char *message = NULL;
+  if (state->image_active)
+    message = state->image_storing ? "Saving image..." : "Uploading image...";
+  else if (state->busy)
+    message = state->response_bytes >= 15 ? "Reasoning..." : "Thinking...";
+  return sl_set_status_spinner(state->sl, state->busy || state->image_active) ==
+                     SL_OK &&
+                 set_chat_message(state->sl, message) == SL_OK
+             ? 0
+             : -1;
+}
 static int set_busy(struct chat_state *state, int busy) {
-  if (sl_set_status_spinner(state->sl, busy) != SL_OK ||
-      sl_set_status_busy(state->sl, busy) != SL_OK ||
-      set_chat_message(state->sl, busy ? "Thinking..." : NULL) != SL_OK)
+  if (sl_set_status_busy(state->sl, busy) != SL_OK)
     return -1;
   state->busy = busy;
+  if (refresh_chat_activity(state))
+    return -1;
   return sync_queue_readiness(state, 0);
 }
 
@@ -471,8 +486,7 @@ static int operation_watch(sl_t *sl, const sl_watch_event_t *event,
       }
       state->previous_response_char = bytes[i];
       state->response_bytes++;
-      if (state->response_bytes == 15 &&
-          set_chat_message(state->sl, "Reasoning...") != SL_OK)
+      if (state->response_bytes == 15 && refresh_chat_activity(state) != 0)
         return SL_ERROR_IO;
     }
     return SL_OK;
@@ -817,6 +831,21 @@ static int remote_event(void *context, int kind, const char *text) {
   size_t i;
   int unavailable;
   switch (kind) {
+  case DEMO_IMAGE_STARTED:
+  case DEMO_IMAGE_STORING:
+    state->image_active = 1;
+    state->image_storing = kind == DEMO_IMAGE_STORING;
+    return refresh_chat_activity(state) == 0 ? SL_OK : SL_ERROR_IO;
+  case DEMO_IMAGE_FINISHED:
+  case DEMO_IMAGE_FAILED:
+    state->image_active = state->image_storing = 0;
+    if (state->remote_state != DEMO_READY)
+      return SL_OK;
+    if (refresh_chat_activity(state))
+      return SL_ERROR_IO;
+    if (kind == DEMO_IMAGE_FAILED && !state->busy && text)
+      return set_chat_message(state->sl, text);
+    return SL_OK;
   case DEMO_DISCONNECTED:
   case DEMO_CONNECTING:
   case DEMO_SYNCHRONIZING:
@@ -872,8 +901,7 @@ static int remote_event(void *context, int kind, const char *text) {
       if (state->response_renderer->feed(state->response_renderer, text + i,
                                          1) != MDF_OK)
         return SL_ERROR_IO;
-      if (++state->response_bytes == 15 &&
-          set_chat_message(state->sl, "Reasoning...") != SL_OK)
+      if (++state->response_bytes == 15 && refresh_chat_activity(state) != 0)
         return SL_ERROR_IO;
     }
     return SL_OK;

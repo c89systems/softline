@@ -3,13 +3,19 @@
 #include "softline/softline.h"
 typedef struct demo_client demo_client_t;
 /* Adapter-local notifications on the same owner-thread event callback as
- * content. These are not wire messages or Softline status-line policy. */
+ * content. Image notifications are deferred until the acquisition callback
+ * returns. Only the host chooses status presentation. These are not wire
+ * messages or Softline UI primitives. */
 enum demo_connection_event {
   DEMO_DISCONNECTED = 100,
   DEMO_CONNECTING,
   DEMO_SYNCHRONIZING,
   DEMO_READY,
-  DEMO_PAUSED
+  DEMO_PAUSED,
+  DEMO_IMAGE_STARTED,
+  DEMO_IMAGE_STORING,
+  DEMO_IMAGE_FINISHED,
+  DEMO_IMAGE_FAILED
 };
 typedef int (*demo_event_fn)(void *context, int kind, const char *text);
 void demo_client_events(demo_client_t *client, demo_event_fn handler,

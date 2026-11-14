@@ -1,4 +1,6 @@
 #define _GNU_SOURCE 1
+#include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <poll.h>
 #include <pthread.h>
@@ -286,7 +288,25 @@ static int deadlines(void) {
 struct native {
   struct host host;
   int master, stage, failed, cancel, suspend, queued, literal, completions;
+  char output[16384];
+  size_t output_length;
 };
+static void capture_native(struct native *n) {
+  ssize_t count;
+  while (n->output_length + 1 < sizeof(n->output)) {
+    count = read(n->master, n->output + n->output_length,
+                 sizeof(n->output) - n->output_length - 1);
+    if (count < 0 && errno == EINTR)
+      continue;
+    if (count <= 0)
+      break;
+    n->output_length += (size_t)count;
+  }
+  n->output[n->output_length] = 0;
+  if (n->output_length + 1 == sizeof(n->output) ||
+      strstr(n->output, "image upload"))
+    n->failed = 1;
+}
 static int deadline_domains(void) {
   int mode;
   for (mode = 0; mode < 5; ++mode) {
@@ -355,6 +375,7 @@ static int pending_feed(sl_t *sl, void *context, const char **chunk,
 }
 static void native_idle(sl_t *sl, void *context) {
   struct native *n = context;
+  capture_native(n);
   if (!n->stage) {
     n->stage = 1;
     if (sl_set_buffer(sl, n->literal ? "" : "AB") != SL_OK ||
@@ -380,6 +401,9 @@ static void native_idle(sl_t *sl, void *context) {
       n->failed = 1;
     if (ioctl(n->master, TIOCSWINSZ, &resized) != 0 ||
         sl_print_above(sl, pending_feed, &sent) != SL_OK)
+      n->failed = 1;
+    if (n->queued &&
+        sl_set_status_message(sl, "HOST STILL OWNS STATUS") != SL_OK)
       n->failed = 1;
     n->stage = 3;
     if (n->suspend) {
@@ -427,6 +451,7 @@ static int native_cases(void) {
     size.ws_col = 100;
     size.ws_row = 24;
     CHECK(openpty(&n.master, &slave, NULL, NULL, &size) == 0);
+    CHECK(fcntl(n.master, F_SETFL, O_NONBLOCK) == 0);
     sl_config_init(&config);
     config.input_fd = slave;
     config.output_fd = slave;
@@ -440,6 +465,8 @@ static int native_cases(void) {
     n.suspend = mode == 3;
     n.queued = mode != 0;
     n.literal = mode == 4;
+    if (n.queued)
+      CHECK(sl_set_status_message(sl, "HOST OWNS STATUS") == SL_OK);
     memset(&provider, 0, sizeof(provider));
     provider.trigger = '/';
     provider.strip_trigger = 1;
@@ -465,8 +492,11 @@ static int native_cases(void) {
       n.stage = 4;
       line = sl_readline(sl, "> ");
     }
+    capture_native(&n);
     CHECK(line && !strcmp(line, n.literal ? "X" : "AXB") && !n.failed &&
           !n.host.failed && n.stage == 5);
+    CHECK(!n.queued || (strstr(n.output, "HOST OWNS STATUS") &&
+                        strstr(n.output, "HOST STILL OWNS STATUS")));
     CHECK(n.host.aborts == (mode == 1) && n.host.end == (mode != 1));
     sl_free_string(sl, line);
     sl_destroy(sl);
