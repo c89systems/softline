@@ -6,6 +6,7 @@
 #endif
 #define _POSIX_C_SOURCE 200809L
 #include "chat_demo_data.h"
+#include "queue_demo_image.h"
 #include "queue_demo_terminal.h"
 #include "queue_demo_wire.h"
 #include <arpa/inet.h>
@@ -44,6 +45,7 @@ typedef struct item {
   int direct_start;
 } item_t;
 typedef struct owner {
+  demo_image_store_t image;
   demo_terminal_server_t *terminal, *closed_terminals;
   demo_link_t link;
   item_t items[DEMO_ITEM_MAX];
@@ -103,6 +105,7 @@ static char *duplicate(const char *text) {
   return copy;
 }
 static void disconnect(owner_t *o) {
+  demo_image_store_close(&o->image);
   if (o->terminal) {
     sl_terminal_event_t event;
     memset(&event, 0, sizeof(event));
@@ -611,6 +614,10 @@ static void input(owner_t *o) {
         handle_request(o, &r);
       else
         disconnect(o);
+    } else if (kind >= DEMO_IMAGE_BEGIN && kind <= DEMO_IMAGE_DONE &&
+               o->client && !o->shell_pending) {
+      if (demo_image_store_input(&o->image, &o->link, kind, &p, milliseconds()))
+        disconnect(o);
     } else if (kind == DEMO_CANCEL && o->client && p.offset == p.length) {
       o->active = o->waiting_gate = o->shell_requested = 0;
       set_stopped(o, 1, 0);
@@ -817,6 +824,10 @@ int main(int argc, char **argv) {
     return 1;
   }
   demo_link_init(&o->link, -1);
+  if (demo_image_store_init(&o->image)) {
+    free(o);
+    return 1;
+  }
   o->revision = 1;
   o->delay_us = 20000;
   o->gate_fd = -1;
@@ -870,8 +881,12 @@ int main(int argc, char **argv) {
   while (!quitting) {
     struct pollfd fds[4];
     double now = milliseconds(), due = now + 60000;
+    double image_due = demo_image_store_due(&o->image);
     int ready;
-    if (o->active && !o->waiting_gate && !producer_paused)
+    if (image_due && image_due < due)
+      due = image_due;
+    if (o->active && !o->waiting_gate && !producer_paused &&
+        o->next_piece < due)
       due = o->next_piece;
     if (o->demo_enabled && o->next_injection < due)
       due = o->next_injection;
@@ -932,6 +947,8 @@ int main(int argc, char **argv) {
       }
     }
     now = milliseconds();
+    if (demo_image_store_tick(&o->image, &o->link, now))
+      disconnect(o);
     if (o->terminal && demo_terminal_server_pump(o->terminal, &o->link))
       disconnect(o);
     {

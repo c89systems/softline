@@ -83,6 +83,7 @@ struct image {
   size_t length;
   const char *mime;
   void *atom;
+  unsigned deliveries;
 };
 static int image_load(struct image *image, const char *path, const char *mime) {
   FILE *file = fopen(path, "rb");
@@ -112,6 +113,7 @@ static void deliver(void *owner, void *selection, unsigned info, void *data) {
   struct image *image = (struct image *)data;
   (void)owner;
   (void)info;
+  ++image->deliveries;
   gtk.selection(selection, image->atom, 8, image->bytes, (int)image->length);
 }
 static void released(void *owner, void *data) {

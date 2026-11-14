@@ -4,6 +4,7 @@ add_library(queue_demo_wire STATIC "${PROJECT_SOURCE_DIR}/examples/queue_demo_wi
 target_link_libraries(queue_demo_wire PUBLIC softline)
 softline_apply_warnings(queue_demo_wire)
 add_library(queue_demo_client STATIC "${PROJECT_SOURCE_DIR}/examples/queue_demo_client.c"
+  "${PROJECT_SOURCE_DIR}/examples/queue_demo_image.c"
   "${PROJECT_SOURCE_DIR}/examples/queue_demo_timer.c"
   "${PROJECT_SOURCE_DIR}/examples/queue_demo_terminal.c"
   "${PROJECT_SOURCE_DIR}/src/softline_pty.c")

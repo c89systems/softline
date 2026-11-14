@@ -267,6 +267,15 @@ feeds libmdf incrementally and forwards each sink fragment directly into a
 Softline output session. The responses mix headings, subheadings, italic, bold,
 code, and paragraphs while input remains editable.
 
+When connected to `example_queue_owner`, the C chat example uses the
+[streaming image handover](docs/image-paste.md#remote-chat-example) for Ctrl-V.
+`make run-chat-queue-server` starts the server in `build/`. Images are saved in
+that working directory, or the existing directory selected by
+`SOFTLINE_CHAT_IMAGE_DIR`. The server returns the absolute
+path after storing the image. Completed images are retained; cancelled partial
+uploads are removed. `SOFTLINE_CHAT_IMAGE_MAX_BYTES` configures the 32 MiB default
+independently on each process.
+
 While available, Enter dispatches a turn; while its operation is running,
 Enter queues a follow-up in Softline. While busy, Alt-Enter queues a steer
 entry or marks the newest queued entry as steer when the editor is empty. The
@@ -964,9 +973,9 @@ proof. Publication remains a separate, explicitly authorized operation.
 
 The `macOS tests` GitHub Actions workflow runs on branch pushes and manual
 dispatches using a native Apple Silicon macOS runner. It builds the libraries
-and examples, then runs the portable unit/history and libmdf streaming CTest
-cases. Linux-only PTY/X11 tests remain in the local Linux suite. The workflow
-does not publish releases or upload build artifacts.
+and examples, then runs the portable unit/history, libmdf streaming, and example
+image-transport CTest cases. Linux-only PTY/X11 tests remain in the local Linux
+suite. The workflow does not publish releases or upload build artifacts.
 
 Builds default to four jobs through `CMAKE_BUILD_PARALLEL_LEVEL`; set it explicitly
 to choose another limit. Operational helpers and direct CMake configuration reject

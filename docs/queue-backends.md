@@ -175,6 +175,12 @@ make run-chat-riced CHAT_QUEUE=remote
 make run-chat-local
 ```
 
+`make run-chat-queue-server` starts the server with `build/` as its working
+directory. Ctrl-V in remote chat streams PNG/JPEG bytes to that server and inserts
+its acknowledged absolute path. Completed images remain in `build/`; set
+`SOFTLINE_CHAT_IMAGE_DIR` on the server to select another existing directory.
+See [image handover](image-paste.md#remote-chat-example) for limits and cleanup.
+
 Both commands accept `QUEUE_PORT` (default 7635). `QUEUE_HOST` must be numeric
 `127.0.0.1`: this unauthenticated example only binds loopback. The owner is
 explicitly volatile, not a production protocol or durable service. Restarting

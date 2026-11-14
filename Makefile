@@ -85,8 +85,8 @@ run-chat-local: ## Run chat with the native local queue
 run-chat-remote: ## Attach chat to the separate TCP queue owner
 	@$(MAKE) run-chat CHAT_QUEUE=remote
 
-run-chat-queue-server: build-debug ## Run volatile queue owner on loopback (QUEUE_PORT=7635)
-	@$(CHAT_DEMO_ENV) ./build/debug/examples/example_queue_owner "$(QUEUE_PORT)"
+run-chat-queue-server: build-debug ## Run volatile queue owner from build/ (QUEUE_PORT=7635)
+	@cd "$(BUILD_DIR)" && $(CHAT_DEMO_ENV) ./debug/examples/example_queue_owner "$(QUEUE_PORT)"
 
 .PHONY: run-chat-default
 run-chat-default: build-debug ## Run C chat example with the default ANSI theme

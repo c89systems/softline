@@ -553,11 +553,190 @@ cleanup:
   rmdir(base);
   return failed;
 }
+static int chat_case(const char *chat, const char *owner, const char *build,
+                     const char *inputs, int jpeg) {
+  char base[4096] = {0}, backend[4096], frontend[4096], input[4096],
+       path[4096] = {0}, port[32], listen[128];
+  char *output = calloc(1, 1024u * 1024u), *name;
+  struct image image;
+  struct result result;
+  struct winsize size;
+  struct pollfd ready;
+  size_t used = 0;
+  int server_output[2] = {-1, -1}, master = -1, slave = -1, failed = 0,
+      phase = 0, status = 0;
+  unsigned number;
+  pid_t server = -1, editor = -1, waited;
+  FILE *stream = NULL;
+  double deadline;
+  memset(&result, 0, sizeof(result));
+  memset(&image, 0, sizeof(image));
+  CHECK(output != NULL);
+  result.line = output;
+  CHECK(snprintf(base, sizeof(base), "%s/chat-clipboard-XXXXXX", build) <
+            (int)sizeof(base) &&
+        mkdtemp(base));
+  CHECK(snprintf(backend, sizeof(backend), "%s/backend", base) <
+        (int)sizeof(backend));
+  CHECK(snprintf(frontend, sizeof(frontend), "%s/frontend", base) <
+        (int)sizeof(frontend));
+  CHECK(mkdir(backend, 0700) == 0 && mkdir(frontend, 0700) == 0);
+  CHECK(snprintf(input, sizeof(input), "%s/%s", inputs,
+                 jpeg ? "sample.jpeg" : "small.png") < (int)sizeof(input));
+  CHECK(image_load(&image, input, jpeg ? "image/jpeg" : "image/png") == 0);
+  CHECK(offer(&image) == 0 && pipe(server_output) == 0);
+  server = fork();
+  if (!server) {
+    close(server_output[0]);
+    if (dup2(server_output[1], 1) < 0 || chdir(jpeg ? frontend : backend))
+      _exit(2);
+    close(server_output[1]);
+    if (jpeg)
+      setenv("SOFTLINE_CHAT_IMAGE_DIR", backend, 1);
+    else
+      unsetenv("SOFTLINE_CHAT_IMAGE_DIR");
+    unsetenv("SOFTLINE_CHAT_IMAGE_MAX_BYTES");
+    execl(owner, owner, "0", (char *)NULL);
+    _exit(127);
+  }
+  CHECK(server > 0);
+  close(server_output[1]);
+  server_output[1] = -1;
+  ready.fd = server_output[0];
+  ready.events = POLLIN;
+  ready.revents = 0;
+  CHECK(poll(&ready, 1, 3000) == 1);
+  stream = fdopen(server_output[0], "r");
+  CHECK(stream && fgets(listen, sizeof(listen), stream) &&
+        sscanf(listen, "LISTEN 127.0.0.1 %u", &number) == 1);
+  fclose(stream);
+  stream = NULL;
+  server_output[0] = -1;
+  snprintf(port, sizeof(port), "%u", number);
+  memset(&size, 0, sizeof(size));
+  size.ws_row = 20;
+  size.ws_col = 240;
+  CHECK(openpty(&master, &slave, NULL, NULL, &size) == 0);
+  editor = fork();
+  if (!editor) {
+    close(master);
+    if (setsid() < 0 || ioctl(slave, TIOCSCTTY, 0) || dup2(slave, 0) < 0 ||
+        dup2(slave, 1) < 0 || dup2(slave, 2) < 0)
+      _exit(2);
+    if (slave > 2)
+      close(slave);
+    setenv("TERM", "xterm-256color", 1);
+    setenv("XDG_CACHE_HOME", frontend, 1);
+    setenv("SOFTLINE_HISTORY_DIR", frontend, 1);
+    execl(chat, chat, "127.0.0.1", port, (char *)NULL);
+    _exit(127);
+  }
+  CHECK(editor > 0);
+  close(slave);
+  slave = -1;
+  deadline = now() + 20;
+  do {
+    ssize_t count;
+    pump();
+    ready.fd = master;
+    ready.events = POLLIN;
+    ready.revents = 0;
+    CHECK(poll(&ready, 1, 10) >= 0);
+    if (ready.revents & POLLIN) {
+      CHECK(used + 1 < 1024u * 1024u);
+      count = read(master, output + used, 1024u * 1024u - used - 1);
+      if (count > 0) {
+        used += (size_t)count;
+        output[used] = 0;
+      }
+    }
+    if (!phase && strstr(output, "\033[?2004h")) {
+      CHECK(write(master, "/status\r", 8) == 8);
+      phase = 1;
+    } else if (phase == 1 && strstr(output, "Status:")) {
+      CHECK(kill(server, SIGSTOP) == 0);
+      CHECK(write(master, "image \026", 7) == 7);
+      phase = 2;
+    } else if (phase == 2 && image.deliveries) {
+      CHECK(write(master, "\003kept", 5) == 5);
+      CHECK(kill(server, SIGCONT) == 0);
+      phase = 3;
+    } else if (phase == 3 && strstr(output, "image upload cancelled") &&
+               strstr(output, "kept")) {
+      struct file_set entries;
+      CHECK(inventory(backend, &entries) == 0);
+      if (!entries.count) {
+        CHECK(write(master, "\025image \026", 8) == 8);
+        phase = 4;
+      }
+    } else if (phase == 4) {
+      DIR *d = opendir(backend);
+      struct dirent *e;
+      CHECK(d != NULL);
+      while ((e = readdir(d)) != NULL)
+        if (!strncmp(e->d_name, "softline-image-", 15)) {
+          snprintf(path, sizeof(path), "%s/%s", backend, e->d_name);
+          break;
+        }
+      closedir(d);
+      if (*path) {
+        name = strrchr(path, '/') + 1;
+        if (strstr(output, name)) {
+          CHECK(bytes_equal(path, &image));
+          CHECK(!strstr(output, "Thinking..."));
+          CHECK(write(master, "\025/quit\r", 7) == 7);
+          phase = 5;
+        }
+      }
+    }
+    waited = waitpid(editor, &status, WNOHANG);
+    if (waited == editor) {
+      editor = -1;
+      break;
+    }
+    CHECK(waited >= 0);
+  } while (now() < deadline);
+  CHECK(editor < 0 && phase == 5 && WIFEXITED(status) &&
+        WEXITSTATUS(status) == 0);
+  CHECK(bytes_equal(path, &image));
+cleanup:
+  if (editor > 0) {
+    kill(editor, SIGKILL);
+    waitpid(editor, &status, 0);
+  }
+  if (server > 0) {
+    kill(server, SIGCONT);
+    kill(server, SIGTERM);
+    waitpid(server, &status, 0);
+  }
+  if (stream) {
+    fclose(stream);
+    server_output[0] = -1;
+  }
+  if (server_output[0] >= 0)
+    close(server_output[0]);
+  if (server_output[1] >= 0)
+    close(server_output[1]);
+  if (master >= 0)
+    close(master);
+  if (slave >= 0)
+    close(slave);
+  free(image.bytes);
+  free(output);
+  if (*base) {
+    remove_owned(base);
+    rmdir(base);
+  }
+  return failed;
+}
 int main(int argc, char **argv) {
   if (argc == 3 && !strcmp(argv[1], "--auth-owner"))
     return auth_owner(argv[2]);
-  if ((argc != 4 && argc != 5) || load())
+  if ((argc != 4 && argc != 5 && argc != 6) || load())
     return 2;
+  if (argc == 6 && !strcmp(argv[4], "chat"))
+    return chat_case(argv[1], argv[5], argv[2], argv[3], 0) ||
+           chat_case(argv[1], argv[5], argv[2], argv[3], 1);
   if (argc == 5 && !strcmp(argv[4], "transport"))
     return forwarded_cases(argv[1], argv[2], argv[3]) ||
            auth_server(argv[0], argv[1], argv[2], argv[3]);

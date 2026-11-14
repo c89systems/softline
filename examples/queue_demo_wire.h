@@ -9,6 +9,7 @@
 /* A full accepted queue snapshot, with bounded per-entry metadata. */
 #define DEMO_FRAME_MAX (DEMO_ITEM_MAX * (DEMO_PROMPT_MAX + 1024u) + 4096u)
 #define DEMO_QUEUED_BYTES_MAX (DEMO_FRAME_MAX + 2u * DEMO_PROMPT_MAX)
+#define DEMO_IMAGE_CHUNK_MAX 16384u
 enum demo_message {
   DEMO_HELLO = 1,
   DEMO_REQUEST,
@@ -30,7 +31,14 @@ enum demo_message {
   DEMO_PTY_READY,
   DEMO_PTY_DATA,
   DEMO_PTY_RESIZE,
-  DEMO_PTY_EXIT
+  DEMO_PTY_EXIT,
+  DEMO_IMAGE_BEGIN,
+  DEMO_IMAGE_DATA,
+  DEMO_IMAGE_END,
+  DEMO_IMAGE_ABORT,
+  DEMO_IMAGE_DONE,
+  DEMO_IMAGE_READY,
+  DEMO_IMAGE_RESULT
 };
 typedef struct demo_packet {
   unsigned char *data;
@@ -50,6 +58,9 @@ void demo_put_number(demo_packet_t *packet, unsigned long number);
 void demo_put_string(demo_packet_t *packet, const char *text);
 void demo_put_bytes(demo_packet_t *packet, const char *bytes, size_t length);
 const char *demo_bytes(demo_packet_t *packet, size_t *length);
+void demo_put_image_bytes(demo_packet_t *packet, const unsigned char *bytes,
+                          size_t length);
+const unsigned char *demo_image_bytes(demo_packet_t *packet, size_t *length);
 unsigned long demo_number(demo_packet_t *packet);
 const char *demo_string(demo_packet_t *packet);
 void demo_put_request(demo_packet_t *packet, const sl_queue_request_t *request);

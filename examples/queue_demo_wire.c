@@ -66,6 +66,25 @@ void demo_put_bytes(demo_packet_t *packet, const char *bytes, size_t length) {
   memcpy(packet->data + packet->length, bytes, length);
   packet->length += length;
 }
+void demo_put_image_bytes(demo_packet_t *packet, const unsigned char *bytes,
+                          size_t length) {
+  if (packet->failed || !length || length > DEMO_IMAGE_CHUNK_MAX ||
+      reserve(packet, length)) {
+    packet->failed = 1;
+    return;
+  }
+  memcpy(packet->data + packet->length, bytes, length);
+  packet->length += length;
+}
+const unsigned char *demo_image_bytes(demo_packet_t *packet, size_t *length) {
+  *length = packet->length - packet->offset;
+  if (!*length || *length > DEMO_IMAGE_CHUNK_MAX) {
+    packet->failed = 1;
+    return NULL;
+  }
+  packet->offset = packet->length;
+  return packet->data + packet->length - *length;
+}
 const char *demo_bytes(demo_packet_t *packet, size_t *length) {
   *length = packet->length - packet->offset;
   if (*length > 4096) {

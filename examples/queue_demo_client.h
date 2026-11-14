@@ -25,6 +25,9 @@ int demo_client_service(demo_client_t *client, int timeout_ms);
 demo_client_t *demo_client_create(const char *host, unsigned short port);
 const sl_queue_backend_t *demo_client_backend(demo_client_t *client);
 int demo_client_attach(demo_client_t *client, sl_t *editor);
+/* Register image handover before creating the editor. Uses the same bounded
+ * connection as the queue, without saving image bytes on the frontend. */
+int demo_client_image_config(demo_client_t *client, sl_config_t *config);
 /* Explicit reconnect resolves original request identities; it never reoffers.
  */
 int demo_client_reconnect(demo_client_t *client);

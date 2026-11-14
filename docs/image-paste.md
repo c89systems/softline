@@ -120,6 +120,38 @@ No worker may access the editor directly. Backpressure must continue through the
 host transport: accepting chunks into an unbounded application queue defeats the
 resource bound even though Softline retains only one chunk.
 
+## Remote chat example
+
+The C chat frontend (`example_chat HOST PORT` or `example_chat_remote HOST PORT`)
+registers this handover adapter when connected to `example_queue_owner`. It sends
+PNG/JPEG chunks over the existing example TCP connection, with one chunk awaiting
+server acknowledgement at a time. The frontend creates no image file. Typing
+continues during a transfer; Ctrl-C cancels the image without submitting the draft
+or cancelling the simulated response. A disconnected upload is aborted rather
+than retried on a different connection.
+
+The server saves images in its starting working directory by default.
+`make run-chat-queue-server` starts it inside the checkout's `build/` directory,
+so default uploads stay out of the source tree. For direct invocation after
+building, use `(cd build && ./debug/examples/example_queue_owner 7635)`. Set
+`SOFTLINE_CHAT_IMAGE_DIR` on the server to choose another existing directory.
+Generated `softline-image-*.png` / `*.jpeg` files have mode 0600; clipboard names
+cannot select a destination. The server streams into the destination directory,
+publishes only after clean EOF and successful storage, and returns its absolute
+path. Softline inserts that path only after this acknowledgement.
+
+Both processes default to 32 MiB per image. Set `SOFTLINE_CHAT_IMAGE_MAX_BYTES`
+independently on the frontend and server to change their respective byte limits;
+0 selects the default, and values above INT_MAX are rejected. The server rejects
+oversized uploads even if a frontend permits them. Incomplete transfers expire
+after 30 seconds without a chunk or 120 seconds overall.
+
+Completed images remain for the operator to manage, including after server exit.
+Cancellation removes incomplete and explicitly abandoned uploads. A disconnect
+removes partial files but retains published images: an acknowledgement may have
+been lost after the frontend inserted its path. This example storage/transport
+policy stays outside libsoftline.
+
 See the public header for C declarations and [the Lua facade](../lua/README.md)
 for equivalent callbacks and methods. `tests/clipboard_fixture.c` and
 `tests/lua-fixtures/image-paste.lua` demonstrate streaming checksums with deferred

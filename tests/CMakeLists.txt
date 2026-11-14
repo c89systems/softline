@@ -4,6 +4,27 @@ foreach(terminal_root "${SOFTLINE_TERMINAL_TEST_ROOT}" "$ENV{SOFTLINE_TERMINAL_T
   endif()
 endforeach()
 find_package(Threads REQUIRED)
+if(TARGET softline_static AND UNIX)
+  # Link the real example adapter against the deterministic clipboard source.
+  # This exercises native receiver calls over TCP without a display dependency.
+  add_executable(test_chat_image test_chat_image.c image_source_fixture.c
+    "${PROJECT_SOURCE_DIR}/examples/queue_demo_client.c"
+    "${PROJECT_SOURCE_DIR}/examples/queue_demo_wire.c"
+    "${PROJECT_SOURCE_DIR}/examples/queue_demo_image.c"
+    "${PROJECT_SOURCE_DIR}/examples/queue_demo_terminal.c")
+  target_include_directories(test_chat_image PRIVATE "${PROJECT_SOURCE_DIR}/examples")
+  target_link_libraries(test_chat_image PRIVATE softline_static Threads::Threads)
+  if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_link_libraries(test_chat_image PRIVATE util)
+  endif()
+  softline_apply_warnings(test_chat_image)
+  softline_local_runtime(test_chat_image)
+  add_test(NAME softline_chat_image_store COMMAND test_chat_image store "${PROJECT_BINARY_DIR}")
+  add_test(NAME softline_chat_image_transport COMMAND test_chat_image
+    "$<TARGET_FILE:example_queue_owner>" "${PROJECT_BINARY_DIR}")
+  set_tests_properties(softline_chat_image_store softline_chat_image_transport
+    PROPERTIES LABELS "integration;clipboard;example-smoke;memcheck" TIMEOUT 30)
+endif()
 add_executable(test_history test_history.c)
 target_link_libraries(test_history PRIVATE softline Threads::Threads)
 softline_apply_warnings(test_history)
@@ -534,6 +555,13 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND TARGET example_chat)
       "$<TARGET_FILE:test_clipboard_image>" "$<TARGET_FILE:clipboard_fixture>" "${PROJECT_BINARY_DIR}" "${paste_inputs}" transport)
     set_tests_properties(softline_clipboard_image_transport PROPERTIES
       ENVIRONMENT "${terminal_test_environment}" LABELS "integration;clipboard" TIMEOUT 60)
+    if(TARGET example_chat_remote)
+      add_test(NAME softline_chat_clipboard COMMAND "${SOFTLINE_TEST_XVFB_RUN}" -a
+        "$<TARGET_FILE:test_clipboard_image>" "$<TARGET_FILE:example_chat_remote>"
+        "${PROJECT_BINARY_DIR}" "${paste_inputs}" chat "$<TARGET_FILE:example_queue_owner>")
+      set_tests_properties(softline_chat_clipboard PROPERTIES
+        ENVIRONMENT "${terminal_test_environment}" LABELS "integration;clipboard;example-smoke" TIMEOUT 60)
+    endif()
     add_test(NAME softline_terminal_native_output COMMAND "${SOFTLINE_TEST_XVFB_RUN}" -a
       "$<TARGET_FILE:test_vte_output>" native "$<TARGET_FILE:native_output_fixture>")
     set_tests_properties(softline_terminal_native_output PROPERTIES ENVIRONMENT "${terminal_test_environment}")

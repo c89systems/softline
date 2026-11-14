@@ -991,6 +991,10 @@ int main(int argc, char **argv) {
     config.prompt_queue_max_entries = 64;
     config.queue_backend = demo_client_backend(state.remote);
     config.queue_backend_context = state.remote;
+    if (demo_client_image_config(state.remote, &config) != SL_OK) {
+      demo_client_destroy(state.remote);
+      return 1;
+    }
     state.sl = sl_create_with_config(&config);
   } else if (argc == 1)
     state.sl = sl_create();
