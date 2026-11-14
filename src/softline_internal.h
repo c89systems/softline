@@ -8,6 +8,7 @@
 #include "softline_surface.h"
 
 #include <signal.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -43,6 +44,7 @@ typedef struct sl_prompt_queue_entry {
   char *text;
   sl_prompt_queue_entry_info_t info;
   int history_recorded;
+  int64_t display_started;
 } sl_prompt_queue_entry_t;
 
 typedef struct sl_prompt_queue {
@@ -51,6 +53,8 @@ typedef struct sl_prompt_queue {
   int cap;
   int max_entries;
   int preview_entries;
+  int display_delay_ms;
+  int64_t display_deadline;
   int enabled;
   int remote;
   sl_prompt_id_t serial;
@@ -289,7 +293,11 @@ int sl_backend_cancel_edit(sl_t *self);
 void sl_backend_cancel_waiting(sl_impl_t *impl);
 int sl_backend_unsupported(sl_t *self);
 int sl_backend_recover_newest(sl_t *self);
-int sl_backend_notice(const sl_impl_t *impl, char *text, size_t size);
+int64_t sl_queue_display_now(void);
+int sl_queue_display_ready(const sl_impl_t *impl, int64_t started, int64_t now,
+                           int64_t *deadline);
+int sl_backend_notice(const sl_impl_t *impl, int64_t now, int64_t *deadline,
+                      char *text, size_t size);
 int sl_queue_backend_request_impl(sl_t *, const sl_queue_request_t *,
                                   sl_queue_request_id_t *);
 int sl_queue_backend_result_impl(sl_t *, const sl_queue_result_t *);

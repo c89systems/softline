@@ -1,5 +1,6 @@
 local softline = require("softline")
-local sl = assert(softline.new({prompt_queue = true, prompt_theme = softline.PROMPT_THEME_PLAIN}))
+local sl = assert(softline.new({prompt_queue = true, prompt_queue_display_delay_ms = 0,
+  prompt_theme = softline.PROMPT_THEME_PLAIN}))
 local function configure()
   return sl:set_completion_providers({
     {trigger="/", complete=function() return {"/approve on", "/approve off", "/apple", "/apply", "/appraise"} end},

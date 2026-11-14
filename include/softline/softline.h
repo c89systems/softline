@@ -948,6 +948,10 @@ typedef struct sl_config {
   int prompt_queue_max_entries;
   /** Maximum FIFO previews shown above the active editor; default is 3. */
   int prompt_queue_preview_entries;
+  /** Queue/steer preview and pending-send display delay in milliseconds;
+   * default is 500. Zero displays immediately. Delivery and API views are
+   * immediate; approvals, active edits and errors are never delayed. */
+  int prompt_queue_display_delay_ms;
   /** Built-in visual treatment for the complete interactive prompt UI;
    * defaults to SL_PROMPT_THEME_DEFAULT. */
   sl_prompt_theme_t prompt_theme;
@@ -1132,6 +1136,8 @@ struct sl {
    * fails. */
   int (*set_prompt_queue)(sl_t *self, int enabled, int max_entries,
                           int preview_entries);
+  /** Set the queue preview delay in milliseconds; zero displays immediately. */
+  int (*set_prompt_queue_display_delay)(sl_t *self, int delay_ms);
   /** Select one of the built-in themes for the complete interactive prompt
    * UI. */
   int (*set_prompt_theme)(sl_t *self, sl_prompt_theme_t theme);
@@ -1603,6 +1609,14 @@ int sl_set_image_paste_path_template(sl_t *self, const char *path_template);
  * typed requests for backend mutations. */
 int sl_set_prompt_queue(sl_t *self, int enabled, int max_entries,
                         int preview_entries);
+
+/** Set the display delay for queue/steer previews and pending-send notices.
+ * Default is 500 ms; zero displays immediately, negatives are invalid. Each
+ * entry ages independently using monotonic elapsed time. Existing identities
+ * retain their age across backend updates. Does not delay dispatch or change
+ * API queue contents. Approvals, active edits, errors and connection notices
+ * remain immediate. Applies to both native local and backend handles. */
+int sl_set_prompt_queue_display_delay(sl_t *self, int delay_ms);
 
 /** Return the number of oldest-first entries currently queued on self. */
 size_t sl_prompt_queue_count(const sl_t *self);

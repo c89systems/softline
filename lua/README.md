@@ -39,6 +39,7 @@ fields are:
 - `prompt_queue`
 - `prompt_queue_max_entries`
 - `prompt_queue_preview_entries`
+- `prompt_queue_display_delay_ms` (default `500`; `0` displays immediately)
 - `queue_backend` (default `nil`; keeps the native local queue; see
   [queue backends](#constructor-selected-queue-backend))
 - `queue_backend_context` (default `nil`; retained until backend detach)
@@ -143,6 +144,12 @@ live scroll regions, status lines, and spinners are off; the theme is
   Alt-E to edit the newest queued entry. Disabling the queue clears it;
   reducing `max_entries` below the current queue length fails.
 - `sl:queue_count()` and `sl:queue_capacity()` return the queue state.
+- `sl:set_queue_display_delay(delay_ms)` changes the queue/steer preview and
+  pending-send display delay for local or backend queues. The default is 500 ms;
+  zero displays immediately. Each entry ages independently; consuming it during
+  the delay never displays it. Delivery and API counts stay immediate. Approval
+  prompts, active edits, errors and connection notices are not delayed.
+  The chat example also accepts `SOFTLINE_QUEUE_DISPLAY_DELAY_MS`.
 - `sl:inject_queued_prompt(text)` and `sl:inject_steer_prompt(text)` are the
   host injection calls, returning a stable entry ID. Both require an enabled
   queue and hold the message unless automatic approval is enabled. Approval

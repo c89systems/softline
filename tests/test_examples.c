@@ -1450,6 +1450,7 @@ static void test_prompt_frames(sl_prompt_theme_t theme, int clear,
     config.prompt_theme = theme;
     config.clear_prompt_on_exit = clear;
     config.prompt_queue = 1;
+    config.prompt_queue_display_delay_ms = 0;
     config.statusline = 1;
     sl = sl_create_with_config(&config);
     producer.input = commands[0];
@@ -1704,6 +1705,7 @@ test_queue_after_output_fills_prompt_region(sl_prompt_theme_t theme) {
     config.input_fd = config.output_fd = slave;
     config.prompt_theme = theme;
     config.prompt_queue = 1;
+    config.prompt_queue_display_delay_ms = 0;
     config.statusline = 1;
     sl = sl_create_with_config(&config);
     producer.input = commands[0];

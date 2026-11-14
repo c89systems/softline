@@ -37,6 +37,12 @@ target_link_libraries(test_softline PRIVATE softline)
 softline_apply_warnings(test_softline)
 softline_local_runtime(test_softline)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  add_executable(test_queue_display_delay test_queue_display_delay.c)
+  target_link_libraries(test_queue_display_delay PRIVATE softline util)
+  softline_apply_warnings(test_queue_display_delay)
+  softline_local_runtime(test_queue_display_delay)
+  add_test(NAME softline_queue_display_delay COMMAND test_queue_display_delay)
+  set_tests_properties(softline_queue_display_delay PROPERTIES LABELS "unit;queue;editing;memcheck" TIMEOUT 45)
   if(TARGET softline_static)
     add_executable(test_image_paste test_image_paste.c image_source_fixture.c)
     target_link_libraries(test_image_paste PRIVATE softline_static util Threads::Threads)
@@ -437,6 +443,11 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND TARGET example_simple AND TARGET examp
     $<TARGET_FILE:example_chat>
   )
   set_tests_properties(softline_examples PROPERTIES LABELS "integration" TIMEOUT 60)
+  add_test(NAME softline_chat_queue_display_option COMMAND bash
+    "${PROJECT_SOURCE_DIR}/tests/check_queue_display_option.sh"
+    "${PROJECT_SOURCE_DIR}" "$<TARGET_FILE:example_chat>")
+  set_tests_properties(softline_chat_queue_display_option PROPERTIES
+    LABELS "integration;queue;example-smoke" TIMEOUT 10)
   add_test(NAME softline_example_history_isolation COMMAND bash
     "${CMAKE_CURRENT_SOURCE_DIR}/lifecycle/example-history-isolation.sh"
     "$<TARGET_FILE:test_examples>" "$<TARGET_FILE:example_simple>"
@@ -794,6 +805,12 @@ endif()
 # The RLIMIT_AS budget check measures native memory use, without analysis overhead.
 set(_softline_memcheck_tests softline_history softline_unit softline_readline_edit softline_queue_approval softline_approval_ui
   softline_libmdf_stream softline_examples softline_prompt_frames softline_native_resize)
+# Legacy geometry/interaction fixtures explicitly select immediate previews.
+# Default delayed visibility is covered by the timer test and Lua chat watch.
+set(_softline_immediate_queue_tests softline_examples softline_chat_remote_shell
+  softline_chat_completion softline_chat_remote_completion
+  softline_chat_approval_queue softline_chat_remote_approval_queue
+  softline_chat_approval_resize softline_chat_remote_approval_resize)
 get_property(_softline_tests DIRECTORY PROPERTY TESTS)
 foreach(_softline_test IN LISTS _softline_tests)
   get_test_property(${_softline_test} TIMEOUT _softline_timeout)
@@ -803,6 +820,10 @@ foreach(_softline_test IN LISTS _softline_tests)
   endif()
   if(_softline_test IN_LIST _softline_memcheck_tests)
     set_property(TEST ${_softline_test} APPEND PROPERTY LABELS memcheck)
+  endif()
+  if(_softline_test IN_LIST _softline_immediate_queue_tests)
+    set_property(TEST ${_softline_test} APPEND PROPERTY ENVIRONMENT
+      "SOFTLINE_QUEUE_DISPLAY_DELAY_MS=0")
   endif()
   set_property(TEST "${_softline_test}" APPEND PROPERTY ENVIRONMENT
     "SOFTLINE_HISTORY_DIR=${PROJECT_BINARY_DIR}/test-history/${_softline_test}")

@@ -156,6 +156,8 @@ static void test_config_init(void) {
   ASSERT_TRUE(cfg.prompt_queue_max_entries == 64, "prompt queue max default");
   ASSERT_TRUE(cfg.prompt_queue_preview_entries == 3,
               "prompt queue preview default");
+  ASSERT_TRUE(cfg.prompt_queue_display_delay_ms == 500,
+              "prompt queue display delay default");
   ASSERT_TRUE(cfg.prompt_theme == SL_PROMPT_THEME_DEFAULT,
               "prompt theme default");
   ASSERT_TRUE(cfg.statusline == 0, "status line default");
@@ -237,6 +239,8 @@ static void test_receiver_shell(void) {
   ASSERT_TRUE(sl->set_live_scroll_region != NULL,
               "set_live_scroll_region method missing");
   ASSERT_TRUE(sl->set_prompt_queue != NULL, "set_prompt_queue method missing");
+  ASSERT_TRUE(sl->set_prompt_queue_display_delay != NULL,
+              "set_prompt_queue_display_delay method missing");
   ASSERT_TRUE(sl->set_prompt_theme != NULL, "set_prompt_theme method missing");
   ASSERT_TRUE(sl->set_statusline != NULL, "set_statusline method missing");
   ASSERT_TRUE(sl->set_status_message != NULL,
@@ -3116,6 +3120,7 @@ static int run_pty_readline_completion_case(int prompt_queue, char *terminal,
     cfg.input_fd = slave_fd;
     cfg.output_fd = slave_fd;
     cfg.prompt_queue = prompt_queue;
+    cfg.prompt_queue_display_delay_ms = 0;
     sl = sl_create_with_config(&cfg);
     if (!sl)
       _exit(2);
@@ -3200,6 +3205,7 @@ static int run_pty_history_case_with_options(
     cfg.output_fd = slave_fd;
     cfg.screen_width = width;
     cfg.prompt_queue = prompt_queue;
+    cfg.prompt_queue_display_delay_ms = 0;
     sl = sl_create_with_config(&cfg);
     if (!sl)
       _exit(2);
@@ -3398,6 +3404,7 @@ static int run_pty_prompt_queue_case_with_width(
     cfg.input_fd = slave_fd;
     cfg.output_fd = slave_fd;
     cfg.prompt_queue = 1;
+    cfg.prompt_queue_display_delay_ms = 0;
     cfg.prompt_queue_max_entries = 8;
     cfg.prompt_queue_preview_entries = 1;
     cfg.prompt_theme = theme;
@@ -7550,6 +7557,7 @@ static void test_normal_prompt_pins_at_bottom_for_live_output(void) {
     cfg.input_fd = slave_fd;
     cfg.output_fd = slave_fd;
     cfg.prompt_queue = 1;
+    cfg.prompt_queue_display_delay_ms = 0;
     cfg.live_scroll_region = 1;
     sl = sl_create_with_config(&cfg);
     if (!sl)
@@ -7813,6 +7821,7 @@ static void test_cursor_probe_preserves_concurrent_queue_input(void) {
     cfg.input_fd = slave_fd;
     cfg.output_fd = slave_fd;
     cfg.prompt_queue = 1;
+    cfg.prompt_queue_display_delay_ms = 0;
     cfg.live_scroll_region = 1;
     sl = sl_create_with_config(&cfg);
     if (!sl)
@@ -7990,6 +7999,7 @@ static void test_queued_turns_profile_promotes_manually(void) {
     cfg.input_fd = slave_fd;
     cfg.output_fd = slave_fd;
     cfg.prompt_queue = 1;
+    cfg.prompt_queue_display_delay_ms = 0;
     sl = sl_create_with_config(&cfg);
     if (!sl ||
         sl_set_prompt_queue_profile(sl, SL_PROMPT_QUEUE_PROFILE_QUEUED_TURNS) !=
@@ -8094,6 +8104,7 @@ static void test_queued_turns_cancellation_pauses_auto_delivery(void) {
     cfg.input_fd = slave_fd;
     cfg.output_fd = slave_fd;
     cfg.prompt_queue = 1;
+    cfg.prompt_queue_display_delay_ms = 0;
     sl = sl_create_with_config(&cfg);
     if (!sl ||
         sl_set_prompt_queue_profile(sl, SL_PROMPT_QUEUE_PROFILE_QUEUED_TURNS) !=
@@ -8238,6 +8249,7 @@ static void test_watch_prints_while_editing(void) {
     cfg.input_fd = slave_fd;
     cfg.output_fd = slave_fd;
     cfg.prompt_queue = 1;
+    cfg.prompt_queue_display_delay_ms = 0;
     sl = sl_create_with_config(&cfg);
     if (!sl || sl_set_statusline(sl, 1, 0) != SL_OK ||
         sl_set_status_element(sl, 0, "waiting") != SL_OK ||
@@ -8557,6 +8569,7 @@ static void test_queued_turns_auto_dispatches_on_watch(void) {
     cfg.input_fd = slave_fd;
     cfg.output_fd = slave_fd;
     cfg.prompt_queue = 1;
+    cfg.prompt_queue_display_delay_ms = 0;
     sl = sl_create_with_config(&cfg);
     if (!sl ||
         sl_set_prompt_queue_profile(sl, SL_PROMPT_QUEUE_PROFILE_QUEUED_TURNS) !=
@@ -8652,6 +8665,7 @@ static void test_queued_turns_preserve_alt_enter_during_completion(void) {
     cfg.input_fd = slave_fd;
     cfg.output_fd = slave_fd;
     cfg.prompt_queue = 1;
+    cfg.prompt_queue_display_delay_ms = 0;
     sl = sl_create_with_config(&cfg);
     if (!sl ||
         sl_set_prompt_queue_profile(sl, SL_PROMPT_QUEUE_PROFILE_QUEUED_TURNS) !=
@@ -8763,6 +8777,7 @@ test_queued_turns_prioritize_input_arriving_during_completion(void) {
     cfg.input_fd = slave_fd;
     cfg.output_fd = slave_fd;
     cfg.prompt_queue = 1;
+    cfg.prompt_queue_display_delay_ms = 0;
     sl = sl_create_with_config(&cfg);
     if (!sl ||
         sl_set_prompt_queue_profile(sl, SL_PROMPT_QUEUE_PROFILE_QUEUED_TURNS) !=
@@ -8885,6 +8900,7 @@ static void test_watch_completion_preserves_input_for_next_prompt(void) {
       cfg.input_fd = slave_fd;
       cfg.output_fd = slave_fd;
       cfg.prompt_queue = 1;
+      cfg.prompt_queue_display_delay_ms = 0;
       sl = sl_create_with_config(&cfg);
       if (!sl)
         _exit(2);

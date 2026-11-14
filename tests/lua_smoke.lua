@@ -34,6 +34,7 @@ local prompt_methods = {
   "output_stream_write_quoted_prompt",
   "output_stream_end",
   "set_prompt_queue",
+  "set_queue_display_delay",
   "queue_count",
   "queue_capacity",
   "queue_peek",

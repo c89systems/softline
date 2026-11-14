@@ -18,6 +18,7 @@
 #include <poll.h>
 #include <sys/select.h>
 #include <sys/stat.h>
+#include <time.h>
 
 typedef struct sl_row {
   char *text;
@@ -43,6 +44,7 @@ typedef struct sl_render {
   const char *input;
   size_t input_len, input_cursor, ghost_start, ghost_end;
   char *projected;
+  int64_t queue_deadline;
 } sl_render_t;
 
 typedef struct sl_rgb {
@@ -308,6 +310,29 @@ static int sl_prompt_queue_reserve(sl_prompt_queue_t *queue, int entries) {
   return 0;
 }
 
+int64_t sl_queue_display_now(void) {
+  struct timespec now;
+  if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+    return -1;
+  return (int64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000;
+}
+
+/* Record the earliest hidden-row deadline in the frame being built. The
+ * input wait uses this frame deadline, including a deadline that just expired,
+ * so an otherwise idle editor always gets a render turn. */
+int sl_queue_display_ready(const sl_impl_t *impl, int64_t started, int64_t now,
+                           int64_t *deadline) {
+  const sl_prompt_queue_t *queue = &impl->prompt_queue;
+  int64_t due;
+  if (!queue->display_delay_ms || started < 0 || now < 0 ||
+      now - started >= queue->display_delay_ms)
+    return 1;
+  due = started + queue->display_delay_ms;
+  if (!*deadline || due < *deadline)
+    *deadline = due;
+  return 0;
+}
+
 static int sl_prompt_queue_insert_raw(sl_impl_t *impl, int index,
                                       const char *text,
                                       sl_prompt_queue_mode_t mode, int held,
@@ -343,10 +368,12 @@ static int sl_prompt_queue_insert_raw(sl_impl_t *impl, int index,
   queue->items[index].info.policy.executable = 1;
   queue->items[index].info.stopped = queue->stopped;
   queue->items[index].history_recorded = 0;
+  queue->items[index].display_started = sl_queue_display_now();
   if (id) {
     queue->items[index].info = queue->editing.info;
     queue->items[index].info.mode = mode;
     queue->items[index].history_recorded = queue->editing.history_recorded;
+    queue->items[index].display_started = queue->editing.display_started;
   }
   if (queue->editing.info.id && index < queue->editing_index)
     queue->editing_index++;
@@ -3358,12 +3385,14 @@ static int sl_render_append_queue_panel(sl_t *self, sl_render_t *render,
   int focused;
   char summary[64];
   char backend_notice[192];
+  int64_t now;
   impl = sl_impl(self);
   if (!impl || !render)
     return 0;
   if (!sl_prompt_queue_enabled(impl))
     return 0;
   queue = &impl->prompt_queue;
+  now = sl_queue_display_now();
   style = "";
   if (impl->prompt_theme != SL_PROMPT_THEME_PLAIN) {
     if (sl_theme_color_style(impl->prompt_theme, SL_THEME_COLOR_QUEUE, 0,
@@ -3371,7 +3400,8 @@ static int sl_render_append_queue_panel(sl_t *self, sl_render_t *render,
       return -1;
     style = queue_style;
   }
-  if (sl_backend_notice(impl, backend_notice, sizeof(backend_notice))) {
+  if (sl_backend_notice(impl, now, &render->queue_deadline, backend_notice,
+                        sizeof(backend_notice))) {
     if (sl_render_new_row_at(render, 0, 0) != 0 ||
         sl_queue_row_append_preview(&render->rows[render->count - 1],
                                     backend_notice, width, style) != 0)
@@ -3413,6 +3443,9 @@ static int sl_render_append_queue_panel(sl_t *self, sl_render_t *render,
     int prefix_width;
     sl_row_t *row;
     if (queue->items[i].info.held)
+      continue;
+    if (!sl_queue_display_ready(impl, queue->items[i].display_started, now,
+                                &render->queue_deadline))
       continue;
     if (shown >= queue->preview_entries) {
       remaining++;
@@ -4292,6 +4325,8 @@ retry:
   }
   if (sl_prompt_uses_absolute_rows(impl)) {
     rc = sl_render_apply_absolute(self, &render);
+    if (rc == 0)
+      impl->prompt_queue.display_deadline = render.queue_deadline;
     sl_render_free(&render);
     if (rc == 1)
       goto retry;
@@ -4331,6 +4366,7 @@ retry:
                               render.cursor_col, -1)) {
     impl->rendered_width = width;
     impl->rendered_height = sl_terminal_height(impl);
+    impl->prompt_queue.display_deadline = render.queue_deadline;
     sl_render_free(&render);
     return 0;
   }
@@ -4378,6 +4414,7 @@ retry:
   if (rc == 0) {
     impl->rendered_width = width;
     impl->rendered_height = sl_terminal_height(impl);
+    impl->prompt_queue.display_deadline = render.queue_deadline;
   }
   sl_render_free(&render);
   if (rc != 0)
@@ -5761,6 +5798,17 @@ static ssize_t sl_read_input_byte(sl_t *self, char *ch, int timeout_ms) {
        (impl->statusline.enabled && impl->statusline.spinner &&
         impl->statusline.busy)))
     poll_timeout_ms = SL_UI_TICK_CADENCE_MS;
+  /* UI deadlines may wake the main read, but must not shorten an escape/UTF-8
+   * sequence's own bounded read. */
+  if (timeout_ms < 0 && impl->prompt_queue.display_deadline) {
+    int64_t now = sl_queue_display_now();
+    int64_t remaining = impl->prompt_queue.display_deadline - now;
+    int delay = now < 0 || remaining <= 0 ? 0
+                : remaining > INT_MAX     ? INT_MAX
+                                          : (int)remaining;
+    if (poll_timeout_ms < 0 || delay < poll_timeout_ms)
+      poll_timeout_ms = delay;
+  }
   if (count == 1)
     return sl_read_terminal_byte(impl, ch, poll_timeout_ms);
   deadline_valid = timeout_ms > 0 && gettimeofday(&deadline_started, NULL) == 0;
@@ -8624,6 +8672,18 @@ static int sl_set_prompt_queue_method(sl_t *self, int enabled, int max_entries,
   return SL_OK;
 }
 
+static int sl_set_prompt_queue_display_delay_method(sl_t *self, int delay_ms) {
+  sl_impl_t *impl = sl_impl(self);
+  if (!impl || delay_ms < 0) {
+    sl_set_error(self, "invalid prompt queue display delay");
+    return SL_ERROR_INVALID;
+  }
+  impl->prompt_queue.display_delay_ms = delay_ms;
+  if (impl->active_prompt && sl_render_apply(self, impl->active_prompt) != 0)
+    return SL_ERROR_IO;
+  return SL_OK;
+}
+
 static void sl_prompt_queue_profile_keys(sl_prompt_queue_profile_t profile,
                                          sl_prompt_queue_keys_t *keys) {
   if (!keys)
@@ -9571,6 +9631,7 @@ void sl_config_init(sl_config_t *config) {
   config->prompt_queue = 0;
   config->prompt_queue_max_entries = SL_PROMPT_QUEUE_DEFAULT_MAX;
   config->prompt_queue_preview_entries = SL_PROMPT_QUEUE_DEFAULT_PREVIEWS;
+  config->prompt_queue_display_delay_ms = 500;
   config->prompt_theme = SL_PROMPT_THEME_DEFAULT;
   config->statusline = 0;
   config->statusline_start_element = 0;
@@ -9612,6 +9673,7 @@ static sl_t *sl_create_with_config_impl(const sl_config_t *config) {
       !sl_clipboard_valid_path_template(config->image_paste_path_template) ||
       config->prompt_queue < 0 || config->prompt_queue_max_entries < 1 ||
       config->prompt_queue_preview_entries < 1 ||
+      config->prompt_queue_display_delay_ms < 0 ||
       config->prompt_theme < SL_PROMPT_THEME_PLAIN ||
       config->prompt_theme > SL_PROMPT_THEME_DEFAULT ||
       config->statusline < 0 || config->status_spinner < 0 ||
@@ -9683,6 +9745,8 @@ static sl_t *sl_create_with_config_impl(const sl_config_t *config) {
   self->impl = impl;
   self->next_prompt = sl_next_prompt_method;
   self->set_prompt_queue = sl_set_prompt_queue_method;
+  self->set_prompt_queue_display_delay =
+      sl_set_prompt_queue_display_delay_method;
   self->set_prompt_theme = sl_set_prompt_theme_method;
   self->set_statusline = sl_set_statusline_method;
   self->set_status_message = sl_set_status_message_method;
@@ -9761,6 +9825,7 @@ static sl_t *sl_create_with_config_impl(const sl_config_t *config) {
   impl->prompt_queue.enabled = config->prompt_queue;
   impl->prompt_queue.max_entries = config->prompt_queue_max_entries;
   impl->prompt_queue.preview_entries = config->prompt_queue_preview_entries;
+  impl->prompt_queue.display_delay_ms = config->prompt_queue_display_delay_ms;
   impl->prompt_queue.delivery = SL_PROMPT_QUEUE_DELIVERY_AUTO;
   impl->prompt_queue.profile = SL_PROMPT_QUEUE_PROFILE_DEFAULT;
   sl_prompt_queue_profile_keys(impl->prompt_queue.profile,
@@ -9915,6 +9980,12 @@ int sl_set_image_paste_path_template(sl_t *self, const char *path_template) {
   if (!self || !self->set_image_paste_path_template)
     return SL_ERROR_INVALID;
   return self->set_image_paste_path_template(self, path_template);
+}
+
+int sl_set_prompt_queue_display_delay(sl_t *self, int delay_ms) {
+  return self && self->set_prompt_queue_display_delay
+             ? self->set_prompt_queue_display_delay(self, delay_ms)
+             : SL_ERROR_INVALID;
 }
 
 int sl_set_prompt_queue(sl_t *self, int enabled, int max_entries,

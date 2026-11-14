@@ -202,6 +202,7 @@ int main(int argc, char **argv) {
   sl_config_init(&config);
   config.prompt_theme = SL_PROMPT_THEME_PLAIN;
   config.prompt_queue = 1;
+  config.prompt_queue_display_delay_ms = 0;
   config.statusline = argc == 4;
   fixture.sl = sl_create_with_config(&config);
   if (argc == 5) {

@@ -466,6 +466,7 @@ static const char *const softline_lua_config_fields[] = {
     "prompt_queue",
     "prompt_queue_max_entries",
     "prompt_queue_preview_entries",
+    "prompt_queue_display_delay_ms",
     "prompt_theme",
     "statusline",
     "statusline_start_element",
@@ -581,6 +582,15 @@ static void softline_lua_config(lua_State *L, int index, sl_config_t *config,
   lua_getfield(L, index, "prompt_queue_preview_entries");
   if (!lua_isnil(L, -1))
     config->prompt_queue_preview_entries = (int)luaL_checkinteger(L, -1);
+  lua_pop(L, 1);
+  lua_getfield(L, index, "prompt_queue_display_delay_ms");
+  if (!lua_isnil(L, -1)) {
+    lua_Integer delay = luaL_checkinteger(L, -1);
+    if (delay < 0 || delay > INT_MAX)
+      luaL_error(L,
+                 "prompt_queue_display_delay_ms must be between 0 and INT_MAX");
+    config->prompt_queue_display_delay_ms = (int)delay;
+  }
   lua_pop(L, 1);
   lua_getfield(L, index, "prompt_theme");
   if (!lua_isnil(L, -1))
@@ -1290,6 +1300,15 @@ static int softline_lua_set_completion_providers(lua_State *L) {
   lua_pushvalue(L, callbacks);
   lua_setiuservalue(L, 1, 3);
   return softline_lua_status(L, SL_OK);
+}
+
+static int softline_lua_set_queue_display_delay(lua_State *L) {
+  softline_lua_handle_t *handle = softline_lua_check(L, 1);
+  lua_Integer delay = luaL_checkinteger(L, 2);
+  if (delay < 0 || delay > INT_MAX)
+    return softline_lua_status(L, SL_ERROR_INVALID);
+  return softline_lua_status(
+      L, sl_set_prompt_queue_display_delay(handle->sl, (int)delay));
 }
 
 static int softline_lua_set_prompt_queue(lua_State *L) {
@@ -2367,6 +2386,7 @@ static const luaL_Reg softline_lua_methods[] = {
     {"set_image_paste_path_template",
      softline_lua_set_image_paste_path_template},
     {"set_prompt_queue", softline_lua_set_prompt_queue},
+    {"set_queue_display_delay", softline_lua_set_queue_display_delay},
     {"queue_count", softline_lua_queue_count},
     {"queue_capacity", softline_lua_queue_capacity},
     {"queue_peek", softline_lua_queue_peek},

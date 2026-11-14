@@ -329,6 +329,7 @@ static int native_scope(void) {
   config.osc8_mode = SL_OSC8_ON;
   config.prompt_theme = SL_PROMPT_THEME_PLAIN;
   config.prompt_queue = 1;
+  config.prompt_queue_display_delay_ms = 0;
   sl = sl_create_with_config(&config);
   CHECK(sl);
   CHECK(sl_set_prompt_queue_delivery(sl, SL_PROMPT_QUEUE_DELIVERY_MANUAL) ==

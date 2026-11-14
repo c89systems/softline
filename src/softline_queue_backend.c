@@ -5,10 +5,12 @@
 typedef struct {
   sl_queue_entry_t value;
   sl_prompt_id_t local_id;
+  int64_t display_started;
 } backend_entry_t;
 
 typedef struct {
   sl_queue_request_t value;
+  int64_t display_started;
   int pending, seen, want_edit, want_steer, abandoned, sync_requested;
   sl_queue_result_status_t status;
   char *reason, *result_id, *result_revision, *result_token;
@@ -320,6 +322,7 @@ int sl_queue_backend_request_impl(sl_t *self, const sl_queue_request_t *input,
     return error(self, SL_ERROR_NOMEM, "cannot retain backend request");
   }
   pending.pending = 1;
+  pending.display_started = sl_queue_display_now();
   backend->callback_active = 1;
   status = backend->callbacks.request(backend->context, &pending.value);
   backend->callback_active = 0;
@@ -440,12 +443,14 @@ static int mirror_commit(sl_t *self, backend_entry_t *entries, size_t count,
     for (other = 0; other < index; ++other)
       if (!strcmp(entries[other].value.id, entries[index].value.id))
         goto invalid;
-    if (before)
+    if (before) {
       entries[index].local_id = before->local_id;
-    else {
+      entries[index].display_started = before->display_started;
+    } else {
       if (serial == ULONG_MAX)
         goto invalid;
       entries[index].local_id = ++serial;
+      entries[index].display_started = sl_queue_display_now();
     }
     if (entries[index].local_id == queue->editing.info.id &&
         entries[index].value.edit_held && entries[index].value.edit_token &&
@@ -456,6 +461,7 @@ static int mirror_commit(sl_t *self, backend_entry_t *entries, size_t count,
     } else
       out = items + used++;
     out->text = copy(entries[index].value.text);
+    out->display_started = entries[index].display_started;
     if (!out->text)
       goto nomem;
     out->info.id = entries[index].local_id;
@@ -1074,16 +1080,19 @@ void sl_backend_pump(sl_t *self) {
   }
 }
 
-int sl_backend_notice(const sl_impl_t *impl, char *text, size_t size) {
+int sl_backend_notice(const sl_impl_t *impl, int64_t now, int64_t *deadline,
+                      char *text, size_t size) {
   const sl_backend_t *backend = impl->backend;
   size_t index, pending = 0, rejected = 0, unknown = 0;
   if (!backend)
     return 0;
   for (index = 0; index < backend->pending_count; ++index) {
     if (backend->pending[index].pending ||
-        backend->pending[index].status == SL_QUEUE_ACCEPTED)
-      ++pending;
-    else if (backend->pending[index].status == SL_QUEUE_REJECTED)
+        backend->pending[index].status == SL_QUEUE_ACCEPTED) {
+      if (sl_queue_display_ready(impl, backend->pending[index].display_started,
+                                 now, deadline))
+        ++pending;
+    } else if (backend->pending[index].status == SL_QUEUE_REJECTED)
       ++rejected;
     else if (backend->pending[index].status == SL_QUEUE_UNKNOWN)
       ++unknown;

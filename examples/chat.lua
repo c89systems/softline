@@ -264,6 +264,13 @@ end
 
 local function run()
   sl = softline.new()
+  local display_delay = os.getenv("SOFTLINE_QUEUE_DISPLAY_DELAY_MS")
+  if display_delay then
+    local value = tonumber(display_delay)
+    assert(display_delay:match("^%d+$") and value and value <= 2147483647,
+      "SOFTLINE_QUEUE_DISPLAY_DELAY_MS must be an integer from 0 to 2147483647")
+    assert(sl:set_queue_display_delay(value))
+  end
   assert(dofile((arg[0]:match("^(.*[/])") or "") .. "completion.lua")(sl, true))
   assert(sl:history_open("softline.examples.chat", os.getenv("SOFTLINE_HISTORY_DIR")))
   assert(sl:history_set_auto_add(true))

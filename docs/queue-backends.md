@@ -42,6 +42,15 @@ work on the editor owner thread. `sl_queue_backend_result()` records an outcome;
 callback. The library adds no network/storage dependency, worker thread or
 interval queue polling.
 
+Queue/steer previews and pending-send notices wait 500 ms before appearing by
+default. `sl_config_t.prompt_queue_display_delay_ms` and
+`sl_set_prompt_queue_display_delay()` configure this presentation delay; zero
+displays immediately. Entries consumed before their deadline never add a row.
+Each entry keeps its age across subscription updates with the same identity.
+Queue APIs and dispatch are immediate. Approvals, active edits, rejected/unknown
+outcomes and connection notices remain immediate. The editor's input wait wakes
+at the next display deadline; this adds no worker or recurring polling timer.
+
 An initial `SL_QUEUE_SNAPSHOT` establishes the bounded view. `UPSERT`, `REMOVE`
 and `STATE` deltas chain `previous_revision` to `revision`. Existing entries
 cannot move through UPSERT. Each change includes total count, stopped state and

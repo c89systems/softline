@@ -45,6 +45,9 @@ if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Linux")
 endif()
 add_test(NAME lua_osc8 COMMAND "${SOFTLINE_LUA_EXECUTABLE}" "${root}/tests/lua_osc8.lua")
 add_test(NAME lua_queue_backend COMMAND "${SOFTLINE_LUA_EXECUTABLE}" "${root}/tests/lua_queue_backend.lua")
+add_test(NAME lua_queue_display_option COMMAND "${BASH_EXECUTABLE}"
+  "${root}/tests/check_queue_display_option.sh" "${root}"
+  "${SOFTLINE_LUA_EXECUTABLE}" "${root}/examples/chat.lua")
 add_test(NAME lua_backend_coroutines COMMAND "${pty_test}" backend-coroutines "${SOFTLINE_LUA_EXECUTABLE}" "${root}")
 if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Linux")
   set_tests_properties(lua_backend_coroutines PROPERTIES ENVIRONMENT "DISPLAY=;SOFTLINE_TEST_IMAGE_ERRORS=1")

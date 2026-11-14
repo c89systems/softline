@@ -83,6 +83,7 @@ set(aliases destroy close prompt_queue_count queue_count prompt_queue_capacity q
   set_prompt_queue_profile set_queue_profile get_prompt_queue_profile queue_profile
   set_prompt_queue_keys set_queue_keys get_prompt_queue_keys queue_keys
   set_prompt_queue_policy set_queue_policy
+  set_prompt_queue_display_delay set_queue_display_delay
   prompt_queue_set_executable queue_set_executable
   get_prompt_queue_stopped queue_stopped prompt_queue_resume queue_resume)
 set(expected)

@@ -15,6 +15,15 @@ local callbacks = {
 }
 sl = softline.new {prompt_queue = true, queue_backend = callbacks, queue_backend_context = context}
 callbacks.request = function() error("constructor failed to copy callbacks") end
+assert(sl:set_queue_display_delay(0))
+assert(sl:set_queue_display_delay(500))
+assert(select(2, sl:set_queue_display_delay(-1)) == softline.ERROR_INVALID)
+assert(select(2, sl:set_queue_display_delay(2147483648)) == softline.ERROR_INVALID)
+for _, delay in ipairs({-1, 2147483648, 1.5}) do
+  assert(not pcall(softline.new, {prompt_queue_display_delay_ms=delay}))
+end
+local immediate = assert(softline.new {prompt_queue_display_delay_ms=0})
+assert(immediate:set_queue_display_delay(120)); immediate:close()
 assert(sl:queue_backend_update {revision = "q0", entries = {}, total_count = 0})
 local id = assert(sl:queue_backend_request {text = "hello"})
 assert(requests[1].request_id == id and requests[1].text == "hello")

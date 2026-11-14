@@ -1035,6 +1035,26 @@ int main(int argc, char **argv) {
     return 1;
   }
   {
+    const char *delay = getenv("SOFTLINE_QUEUE_DISPLAY_DELAY_MS");
+    if (delay) {
+      char *end;
+      long value;
+      errno = 0;
+      value = strtol(delay, &end, 10);
+      if (*delay < '0' || *delay > '9' || *end || errno || value < 0 ||
+          value > INT_MAX ||
+          sl_set_prompt_queue_display_delay(state.sl, (int)value) != SL_OK) {
+        fprintf(
+            stderr,
+            "SOFTLINE_QUEUE_DISPLAY_DELAY_MS must be an integer from 0 to %d\n",
+            INT_MAX);
+        sl_destroy(state.sl);
+        demo_client_destroy(state.remote);
+        return 1;
+      }
+    }
+  }
+  {
     const char *links = getenv("SOFTLINE_OSC8");
     sl_osc8_mode_t mode = SL_OSC8_AUTO;
     if (links && *links) {

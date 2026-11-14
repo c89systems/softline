@@ -55,6 +55,7 @@ sl_set_idle_callback
 sl_set_image_paste_path_template
 sl_set_live_scroll_region
 sl_set_prompt_queue
+sl_set_prompt_queue_display_delay
 sl_set_prompt_queue_delivery
 sl_set_prompt_queue_keys
 sl_set_prompt_queue_profile

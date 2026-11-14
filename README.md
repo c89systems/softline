@@ -68,6 +68,14 @@ Currently implemented:
   copy. `Alt-N` clears without saving. These edits are undoable with `Ctrl-_`.
   The stash is independent of
   the `Ctrl-Y`/`Alt-Y` kill ring and survives prompt submissions and shell handoff.
+- Queue/steer previews and pending-send notices appear after 500 ms by default,
+  avoiding flashes from entries consumed immediately. Configure
+  `prompt_queue_display_delay_ms` or call
+  `sl_set_prompt_queue_display_delay(editor, delay_ms)` (also available as a
+  receiver method). Zero displays immediately. Dispatch and queue APIs remain
+  immediate, as do approval prompts, active edits and error/connection notices.
+  The C and Lua chat examples accept `SOFTLINE_QUEUE_DISPLAY_DELAY_MS` for this
+  visibility setting, including `0` for immediate previews.
 - `Ctrl-R` starts reverse incremental history search over the handle's current
   in-memory history, including entries loaded before `readline()`.
   Enter leaves the displayed match in the normal prompt for editing; it does

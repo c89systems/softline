@@ -505,6 +505,7 @@ static int edit_case(enum edit_kind kind, int native) {
   sl_config_init(&cfg);
   cfg.input_fd = cfg.output_fd = slave;
   cfg.prompt_queue = 1;
+  cfg.prompt_queue_display_delay_ms = 0;
   cfg.prompt_queue_max_entries = 2;
   sl = sl_create_with_config(&cfg);
   CHECK(sl &&

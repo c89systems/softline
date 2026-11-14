@@ -195,8 +195,8 @@ static int watch(void) {
       REQUIRE(wait_for(&e, "[operation] processing input.", offset) == 0);
       offset = e.length;
       REQUIRE(send_bytes(&e, "steer\033\r") == 0);
-      REQUIRE(wait_for(&e, "S 1. ", offset) == 0);
       REQUIRE(wait_for(&e, "[active operation] consumed: steer", offset) == 0);
+      REQUIRE(!contains(&e, "S 1. ", offset));
       offset = e.length;
       REQUIRE(send_bytes(&e, "\033") == 0);
       REQUIRE(wait_for(&e, "[operation] cancelled", offset) == 0);
@@ -212,7 +212,6 @@ static int watch(void) {
       REQUIRE(wait_for(&e, "[queued] followup", offset) == 0);
     } else if (scenario == 2) {
       REQUIRE(send_bytes(&e, "/quit\033\r") == 0);
-      REQUIRE(wait_for(&e, "S 1. ", offset) == 0);
     } else if (scenario == 3) {
       REQUIRE(send_bytes(&e, "/quit\r") == 0);
       REQUIRE(wait_for(&e, "Q 1. ", offset) == 0);
@@ -228,6 +227,8 @@ static int watch(void) {
       REQUIRE(send_bytes(&e, "\004") == 0);
     }
     REQUIRE(finish(&e) == 0);
+    if (scenario == 2)
+      REQUIRE(!contains(&e, "S 1. ", offset));
     if (scenario == 4)
       REQUIRE(!contains(&e, "[queued] followup", offset));
     close_editor(&e);
