@@ -205,6 +205,8 @@ live scroll regions, status lines, and spinners are off; the theme is
   a fresh draft; its old identity and hold stay removed. On an ordinary draft,
   Alt-N clears the text with undo support. Alt-K saves and clears the whole draft
   in one per-handle stash; Alt-J appends that saved text after current input.
+  Alt-K leaves both the draft and stash unchanged for empty or whitespace-only
+  input.
   The stash survives submissions and is independent of Ctrl-Y/Alt-Y's kill ring.
   Editing reserves one queue slot; cancellation/EOF/read failure restores the
   original entry. Clear preserves an active edit, and disable is refused until

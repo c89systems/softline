@@ -6992,7 +6992,11 @@ static int sl_clear_draft(sl_t *self) {
 static int sl_stash_draft(sl_t *self) {
   sl_impl_t *impl = sl_impl(self);
   char *saved;
-  if (!impl->len)
+  size_t i;
+  for (i = 0; i < impl->len; ++i)
+    if (!isspace((unsigned char)impl->buf[i]))
+      break;
+  if (i == impl->len)
     return 0;
   saved = sl_strdup(impl->buf);
   if (!saved || sl_buf_delete(self, 0, impl->len) != 0) {
