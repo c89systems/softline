@@ -1,0 +1,68 @@
+name: macOS tests
+
+on:
+  push:
+    branches: ['**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Native macOS (Apple Silicon)
+    runs-on: macos-15
+    timeout-minutes: 20
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: '4'
+      CTEST_PARALLEL_LEVEL: '1'
+      HOMEBREW_NO_AUTO_UPDATE: '1'
+      MACOSX_DEPLOYMENT_TARGET: '15.0'
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install test prerequisites
+        run: |
+          brew install bash cmake ninja pkgconf
+          printf '%s/bin\n' "$(brew --prefix bash)" >> "$GITHUB_PATH"
+
+      - name: Select native Apple tools
+        run: |
+          bash scripts/require-host-bash.sh
+          printf 'CC=%s\n' "$(xcrun --sdk macosx --find clang)" >> "$GITHUB_ENV"
+          printf 'SDKROOT=%s\n' "$(xcrun --sdk macosx --show-sdk-path)" >> "$GITHUB_ENV"
+          sw_vers
+          uname -m
+          xcodebuild -version
+          printf 'Testing commit: %s\n' "$GITHUB_SHA"
+
+      # Native diagnostics only. Release builds and artifacts remain local.
+      - name: Configure native tests
+        run: |
+          cmake -S . -B build/macos-tests -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_COMPILER="$CC" \
+            -DCMAKE_OSX_SYSROOT="$SDKROOT" \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET="$MACOSX_DEPLOYMENT_TARGET" \
+            -DSL_TARGET_ID=arm64-apple-darwin \
+            -DSL_BUILD_STATIC=ON \
+            -DSL_BUILD_SHARED=ON \
+            -DSL_BUILD_EXAMPLES=ON \
+            -DSL_BUILD_TESTS=ON
+
+      - name: Build libraries, examples and tests
+        run: cmake --build build/macos-tests
+
+      - name: Run native tests
+        run: ctest --test-dir build/macos-tests --stop-on-failure --output-on-failure --no-tests=error

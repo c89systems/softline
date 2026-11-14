@@ -31,6 +31,7 @@
 static int tests_run = 0;
 static int tests_passed = 0;
 static volatile sig_atomic_t signal_seen = 0;
+#if SL_TEST_PTY
 static int signal_ack_fd = -1;
 
 static void remember_signal(int signo) {
@@ -42,6 +43,7 @@ static void remember_signal(int signo) {
     (void)write(signal_ack_fd, &byte, 1);
   }
 }
+#endif
 
 static void ignore_signal(int signo) { (void)signo; }
 
@@ -400,7 +402,6 @@ struct full_editor_stream_probe {
 
 #if SL_TEST_PTY
 static size_t read_live_pty_output(int fd, char *bytes, size_t capacity);
-#endif
 
 static void full_editor_stream_idle(sl_t *sl, void *userdata) {
   struct full_editor_stream_probe *probe;
@@ -426,6 +427,7 @@ static void full_editor_stream_idle(sl_t *sl, void *userdata) {
   }
   (void)sl_cancel(sl);
 }
+#endif
 
 static void test_live_output_retains_row_with_full_editor(int start_inside) {
 #if SL_TEST_PTY
@@ -490,6 +492,7 @@ struct finite_partial_chunk {
   int end_result;
 };
 
+#if SL_TEST_PTY
 static int finite_partial_stream(sl_t *sl, void *userdata, const char **chunk,
                                  size_t *length) {
   struct finite_partial_chunk *state = (struct finite_partial_chunk *)userdata;
@@ -527,6 +530,7 @@ static void finite_recovery_idle(sl_t *sl, void *userdata) {
   }
   (void)sl_cancel(sl);
 }
+#endif
 
 static void test_finite_output_recovers_from_partial_sequences(void) {
 #if SL_TEST_PTY
@@ -1473,6 +1477,7 @@ static void test_print_above_uses_lf_for_non_tty_output(void) {
   PASS();
 }
 
+#if SL_TEST_PTY
 static int contains_bytes(const char *haystack, const char *needle) {
   return strstr(haystack, needle) != NULL;
 }
@@ -1824,6 +1829,7 @@ static ssize_t read_some_with_timeout_ms(int fd, char *buf, size_t cap,
   } while (ready < 0 && errno == EINTR);
   return ready;
 }
+#endif
 
 static void test_redirected_live_output_validates_stream(void) {
   static const char expected[] = "\xc3\xa4\033[31mXZH";
@@ -2587,6 +2593,7 @@ static void test_quote_spacing_after_partial_invalid_write(void) {
 #endif
 }
 
+#if defined(__linux__)
 static ssize_t read_until_eof_with_timeout(int fd, char *buf, size_t cap) {
   ssize_t total;
   total = 0;
@@ -2602,7 +2609,6 @@ static ssize_t read_until_eof_with_timeout(int fd, char *buf, size_t cap) {
   return total;
 }
 
-#if defined(__linux__)
 struct idle_print_state {
   int printed;
 };
@@ -11245,15 +11251,19 @@ int main(int argc, char **argv) {
   test_tab_render_expands_beyond_line_bytes();
   test_key_binding_tab_inserts_text();
   test_prompt_queue_dispatches_fifo_with_themes();
+#if SL_TEST_PTY
   test_prompt_queue_dispatches_fifo_in_normal_scrollback();
   test_prompt_queue_clips_control_rows_on_narrow_terminals();
   test_prompt_queue_previews_control_bytes_safely();
   test_prompt_queue_rejects_reduced_capacity();
+#endif
   test_prompt_queue_alt_e_recalls_newest();
   test_prompt_themes_style_normal_readline();
   test_statusline_uses_palette_offset_and_truncation();
   test_default_statusline_uses_ansi_palette();
+#if SL_TEST_PTY
   test_queueing_resets_history_navigation();
+#endif
   test_key_binding_alt_m_inserts_text();
   test_key_binding_f1_submits();
   test_key_binding_can_edit_buffer_and_submit();
@@ -11287,14 +11297,18 @@ int main(int argc, char **argv) {
   test_ctrl_c_signal_is_not_delivered_twice(1);
   test_idle_callback_can_submit_without_input();
   test_idle_callback_runs_with_quiet_watch();
+#if SL_TEST_PTY
   test_busy_spinner_ticks_with_quiet_watch();
+#endif
   test_idle_callback_can_cancel_without_input();
   test_watch_prints_while_editing();
   test_watch_preserves_escape_continuation_timeout();
   test_queued_turns_auto_dispatches_on_watch();
   test_queued_turns_preserve_alt_enter_during_completion();
+#if SL_TEST_PTY
   test_queued_turns_prioritize_input_arriving_during_completion();
   test_watch_completion_preserves_input_for_next_prompt();
+#endif
   test_watch_fairness_rotates_ready_flood();
   test_watch_lifecycle_reports_terminal_events();
   test_redirected_live_output_validates_stream();
@@ -11318,8 +11332,10 @@ int main(int argc, char **argv) {
   test_live_output_preserves_reverse_search_prompt(1);
   test_live_output_after_readline_submit_clears_editor();
   test_retained_stream_tracks_readline_scrollback();
+#if SL_TEST_PTY
   test_retained_stream_survives_prompt_growth();
   test_retained_stream_survives_prompt_shrink();
+#endif
   test_live_output_native_scroll_resets_prompt_style();
   test_live_output_prompt_growth_preserves_history();
   test_live_output_stream_chunk_protocol();
@@ -11328,13 +11344,17 @@ int main(int argc, char **argv) {
   test_live_output_reconciles_physical_resize();
   test_live_output_resize_continues_current_row();
   test_live_output_clears_promptless_scroll_row();
+#if SL_TEST_PTY
   test_final_render_failure_reports_error();
+#endif
   test_narrow_terminal_does_not_submit_before_enter();
   test_live_output_end_restores_unbounded_cursor();
   test_unbounded_finite_output_preserves_active_prompt();
   test_idle_callback_prints_above_active_prompt();
   test_normal_prompt_pins_at_bottom_for_live_output();
+#if SL_TEST_PTY
   test_pinned_stream_failure_restores_prompt_cursor();
+#endif
   test_cursor_probe_preserves_concurrent_queue_input();
   test_utf8_input_and_backspace();
   test_utf8_swedish_input_is_rendered_as_full_sequences();

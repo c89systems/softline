@@ -962,6 +962,12 @@ checksum-selected local artifacts. Never push to obtain CI feedback. Hosted
 native checks are optional diagnostics; local osxcross supplies Darwin release
 proof. Publication remains a separate, explicitly authorized operation.
 
+The `macOS tests` GitHub Actions workflow runs on branch pushes and manual
+dispatches using a native Apple Silicon macOS runner. It builds the libraries
+and examples, then runs the portable unit/history and libmdf streaming CTest
+cases. Linux-only PTY/X11 tests remain in the local Linux suite. The workflow
+does not publish releases or upload build artifacts.
+
 Builds default to four jobs through `CMAKE_BUILD_PARALLEL_LEVEL`; set it explicitly
 to choose another limit. Operational helpers and direct CMake configuration reject
 symlinked `build/`, `dist/`, or `.cache/` roots and borrowed cache overrides.
