@@ -45,6 +45,7 @@ typedef struct sl_render {
   size_t input_len, input_cursor, ghost_start, ghost_end;
   char *projected;
   int64_t queue_deadline;
+  int queue_visible;
 } sl_render_t;
 
 typedef struct sl_rgb {
@@ -317,6 +318,12 @@ int64_t sl_queue_display_now(void) {
   return (int64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000;
 }
 
+/* New arrivals do not wait behind an already drawn queue. Retain this choice
+ * on the entry even if older entries disappear before its next frame. */
+int64_t sl_queue_display_start(const sl_impl_t *impl) {
+  return impl->prompt_queue.display_visible ? -1 : sl_queue_display_now();
+}
+
 /* Record the earliest hidden-row deadline in the frame being built. The
  * input wait uses this frame deadline, including a deadline that just expired,
  * so an otherwise idle editor always gets a render turn. */
@@ -368,7 +375,7 @@ static int sl_prompt_queue_insert_raw(sl_impl_t *impl, int index,
   queue->items[index].info.policy.executable = 1;
   queue->items[index].info.stopped = queue->stopped;
   queue->items[index].history_recorded = 0;
-  queue->items[index].display_started = sl_queue_display_now();
+  queue->items[index].display_started = sl_queue_display_start(impl);
   if (id) {
     queue->items[index].info = queue->editing.info;
     queue->items[index].info.mode = mode;
@@ -2397,6 +2404,7 @@ static void sl_render_store_clear(sl_impl_t *impl) {
   impl->rendered_cols = NULL;
   impl->rendered_cap = 0;
   impl->rendered_rows = 0;
+  impl->prompt_queue.display_visible = 0;
   impl->rendered_editor_first = 0;
   impl->rendered_cursor_row = 0;
   impl->rendered_cursor_col = 0;
@@ -3400,7 +3408,8 @@ static int sl_render_append_queue_panel(sl_t *self, sl_render_t *render,
       return -1;
     style = queue_style;
   }
-  if (sl_backend_notice(impl, now, &render->queue_deadline, backend_notice,
+  if (sl_backend_notice(impl, now, &render->queue_deadline,
+                        &render->queue_visible, backend_notice,
                         sizeof(backend_notice))) {
     if (sl_render_new_row_at(render, 0, 0) != 0 ||
         sl_queue_row_append_preview(&render->rows[render->count - 1],
@@ -3429,10 +3438,12 @@ static int sl_render_append_queue_panel(sl_t *self, sl_render_t *render,
         sl_queue_row_append_preview(&render->rows[render->count - 1], editing,
                                     width, style) != 0)
       return -1;
+    render->queue_visible = 1;
   }
   if (held && approval < 0) {
     if (sl_render_queue_text(render, summary, width, "  ", style, 0) != 0)
       return -1;
+    render->queue_visible = 1;
   }
   shown = 0;
   remaining = 0;
@@ -3447,6 +3458,7 @@ static int sl_render_append_queue_panel(sl_t *self, sl_render_t *render,
     if (!sl_queue_display_ready(impl, queue->items[i].display_started, now,
                                 &render->queue_deadline))
       continue;
+    render->queue_visible = 1;
     if (shown >= queue->preview_entries) {
       remaining++;
       continue;
@@ -3488,6 +3500,7 @@ static int sl_render_append_queue_panel(sl_t *self, sl_render_t *render,
     if (sl_render_queue_text(render, queue->items[approval].text, width, "  ",
                              style, 3) != 0)
       return -1;
+    render->queue_visible = 1;
   }
   return 0;
 }
@@ -4325,8 +4338,10 @@ retry:
   }
   if (sl_prompt_uses_absolute_rows(impl)) {
     rc = sl_render_apply_absolute(self, &render);
-    if (rc == 0)
+    if (rc == 0) {
       impl->prompt_queue.display_deadline = render.queue_deadline;
+      impl->prompt_queue.display_visible = render.queue_visible;
+    }
     sl_render_free(&render);
     if (rc == 1)
       goto retry;
@@ -4367,6 +4382,7 @@ retry:
     impl->rendered_width = width;
     impl->rendered_height = sl_terminal_height(impl);
     impl->prompt_queue.display_deadline = render.queue_deadline;
+    impl->prompt_queue.display_visible = render.queue_visible;
     sl_render_free(&render);
     return 0;
   }
@@ -4415,6 +4431,7 @@ retry:
     impl->rendered_width = width;
     impl->rendered_height = sl_terminal_height(impl);
     impl->prompt_queue.display_deadline = render.queue_deadline;
+    impl->prompt_queue.display_visible = render.queue_visible;
   }
   sl_render_free(&render);
   if (rc != 0)

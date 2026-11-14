@@ -45,8 +45,12 @@ interval queue polling.
 Queue/steer previews and pending-send notices wait 500 ms before appearing by
 default. `sl_config_t.prompt_queue_display_delay_ms` and
 `sl_set_prompt_queue_display_delay()` configure this presentation delay; zero
-displays immediately. Entries consumed before their deadline never add a row.
-Each entry keeps its age across subscription updates with the same identity.
+displays immediately. Entries arriving while the queue is already visible
+appear immediately, including pending sends alongside visible queue previews.
+They stay visible if older entries are consumed. Once an empty queue is drawn,
+the delay applies again. Entries added while the queue is hidden age
+independently; consuming them before their deadline never adds a row. Each entry
+keeps its age across subscription updates with the same identity.
 Queue APIs and dispatch are immediate. Approvals, active edits, rejected/unknown
 outcomes and connection notices remain immediate. The editor's input wait wakes
 at the next display deadline; this adds no worker or recurring polling timer.

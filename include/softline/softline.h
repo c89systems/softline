@@ -949,8 +949,9 @@ typedef struct sl_config {
   /** Maximum FIFO previews shown above the active editor; default is 3. */
   int prompt_queue_preview_entries;
   /** Queue/steer preview and pending-send display delay in milliseconds;
-   * default is 500. Zero displays immediately. Delivery and API views are
-   * immediate; approvals, active edits and errors are never delayed. */
+   * default is 500. Zero and arrivals into a visible queue display immediately.
+   * Delivery and API views are immediate; approvals, active edits and errors
+   * are never delayed. */
   int prompt_queue_display_delay_ms;
   /** Built-in visual treatment for the complete interactive prompt UI;
    * defaults to SL_PROMPT_THEME_DEFAULT. */
@@ -1612,10 +1613,13 @@ int sl_set_prompt_queue(sl_t *self, int enabled, int max_entries,
 
 /** Set the display delay for queue/steer previews and pending-send notices.
  * Default is 500 ms; zero displays immediately, negatives are invalid. Each
- * entry ages independently using monotonic elapsed time. Existing identities
- * retain their age across backend updates. Does not delay dispatch or change
- * API queue contents. Approvals, active edits, errors and connection notices
- * remain immediate. Applies to both native local and backend handles. */
+ * entry added while the queue is hidden ages independently using monotonic
+ * elapsed time. Arrivals into a visible queue appear immediately, even if
+ * older entries are consumed. An empty queue frame rearms the delay. Existing
+ * identities retain their age across backend updates. Does not delay dispatch
+ * or change API queue contents. Approvals, active edits, errors and connection
+ * notices remain immediate. Applies to both native local and backend handles.
+ */
 int sl_set_prompt_queue_display_delay(sl_t *self, int delay_ms);
 
 /** Return the number of oldest-first entries currently queued on self. */

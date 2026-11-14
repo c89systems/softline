@@ -69,7 +69,9 @@ Currently implemented:
   The stash is independent of
   the `Ctrl-Y`/`Alt-Y` kill ring and survives prompt submissions and shell handoff.
 - Queue/steer previews and pending-send notices appear after 500 ms by default,
-  avoiding flashes from entries consumed immediately. Configure
+  avoiding flashes from entries consumed immediately. New entries appear
+  immediately when the queue is already visible; the delay applies again after
+  an empty queue is drawn. Configure
   `prompt_queue_display_delay_ms` or call
   `sl_set_prompt_queue_display_delay(editor, delay_ms)` (also available as a
   receiver method). Zero displays immediately. Dispatch and queue APIs remain

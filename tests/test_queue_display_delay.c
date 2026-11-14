@@ -25,10 +25,16 @@ enum scenario {
   HELD,
   EDITING,
   INDEPENDENT,
-  SPLIT_ESCAPE
+  SPLIT_ESCAPE,
+  VISIBLE,
+  VISIBLE_DRAIN,
+  VISIBLE_RESET,
+  VISIBLE_SNAPSHOT,
+  VISIBLE_PENDING,
+  VISIBLE_MIXED
 };
 struct host {
-  int events, scenario, revision;
+  int events, scenario, revision, extra;
   sl_queue_request_id_t request;
 };
 static double milliseconds(void) {
@@ -41,25 +47,36 @@ static int request(void *context, const sl_queue_request_t *value) {
   host->request = value->request_id;
   return SL_OK;
 }
+static int pending_scenario(int scenario) {
+  return (scenario >= PENDING && scenario <= REJECTED) ||
+         scenario == VISIBLE_PENDING;
+}
+static int snapshot_scenario(int scenario) {
+  return scenario == SNAPSHOT || scenario == SNAPSHOT_FAST ||
+         scenario == VISIBLE_SNAPSHOT || scenario == VISIBLE_MIXED;
+}
 static int snapshot(sl_t *sl, struct host *host, int present) {
-  sl_queue_entry_t entry;
+  sl_queue_entry_t entries[2];
   sl_queue_change_t change;
   sl_queue_request_t sync;
   sl_queue_request_id_t request_id = 0;
   sl_queue_result_t result;
   int status;
   char revision[32];
-  memset(&entry, 0, sizeof(entry));
-  entry.id = "entry";
-  entry.revision = "item1";
-  entry.text = "queued-marker";
-  entry.mode = SL_PROMPT_QUEUE_MODE_STEER;
+  memset(entries, 0, sizeof(entries));
+  entries[0].id = "entry";
+  entries[0].revision = "item1";
+  entries[0].text = "queued-marker";
+  entries[0].mode = SL_PROMPT_QUEUE_MODE_STEER;
+  entries[1] = entries[0];
+  entries[1].id = "second";
+  entries[1].text = "second-marker";
   memset(&change, 0, sizeof(change));
   snprintf(revision, sizeof(revision), "queue%d", ++host->revision);
   change.kind = SL_QUEUE_SNAPSHOT;
   change.revision = revision;
-  change.entries = present ? &entry : NULL;
-  change.count = change.total_count = present ? 1 : 0;
+  change.entries = present ? entries : NULL;
+  change.count = change.total_count = present ? 1 + host->extra : 0;
   if (host->revision > 1) {
     memset(&sync, 0, sizeof(sync));
     sync.operation = SL_QUEUE_SYNCHRONIZE;
@@ -83,9 +100,9 @@ static int command(sl_t *sl, const sl_watch_event_t *event, void *context) {
   if (read(event->fd, &key, 1) != 1)
     return SL_ERROR_IO;
   if (key == 'S') {
-    if (host->scenario == SNAPSHOT || host->scenario == SNAPSHOT_FAST)
+    if (snapshot_scenario(host->scenario))
       status = snapshot(sl, host, 1);
-    else if (host->scenario >= PENDING && host->scenario <= REJECTED) {
+    else if (pending_scenario(host->scenario)) {
       sl_queue_request_t offer;
       sl_queue_backend_info_t info;
       memset(&offer, 0, sizeof(offer));
@@ -98,7 +115,7 @@ static int command(sl_t *sl, const sl_watch_event_t *event, void *context) {
       status = sl_prompt_queue_append(sl, "queued-marker",
                                       host->scenario == HELD, NULL);
     }
-    if (host->scenario < PENDING || host->scenario > REJECTED)
+    if (!pending_scenario(host->scenario))
       if (sl_prompt_queue_count(sl) != 1) {
         fprintf(stderr, "queue count after start: %lu (status %d)\n",
                 (unsigned long)sl_prompt_queue_count(sl), status);
@@ -133,9 +150,32 @@ static int command(sl_t *sl, const sl_watch_event_t *event, void *context) {
   else if (key == 'Z')
     status = sl->set_prompt_queue_display_delay(sl, 0);
   else if (key == 'L') {
-    status = sl_prompt_queue_append(sl, "second-marker", 0, NULL);
-    if (status == SL_OK)
-      status = sl_prompt_queue_set_mode(sl, 1, SL_PROMPT_QUEUE_MODE_STEER);
+    if (host->scenario == VISIBLE_SNAPSHOT) {
+      host->extra = 1;
+      status = snapshot(sl, host, 1);
+    } else if (host->scenario == VISIBLE_PENDING ||
+               host->scenario == VISIBLE_MIXED) {
+      sl_queue_request_t offer;
+      sl_queue_backend_info_t info;
+      memset(&offer, 0, sizeof(offer));
+      offer.operation = SL_QUEUE_OFFER;
+      offer.text = "second-marker";
+      status = sl_queue_backend_request(sl, &offer, &host->request);
+      if (sl_queue_backend_info(sl, &info) != SL_OK ||
+          info.pending_count != (host->scenario == VISIBLE_PENDING ? 2 : 1))
+        return SL_ERROR;
+    } else {
+      int index = (int)sl_prompt_queue_count(sl);
+      status = sl_prompt_queue_append(sl, "second-marker", 0, NULL);
+      if (status == SL_OK)
+        status =
+            sl_prompt_queue_set_mode(sl, index, SL_PROMPT_QUEUE_MODE_STEER);
+      if (status == SL_OK && host->scenario == VISIBLE_DRAIN) {
+        char *text = NULL;
+        status = sl_prompt_queue_take(sl, 0, &text);
+        sl_free_string(sl, text);
+      }
+    }
   } else if (key == 'X')
     status = sl_cancel(sl);
   else
@@ -168,7 +208,8 @@ static void child(int slave, int commands, int events, int scenario,
     config.prompt_queue_display_delay_ms = 0;
   if (scenario == CUSTOM)
     config.prompt_queue_display_delay_ms = 120;
-  if (scenario >= SNAPSHOT && scenario <= REJECTED) {
+  if ((scenario >= SNAPSHOT && scenario <= REJECTED) ||
+      scenario >= VISIBLE_SNAPSHOT) {
     config.queue_backend = &backend;
     config.queue_backend_context = &host;
   }
@@ -202,11 +243,17 @@ static int run(int scenario, int native) {
   char *output = calloc(1, 65536);
   size_t used = 0, scanned = 0;
   double deadline = milliseconds() + 3000, started = 0, first = -1, second = -1;
+  double appended = -1;
   struct winsize size = {24, 100, 0, 0};
-  const char *marker =
-      scenario == SNAPSHOT || scenario == SNAPSHOT_FAST ? "S 1. queued-marker"
-      : scenario >= PENDING && scenario <= REJECTED     ? "P 1 pending"
-                                                        : "Q 1. queued-marker";
+  const char *marker = snapshot_scenario(scenario)  ? "S 1. queued-marker"
+                       : pending_scenario(scenario) ? "P 1 pending"
+                                                    : "Q 1. queued-marker";
+  const char *second_marker =
+      scenario == VISIBLE_PENDING ? "P 2 pending"
+      : scenario == VISIBLE_MIXED ? "P 1 pending"
+      : scenario == VISIBLE_DRAIN || scenario == VISIBLE_RESET
+          ? "S 1. second-marker"
+          : "S 2. second-marker";
   REQUIRE(output && openpty(&master, &slave, NULL, NULL, &size) == 0);
   REQUIRE(pipe(commands) == 0 && pipe(events) == 0);
   pid = fork();
@@ -258,10 +305,32 @@ static int run(int scenario, int native) {
     elapsed = milliseconds() - started;
     if (started && first < 0 && strstr(output, marker))
       first = elapsed;
-    if (started && second < 0 && strstr(output, "S 2. second-marker"))
+    if (started && second < 0 && strstr(output, second_marker))
       second = elapsed;
     if (started && !finished) {
-      if (scenario == HELD && strstr(output, "approval"))
+      if (scenario >= VISIBLE) {
+        if (second >= 0) {
+          REQUIRE(first >= 450 && appended >= first);
+          REQUIRE(second - appended < 800);
+          if (scenario == VISIBLE_RESET)
+            REQUIRE(second - appended >= 450);
+          else
+            REQUIRE(second - appended < 250);
+          finished = 1;
+        }
+        if (first >= 0 && !changed) {
+          REQUIRE(write(commands[1], scenario == VISIBLE_RESET ? "C" : "L",
+                        1) == 1);
+          changed = 1;
+          if (scenario != VISIBLE_RESET)
+            appended = elapsed;
+        } else if (scenario == VISIBLE_RESET && changed == 1 &&
+                   elapsed - first >= 100) {
+          REQUIRE(write(commands[1], "L", 1) == 1);
+          changed = 2;
+          appended = elapsed;
+        }
+      } else if (scenario == HELD && strstr(output, "approval"))
         finished = 1;
       else if ((scenario == EDITING || scenario == SPLIT_ESCAPE) &&
                strstr(output, "Q editing"))
@@ -403,7 +472,7 @@ int main(void) {
   if (immediate_delivery())
     return 1;
   for (native = 0; native < 2; ++native)
-    for (scenario = LOCAL; scenario <= SPLIT_ESCAPE; ++scenario)
+    for (scenario = LOCAL; scenario <= VISIBLE_MIXED; ++scenario)
       if (run(scenario, native))
         return 1;
   return 0;

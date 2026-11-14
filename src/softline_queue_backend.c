@@ -322,7 +322,7 @@ int sl_queue_backend_request_impl(sl_t *self, const sl_queue_request_t *input,
     return error(self, SL_ERROR_NOMEM, "cannot retain backend request");
   }
   pending.pending = 1;
-  pending.display_started = sl_queue_display_now();
+  pending.display_started = sl_queue_display_start(impl);
   backend->callback_active = 1;
   status = backend->callbacks.request(backend->context, &pending.value);
   backend->callback_active = 0;
@@ -450,7 +450,7 @@ static int mirror_commit(sl_t *self, backend_entry_t *entries, size_t count,
       if (serial == ULONG_MAX)
         goto invalid;
       entries[index].local_id = ++serial;
-      entries[index].display_started = sl_queue_display_now();
+      entries[index].display_started = sl_queue_display_start(impl);
     }
     if (entries[index].local_id == queue->editing.info.id &&
         entries[index].value.edit_held && entries[index].value.edit_token &&
@@ -1081,7 +1081,7 @@ void sl_backend_pump(sl_t *self) {
 }
 
 int sl_backend_notice(const sl_impl_t *impl, int64_t now, int64_t *deadline,
-                      char *text, size_t size) {
+                      int *visible, char *text, size_t size) {
   const sl_backend_t *backend = impl->backend;
   size_t index, pending = 0, rejected = 0, unknown = 0;
   if (!backend)
@@ -1097,6 +1097,7 @@ int sl_backend_notice(const sl_impl_t *impl, int64_t now, int64_t *deadline,
     else if (backend->pending[index].status == SL_QUEUE_UNKNOWN)
       ++unknown;
   }
+  *visible = pending != 0;
   if (!backend->synchronized || pending || rejected || unknown ||
       backend->total > backend->count) {
     (void)snprintf(

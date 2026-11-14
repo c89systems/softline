@@ -146,8 +146,11 @@ live scroll regions, status lines, and spinners are off; the theme is
 - `sl:queue_count()` and `sl:queue_capacity()` return the queue state.
 - `sl:set_queue_display_delay(delay_ms)` changes the queue/steer preview and
   pending-send display delay for local or backend queues. The default is 500 ms;
-  zero displays immediately. Each entry ages independently; consuming it during
-  the delay never displays it. Delivery and API counts stay immediate. Approval
+  zero displays immediately. Arrivals into an already visible queue appear
+  immediately and stay visible if older entries are consumed. After an empty
+  queue is drawn, the delay applies again. Entries added while the queue is
+  hidden age independently; consuming them during the delay never displays
+  them. Delivery and API counts stay immediate. Approval
   prompts, active edits, errors and connection notices are not delayed.
   The chat example also accepts `SOFTLINE_QUEUE_DISPLAY_DELAY_MS`.
 - `sl:inject_queued_prompt(text)` and `sl:inject_steer_prompt(text)` are the

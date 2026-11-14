@@ -54,6 +54,7 @@ typedef struct sl_prompt_queue {
   int max_entries;
   int preview_entries;
   int display_delay_ms;
+  int display_visible;
   int64_t display_deadline;
   int enabled;
   int remote;
@@ -294,10 +295,11 @@ void sl_backend_cancel_waiting(sl_impl_t *impl);
 int sl_backend_unsupported(sl_t *self);
 int sl_backend_recover_newest(sl_t *self);
 int64_t sl_queue_display_now(void);
+int64_t sl_queue_display_start(const sl_impl_t *impl);
 int sl_queue_display_ready(const sl_impl_t *impl, int64_t started, int64_t now,
                            int64_t *deadline);
 int sl_backend_notice(const sl_impl_t *impl, int64_t now, int64_t *deadline,
-                      char *text, size_t size);
+                      int *visible, char *text, size_t size);
 int sl_queue_backend_request_impl(sl_t *, const sl_queue_request_t *,
                                   sl_queue_request_id_t *);
 int sl_queue_backend_result_impl(sl_t *, const sl_queue_result_t *);
