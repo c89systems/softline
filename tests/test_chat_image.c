@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -374,25 +375,69 @@ static void stop_view(sl_t *sl, void *context) {
 }
 static int default_status_unchanged(sl_t *sl, int master) {
   char output[8192];
-  size_t used = 0;
+  size_t used = 0, scanned = 0;
   ssize_t count;
-  if (sl_set_idle_callback(sl, stop_view, NULL) != SL_OK ||
-      sl_readline(sl, "> ") != NULL || fcntl(master, F_SETFL, O_NONBLOCK))
+  pid_t child;
+  int status = 0, failed = 1;
+  double deadline = milliseconds() + 3000;
+  if (fcntl(master, F_SETFL, O_NONBLOCK))
     return -1;
-  while (used + 1 < sizeof(output)) {
-    count = read(master, output + used, sizeof(output) - used - 1);
-    if (count < 0 && errno == EINTR)
-      continue;
-    if (count <= 0)
-      break;
-    used += (size_t)count;
+  child = fork();
+  if (!child) {
+    close(master);
+    _exit(sl_set_idle_callback(sl, stop_view, NULL) == SL_OK &&
+                  sl_readline(sl, "> ") == NULL
+              ? 0
+              : 1);
   }
-  output[used] = 0;
-  return strstr(output, "HOST OWNS STATUS") &&
-                 !strstr(output, "image upload") &&
-                 !strstr(output, "server byte limit")
-             ? 0
-             : -1;
+  if (child < 0)
+    return -1;
+  output[0] = 0;
+  do {
+    struct pollfd ready;
+    const char *query;
+    pid_t done;
+    ready.fd = master;
+    ready.events = POLLIN;
+    ready.revents = 0;
+    if (poll(&ready, 1, 10) < 0 && errno != EINTR)
+      break;
+    /* Drain while the editor runs; also answer its cursor-position probe. */
+    while (used + 1 < sizeof(output)) {
+      count = read(master, output + used, sizeof(output) - used - 1);
+      if (count < 0 && errno == EINTR)
+        continue;
+      if (count <= 0)
+        break;
+      used += (size_t)count;
+    }
+    output[used] = 0;
+    if (used + 1 == sizeof(output))
+      break;
+    while ((query = strstr(output + scanned, "\033[6n")) != NULL) {
+      if (write(master, "\033[1;1R", 6) != 6)
+        goto cleanup;
+      scanned = (size_t)(query - output) + 4;
+    }
+    done = waitpid(child, &status, WNOHANG);
+    if (done == child) {
+      child = -1;
+      if (WIFEXITED(status) && WEXITSTATUS(status) == 0 &&
+          strstr(output, "HOST OWNS STATUS") &&
+          !strstr(output, "image upload") &&
+          !strstr(output, "server byte limit"))
+        failed = 0;
+      break;
+    }
+    if (done < 0)
+      break;
+  } while (milliseconds() < deadline);
+cleanup:
+  if (child > 0) {
+    kill(child, SIGKILL);
+    waitpid(child, NULL, 0);
+  }
+  return failed ? -1 : 0;
 }
 static int network_case(const char *executable, const char *build, int mode) {
   char root[4096] = {0}, path[4096], expected[8192];
@@ -407,6 +452,8 @@ static int network_case(const char *executable, const char *build, int mode) {
   sl_image_paste_id_t id;
   struct observation observation;
   sl_queue_backend_info_t info;
+  struct winsize geometry;
+  fprintf(stderr, "chat image transport case %d\n", mode);
   memset(&observation, 0, sizeof(observation));
   CHECK(snprintf(root, sizeof(root), "%s/chat-image-network-XXXXXX", build) <
         (int)sizeof(root));
@@ -417,7 +464,10 @@ static int network_case(const char *executable, const char *build, int mode) {
   CHECK(unsetenv("SOFTLINE_CHAT_IMAGE_MAX_BYTES") == 0);
   client = demo_client_create("127.0.0.1", port);
   CHECK(client != NULL);
-  CHECK(openpty(&master, &output, NULL, NULL, NULL) == 0);
+  memset(&geometry, 0, sizeof(geometry));
+  geometry.ws_row = 24;
+  geometry.ws_col = 100;
+  CHECK(openpty(&master, &output, NULL, NULL, &geometry) == 0);
   CHECK(setenv("TERM", "xterm-256color", 1) == 0);
   sl_config_init(&config);
   config.input_fd = config.output_fd = output;
