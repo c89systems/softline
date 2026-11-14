@@ -879,6 +879,8 @@ int sl_backend_submit(sl_t *self, sl_prompt_queue_mode_t mode) {
   sl_queue_request_t request;
   backend_entry_t *entry;
   int status;
+  if (sl_image_pending(impl))
+    return SL_ERROR_NOT_READY;
   if (!impl->len && !impl->prompt_queue.editing.info.id)
     return SL_OK;
   memset(&request, 0, sizeof(request));

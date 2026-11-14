@@ -125,6 +125,43 @@ static int local_cases(const char *fixture, const char *build,
   CHECK(large.length > 16u * 1024 * 1024 &&
         oversized.length > 32u * 1024 * 1024);
   CHECK(offer(&small) == 0);
+  {
+    const struct image *images[3];
+    size_t item, byte;
+    unsigned long hash;
+    char expected[80];
+    images[0] = &small;
+    images[1] = &jpeg;
+    images[2] = &large;
+    setenv("SOFTLINE_TEST_IMAGE_TEMPLATE", "/proc/softline-no-staging/*", 1);
+    CHECK(inventory(base, &before) == 0);
+    for (item = 0; item < 3; ++item) {
+      CHECK(offer((struct image *)images[item]) == 0);
+      hash = 2166136261UL;
+      for (byte = 0; byte < images[item]->length; ++byte)
+        hash = ((hash ^ images[item]->bytes[byte]) * 16777619UL) & 0xffffffffUL;
+      snprintf(expected, sizeof(expected), "%lu:%lu",
+               (unsigned long)images[item]->length, hash);
+      CHECK(run_case(fixture, base, "ab\002\026", "adapter-large", &result) ==
+            0);
+      CHECK(!strcmp(result.line, "a/backend/imageb") &&
+            !strcmp(result.error, expected));
+      CHECK(unchanged(base, &before));
+      if (getenv("SOFTLINE_TEST_LUA")) {
+        CHECK(run_case(fixture, base, "ab\002\026", "lua-adapter", &result) ==
+              0);
+        CHECK(!strcmp(result.line, "a/backend/imageb") &&
+              !strcmp(result.error, expected));
+        CHECK(unchanged(base, &before));
+      }
+    }
+    CHECK(offer(&large) == 0);
+    CHECK(run_case(fixture, base, "draft\026", "adapter", &result) == 0);
+    CHECK(!strcmp(result.line, "draft") && strstr(result.error, "byte limit") &&
+          unchanged(base, &before));
+    unsetenv("SOFTLINE_TEST_IMAGE_TEMPLATE");
+    CHECK(offer(&small) == 0);
+  }
   setenv("SSH_CONNECTION", "client 123 server 22", 1);
   CHECK(run_case(fixture, base, "ab\002\026\r", NULL, &result) == 0);
   snprintf(directory, sizeof(directory), "%s/softline", base);

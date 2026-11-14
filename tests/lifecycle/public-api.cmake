@@ -44,7 +44,7 @@ if(NOT functions STREQUAL exports)
 endif()
 section("${code}" "typedef struct sl_config {" "} sl_config_t;" config_code)
 api_names("${config_code}"
-  "[\n][ \t]*(int|size_t|char|sl_prompt_theme_t|sl_osc8_mode_t|const sl_queue_backend_t[ \t]*\\*|void[ \t]*\\*|const char[ \t]*\\*)[ \t]*([a-z][a-z0-9_]*)"
+  "[\n][ \t]*(int|size_t|char|sl_prompt_theme_t|sl_osc8_mode_t|sl_image_paste_callback_t|const sl_queue_backend_t[ \t]*\\*|void[ \t]*\\*|const char[ \t]*\\*)[ \t]*([a-z][a-z0-9_]*)"
   2 config)
 section("${binding}" "static void softline_lua_config(" "\n}\n" parser)
 api_names("${parser}" "lua_getfield\\(L,[ \t\r\n]*index,[ \t\r\n]*\"([a-z][a-z0-9_]*)\"" 1 lua_config)

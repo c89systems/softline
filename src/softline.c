@@ -228,7 +228,7 @@ static int sl_output_write_validated(sl_t *self, const char *bytes,
                                      size_t length);
 
 static sl_impl_t *sl_impl(sl_t *self) {
-  if (!self)
+  if (!self || (self->impl && ((sl_impl_t *)self->impl)->image_callback_active))
     return NULL;
   return (sl_impl_t *)self->impl;
 }
@@ -698,6 +698,10 @@ static int sl_statusline_text_valid(const char *text) {
     pos += n;
   }
   return 1;
+}
+
+int sl_image_valid_path(const char *path) {
+  return sl_statusline_text_valid(path);
 }
 
 static int sl_quoted_prompt_text_valid(const char *text) {
@@ -1304,6 +1308,8 @@ static int sl_buf_replace(sl_t *self, size_t at, size_t removed,
     memmove(impl->buf + at, text, inserted);
   impl->len = len;
   impl->buf[len] = '\0';
+  impl->image_literal = 0;
+  sl_image_changed(self, at, removed, inserted);
   sl_completion_changed(impl, at, removed, inserted, 0);
   impl->edit.changed = 1;
   impl->preferred_column_valid = 0;
@@ -1316,6 +1322,8 @@ static int sl_buf_set(sl_t *self, const char *s) {
   impl = sl_impl(self);
   if (!impl)
     return -1;
+  sl_image_invalidate(self, "image upload cancelled: draft replaced");
+  impl->image_literal = 0;
   n = s ? strlen(s) : 0;
   if (sl_buf_reserve(self, n + 1) != 0)
     return -1;
@@ -1333,6 +1341,26 @@ static int sl_buf_set(sl_t *self, const char *s) {
   impl->edit.changed = 1;
   impl->preferred_column_valid = 0;
   return 0;
+}
+
+int sl_image_insert_result(sl_t *self, size_t anchor, const char *path) {
+  sl_impl_t *impl = sl_impl(self);
+  size_t cursor, length = strlen(path);
+  if (!impl || anchor > impl->len || length > impl->line_max_len - impl->len)
+    return SL_ERROR_INVALID;
+  cursor = impl->cursor;
+  sl_edit_end(&impl->edit);
+  impl->edit.last_command = SL_EDIT_OTHER;
+  sl_edit_begin(&impl->edit, SL_EDIT_OTHER);
+  sl_completion_reset(&impl->completion);
+  if (sl_buf_replace(self, anchor, 0, path, length) != 0) {
+    sl_edit_end(&impl->edit);
+    return SL_ERROR;
+  }
+  impl->cursor = cursor >= anchor ? cursor + length : cursor;
+  impl->image_literal = 1;
+  sl_edit_end(&impl->edit);
+  return SL_OK;
 }
 
 static int sl_buf_insert(sl_t *self, size_t at, const char *s, size_t n) {
@@ -1374,6 +1402,12 @@ static int sl_buf_set_public(sl_t *self, const char *text) {
   sl_impl_t *impl = sl_impl(self);
   if (!impl || !text)
     return SL_ERROR_INVALID;
+  if (strlen(text) > impl->line_max_len) {
+    sl_set_error(self, "edit exceeds the line limit");
+    return SL_ERROR;
+  }
+  sl_image_invalidate(self, "image upload cancelled: draft replaced");
+  impl->image_literal = 0;
   if (sl_buf_replace(self, 0, impl->len, text, strlen(text)) != 0)
     return SL_ERROR;
   /* Replacing the draft is a new context even when the bytes are identical. */
@@ -1446,7 +1480,7 @@ static void sl_completion_prepare(sl_t *self) {
   size_t start, end, i;
   int status;
   sl_completion_sink_t sink;
-  if (!state->provider_count || !impl->active_readline ||
+  if (!state->provider_count || !impl->active_readline || impl->image_literal ||
       impl->output_write_active || state->resolving ||
       impl->history_search_active || impl->bracketed_paste)
     return;
@@ -1555,6 +1589,10 @@ static int sl_submit_method(sl_t *self) {
   impl = sl_impl(self);
   if (!impl || !impl->active_readline)
     return SL_ERROR_INVALID;
+  if (sl_image_pending(impl)) {
+    sl_set_error(self, "image upload is pending");
+    return SL_ERROR_NOT_READY;
+  }
   impl->request_submit = 1;
   return SL_OK;
 }
@@ -3321,7 +3359,14 @@ static int sl_render_append_queue_panel(sl_t *self, sl_render_t *render,
   char summary[64];
   char backend_notice[192];
   impl = sl_impl(self);
-  if (!sl_prompt_queue_enabled(impl) || !render)
+  if (!impl || !render)
+    return 0;
+  if (impl->image_notice[0] &&
+      (sl_render_new_row_at(render, 0, 0) != 0 ||
+       sl_queue_row_append_preview(&render->rows[render->count - 1],
+                                   impl->image_notice, width, "") != 0))
+    return -1;
+  if (!sl_prompt_queue_enabled(impl))
     return 0;
   queue = &impl->prompt_queue;
   style = "";
@@ -5641,9 +5686,10 @@ static ssize_t sl_pending_input_take(sl_impl_t *impl, char *ch) {
  * are always dispatched on this readline owner's thread. */
 static ssize_t sl_read_input_byte(sl_t *self, char *ch, int timeout_ms) {
   enum { SL_WATCH_DISPATCH_BUDGET = 8, SL_UI_TICK_CADENCE_MS = 100 };
-  struct pollfd fds[SL_MAX_WATCHES + 1];
-  sl_watch_id_t ids[SL_MAX_WATCHES + 1];
-  unsigned int slots[SL_MAX_WATCHES + 1];
+  struct pollfd fds[SL_MAX_WATCHES + SL_IMAGE_PASTE_MAX_FDS + 1];
+  sl_watch_id_t ids[SL_MAX_WATCHES + SL_IMAGE_PASTE_MAX_FDS + 1];
+  unsigned int slots[SL_MAX_WATCHES + SL_IMAGE_PASTE_MAX_FDS + 1];
+  sl_image_paste_wait_t image_wait;
   sl_impl_t *impl;
   int count;
   int i;
@@ -5658,6 +5704,10 @@ static ssize_t sl_read_input_byte(sl_t *self, char *ch, int timeout_ms) {
   impl = sl_impl(self);
   if (!impl)
     return -1;
+  (void)sl_image_pump(self);
+  if (sl_image_prepare(self, &image_wait) != SL_OK)
+    return -1;
+  errno = 0;
   if (sl_pending_input_take(impl, ch) == 1)
     return 1;
   sl_terminal_reap(impl);
@@ -5681,7 +5731,18 @@ static ssize_t sl_read_input_byte(sl_t *self, char *ch, int timeout_ms) {
     slots[count] = (unsigned int)slot;
     count++;
   }
+  for (i = 0; i < (int)image_wait.count; ++i) {
+    fds[count].fd = image_wait.fds[i].fd;
+    fds[count].events =
+        sl_watch_requested_poll_events(image_wait.fds[i].events);
+    fds[count].revents = 0;
+    ids[count] = 0;
+    slots[count++] = 0;
+  }
   poll_timeout_ms = timeout_ms;
+  if (image_wait.timeout_ms >= 0 &&
+      (poll_timeout_ms < 0 || image_wait.timeout_ms < poll_timeout_ms))
+    poll_timeout_ms = image_wait.timeout_ms;
   if (poll_timeout_ms < 0 &&
       ((impl->request_queue_dispatch && !impl->len &&
         !impl->prompt_queue.editing.info.id && !impl->history_search_active &&
@@ -5690,7 +5751,7 @@ static ssize_t sl_read_input_byte(sl_t *self, char *ch, int timeout_ms) {
        (!impl->prompt_queue.approval_id &&
         sl_prompt_approval_index(impl, 0) >= 0)))
     poll_timeout_ms = 0;
-  if (poll_timeout_ms < 0 &&
+  if ((poll_timeout_ms < 0 || poll_timeout_ms > SL_UI_TICK_CADENCE_MS) &&
       (impl->terminal_children || impl->idle_callback ||
        sl_surface_is_native(impl->output_surface) ||
        (impl->statusline.enabled && impl->statusline.spinner &&
@@ -6583,6 +6644,8 @@ static int sl_prompt_queue_admit(sl_t *self, sl_prompt_queue_mode_t mode,
   int promote = mode == SL_PROMPT_QUEUE_MODE_STEER;
   int index = editing ? queue->editing_index : queue->len;
   *admitted = 0;
+  if (sl_image_pending(impl))
+    return SL_ERROR_NOT_READY;
   if (!queue->enabled || !impl->len)
     return SL_OK;
   if (editing) {
@@ -6670,6 +6733,17 @@ static int sl_handle_prompt_queue_key(sl_t *self, int key, int *handled,
   if (!sl_prompt_queue_enabled(impl))
     return SL_OK;
   keys = &impl->prompt_queue.keys;
+  if (sl_image_pending(impl) &&
+      (key == SL_KEY_ENTER ||
+       (keys->enqueue_draft != SL_KEY_NONE &&
+        key == (int)keys->enqueue_draft) ||
+       (keys->submit_or_promote_newest != SL_KEY_NONE &&
+        key == (int)keys->submit_or_promote_newest))) {
+    *handled = 1;
+    sl_set_error(self, "image upload is pending");
+    sl_prompt_queue_bell(impl);
+    return SL_OK;
+  }
   if ((keys->enqueue_draft != SL_KEY_NONE && key == (int)keys->enqueue_draft) ||
       (keys->submit_or_promote_newest != SL_KEY_NONE &&
        key == (int)keys->submit_or_promote_newest) ||
@@ -7305,6 +7379,16 @@ static char *sl_readline_impl(sl_t *self, const char *prompt,
       key = sl_read_paste_input(self, paste_bytes, &paste_len);
     else
       key = sl_read_key(self);
+    if (!impl->bracketed_paste && sl_image_pending(impl)) {
+      if (key == SL_KEY_CTRL_C) {
+        sl_image_invalidate(self, "image upload cancelled");
+        key = SL_KEY_UNKNOWN;
+      } else if (key == SL_KEY_ENTER || key == SL_KEY_ALT_ENTER) {
+        sl_set_error(self, "image upload is pending");
+        sl_prompt_queue_bell(impl);
+        key = SL_KEY_UNKNOWN;
+      }
+    }
     /* Tab may complete held text and earlier typing not yet available in the
      * draft. Classify it only after the edit outcome and deferred input. */
     if ((waiting_edit || sl_backend_wait_key(impl, key)) &&
@@ -7351,8 +7435,10 @@ static char *sl_readline_impl(sl_t *self, const char *prompt,
         key = SL_KEY_UNKNOWN;
       }
     }
-    if (key == SL_KEY_TAB)
+    if (key == SL_KEY_TAB) {
+      impl->image_literal = 0;
       sl_completion_prepare(self);
+    }
     if (key != SL_KEY_NONE &&
         (key != SL_KEY_CTRL_L || sl_find_key_binding(impl, (sl_key_t)key))) {
       int command = SL_EDIT_OTHER;
@@ -7385,9 +7471,9 @@ static char *sl_readline_impl(sl_t *self, const char *prompt,
      * decoded. Preserve a real key; release FIFO work only on an otherwise
      * idle iteration. */
     if (key == SL_KEY_NONE && queue_dispatch && impl->request_queue_dispatch &&
-        impl->len == 0 && !impl->prompt_queue.editing.info.id &&
-        !impl->history_search_active && !impl->bracketed_paste &&
-        !impl->control_x_pending &&
+        !sl_image_pending(impl) && impl->len == 0 &&
+        !impl->prompt_queue.editing.info.id && !impl->history_search_active &&
+        !impl->bracketed_paste && !impl->control_x_pending &&
         sl_prompt_queue_first_queued(&impl->prompt_queue) >= 0) {
       queued = sl_prompt_queue_deliver_raw(
           &impl->prompt_queue,
@@ -7531,6 +7617,11 @@ static char *sl_readline_impl(sl_t *self, const char *prompt,
         break;
       }
       if (action == SL_KEY_ACTION_SUBMIT) {
+        if (sl_image_pending(impl)) {
+          impl->request_submit = 0;
+          sl_set_error(self, "image upload is pending");
+          break;
+        }
         sl_history_search_accept(self, &search);
         done = 1;
         break;
@@ -7750,9 +7841,11 @@ static char *sl_readline_impl(sl_t *self, const char *prompt,
           sl_set_error(self, "invalid draft undo state");
           failed = 1;
           done = 1;
-        } else if (undone)
+        } else if (undone) {
+          sl_image_changed(self, change.at, change.removed, change.inserted);
           sl_completion_changed(impl, change.at, change.removed,
                                 change.inserted, 1);
+        }
         break;
       }
       case SL_KEY_CTRL_Y:
@@ -7778,6 +7871,10 @@ static char *sl_readline_impl(sl_t *self, const char *prompt,
         char error[SL_ERROR_LEN];
         if (impl->disable_image_paste) {
           sl_set_error(self, "clipboard image paste is disabled");
+        } else if (impl->image_callback) {
+          sl_image_paste_id_t id;
+          if (sl_image_start(self, &id) != SL_OK)
+            sl_prompt_queue_bell(impl);
         } else if (sl_clipboard_save_image(impl->image_paste_path_template,
                                            &path, error, sizeof(error)) != 0) {
           sl_set_error(self, error);
@@ -8034,6 +8131,8 @@ static char *sl_readline_impl(sl_t *self, const char *prompt,
   sl_edit_end(&impl->edit);
   impl->edit.enabled = 0;
   impl->active_readline = 0;
+  if (!suspended)
+    sl_image_invalidate(self, "image upload cancelled: editor exited");
   if (suspended) {
     /* Only the editor continuation is retained. The owner closes the output
      * session before a child runs; producer bytes are never saved or replayed.
@@ -8254,6 +8353,8 @@ static char *sl_next_prompt_method(sl_t *self, const char *prompt,
 
 static void sl_destroy_method(sl_t *self) {
   sl_impl_t *impl;
+  if (self && self->impl && ((sl_impl_t *)self->impl)->image_callback_active)
+    return;
   impl = sl_impl(self);
   if (!self)
     return;
@@ -8273,6 +8374,7 @@ static void sl_destroy_method(sl_t *self) {
     return;
   }
   if (impl) {
+    sl_image_destroy(self);
     sl_terminal_cleanup(impl);
     sl_backend_destroy(self);
     if (sl_surface_is_native(impl->output_surface))
@@ -8869,6 +8971,10 @@ static int sl_prompt_queue_enqueue_draft_method(sl_t *self) {
   sl_impl_t *impl;
   int rc, managed_edit;
   impl = sl_impl(self);
+  if (sl_image_pending(impl)) {
+    sl_set_error(self, "image upload is pending");
+    return SL_ERROR_NOT_READY;
+  }
   if (impl && sl_completion_finish(self) != SL_OK)
     return SL_ERROR;
   if (impl && impl->backend)
@@ -9466,6 +9572,12 @@ void sl_config_init(sl_config_t *config) {
   config->clear_prompt_on_exit = 0;
   config->disable_image_paste = 0;
   config->image_paste_path_template = NULL;
+  config->image_paste_callback = NULL;
+  config->image_paste_context = NULL;
+  config->image_paste_max_bytes = 0;
+  config->image_paste_source_timeout_ms = 0;
+  config->image_paste_host_timeout_ms = 0;
+  config->image_paste_total_timeout_ms = 0;
   config->queue_backend = NULL;
   config->queue_backend_context = NULL;
   config->osc8_mode = SL_OSC8_OFF;
@@ -9484,6 +9596,11 @@ static sl_t *sl_create_with_config_impl(const sl_config_t *config) {
       (!config->queue_backend && config->queue_backend_context) ||
       config->live_scroll_region < 0 || config->clear_prompt_on_exit < 0 ||
       config->disable_image_paste < 0 ||
+      (!config->image_paste_callback && config->image_paste_context) ||
+      config->image_paste_max_bytes > (size_t)INT_MAX ||
+      config->image_paste_source_timeout_ms < 0 ||
+      config->image_paste_host_timeout_ms < 0 ||
+      config->image_paste_total_timeout_ms < 0 ||
       !sl_clipboard_valid_path_template(config->image_paste_path_template) ||
       config->prompt_queue < 0 || config->prompt_queue_max_entries < 1 ||
       config->prompt_queue_preview_entries < 1 ||
@@ -9504,6 +9621,12 @@ static sl_t *sl_create_with_config_impl(const sl_config_t *config) {
     return NULL;
   }
   self->readline = sl_readline_method;
+  self->image_paste_start = sl_image_start;
+  self->image_paste_prepare = sl_image_prepare;
+  self->image_paste_pump = sl_image_pump;
+  self->image_paste_resume = sl_image_resume;
+  self->image_paste_complete = sl_image_complete;
+  self->image_paste_cancel = sl_image_cancel;
   self->set_completion_providers = sl_set_completion_providers_method;
   self->set_osc8_mode = sl_set_osc8_mode_method;
   self->get_osc8_info = sl_get_osc8_info_method;
@@ -9607,6 +9730,19 @@ static sl_t *sl_create_with_config_impl(const sl_config_t *config) {
   impl->live_scroll_region = config->live_scroll_region;
   impl->clear_prompt_on_exit = config->clear_prompt_on_exit;
   impl->disable_image_paste = config->disable_image_paste;
+  impl->image_callback = config->image_paste_callback;
+  impl->image_context = config->image_paste_context;
+  impl->image_limit =
+      config->image_paste_max_bytes ? config->image_paste_max_bytes : 10000000u;
+  impl->image_source_timeout = config->image_paste_source_timeout_ms
+                                   ? config->image_paste_source_timeout_ms
+                                   : 10000;
+  impl->image_host_timeout = config->image_paste_host_timeout_ms
+                                 ? config->image_paste_host_timeout_ms
+                                 : 30000;
+  impl->image_total_timeout = config->image_paste_total_timeout_ms
+                                  ? config->image_paste_total_timeout_ms
+                                  : 120000;
   if (config->image_paste_path_template) {
     impl->image_paste_path_template = strdup(config->image_paste_path_template);
     if (!impl->image_paste_path_template) {

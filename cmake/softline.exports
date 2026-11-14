@@ -96,3 +96,9 @@ sl_set_prompt_queue_policy
 sl_prompt_queue_set_executable
 sl_get_prompt_queue_stopped
 sl_prompt_queue_resume
+sl_image_paste_start
+sl_image_paste_prepare
+sl_image_paste_pump
+sl_image_paste_resume
+sl_image_paste_complete
+sl_image_paste_cancel

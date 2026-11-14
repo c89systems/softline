@@ -739,7 +739,7 @@ for handoff; backend acceptance arrives later. They cannot reenter Softline.
 All copied text is bounded by `line_max_len`, backend IDs/revisions/tokens by
 127 bytes, and snapshots by `prompt_queue_max_entries`. No network or storage
 implementation is imposed by Softline. The C constructor uses equivalent
-callbacks and a borrowed context; rebuild C/Lua consumers for shared ABI 4.
+callbacks and a borrowed context; rebuild C/Lua consumers for shared ABI 5.
 
 - `sl:queue_backend_request(request)` returns a per-handle request ID, or
   `nil, status`. Request fields are `operation`, `item_id`, `item_revision`,
@@ -948,3 +948,50 @@ local terminal modes and the suspended draft/cursor/undo/queue holds on return.
 Enter then `~.` works even while setup or transport I/O is stalled; `~~` at the
 start of a line sends one literal tilde. Oversized pending input fails explicitly
 instead of silently dropping bytes. See [the full contract](../docs/terminal-handoff-design.md).
+
+## Streaming image paste
+
+`image_paste_callback` (default nil) receives PNG/JPEG clipboard data instead of
+saving an image locally. `image_paste_context` is any retained Lua value passed
+as the first callback argument; the second is an event table. Callback/context
+cycles are collectible. Callbacks run synchronously in the coroutine driving
+readline, next_prompt or the explicit pump/cancel operation, through a protected
+Lua frame. They must return promptly without yielding or reentering the editor.
+
+`image_paste_max_bytes` defaults to 10,000,000 bytes (10 MB) when zero. Positive
+values select a per-image cap, at most INT_MAX. `image_paste_source_timeout_ms`,
+`image_paste_host_timeout_ms` and `image_paste_total_timeout_ms` use zero for
+10,000, 30,000 and 120,000 milliseconds respectively. Negative values are invalid.
+See [the full image contract](../docs/image-paste.md) for editing, ownership,
+resource bounds and source-vs-host deadline semantics.
+
+Events use `softline.IMAGE_PASTE_BEGIN`, `softline.IMAGE_PASTE_DATA`,
+`softline.IMAGE_PASTE_END`, `softline.IMAGE_PASTE_ABORT` and
+`softline.IMAGE_PASTE_DONE`. DONE confirms successful path insertion; ABORT
+confirms failure/cancellation. Their return values are ignored. Fields are `id`,
+`operation`, `media_type`, `filename`, `offset`, `length`, `data` and `reason`.
+DATA is a binary Lua string, including embedded NULs. Return true or softline.OK
+only after consuming/copying the entire chunk. Return softline.ERROR_NOT_READY
+only for DATA to pause without consuming it. Other returns or a Lua exception
+abort the upload; the exception is available through `sl:last_error()`.
+
+- `sl:image_paste_start()` returns a transfer ID or nil, status. Native Ctrl-V
+  starts the same image-only handover. File clipboard lists are not uploads.
+- `sl:image_paste_prepare()` returns `{fds={{fd=..., events=...}, ...},
+  timeout_ms=...}` for an external owner loop. Descriptors belong to Softline.
+- `sl:image_paste_pump()` advances bounded work without waiting. Native editing
+  automatically prepares and pumps while continuing to handle terminal input.
+- `sl:image_paste_resume(id)` permits retry of the same paused chunk.
+- `sl:image_paste_complete(id, absolute_path)` acknowledges published backend
+  storage after END. The path is inserted at the originating draft anchor on a
+  subsequent safe dispatch, as one undoable edit. Use
+  `sl:image_paste_complete(id, nil, reason)` for backend failure.
+- `sl:image_paste_cancel(id)` aborts the transfer and preserves draft text.
+  Ctrl-C does this while an upload is pending; ordinary interrupt behavior
+  applies otherwise. Enter/Alt-Enter retain drafts with pending uploads.
+
+Mutation methods return true or nil, status. Stale IDs, duplicate notifications
+and invalid ordering return softline.ERROR_INVALID. Metadata/paths are literal;
+no completion, prompt submission, history append or server-file deletion occurs
+as a consequence of progress or acknowledgement. Without a callback, standalone
+image saving remains available. Rebuild C and Lua consumers for ABI 5.

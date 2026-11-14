@@ -101,7 +101,6 @@ void sl_clipboard_discard_image(const char *path, const char *path_template) {
 
 #define SL_IMAGE_MAX_BYTES (32u * 1024u * 1024u)
 #define SL_CLIPBOARD_TIMEOUT_MS 10000
-#define SL_X11_MAX_PACKET (1024u * 1024u + 32u)
 #define SL_X11_PROPERTY_NOTIFY 28
 #define SL_X11_SELECTION_NOTIFY 31
 #define SL_X11_PROPERTY_CHANGE_MASK (1u << 22)
@@ -112,7 +111,6 @@ typedef struct {
   int fd;
   uint16_t sequence;
   uint32_t resource_base, resource_mask, root;
-  int64_t deadline;
   int peer_family;
   unsigned char peer_address[16];
 } sl_x11_t;
@@ -156,51 +154,6 @@ static int64_t sl_now_ms(void) {
   return (int64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000;
 }
 
-static int sl_x11_poll(sl_x11_t *x, short events) {
-  struct pollfd fd;
-  int64_t remaining;
-  int result;
-  fd.fd = x->fd;
-  fd.events = events;
-  for (;;) {
-    remaining = x->deadline - sl_now_ms();
-    if (remaining <= 0 || remaining > SL_CLIPBOARD_TIMEOUT_MS)
-      return -1;
-    fd.revents = 0;
-    result = poll(&fd, 1, (int)remaining);
-    if (result < 0 && errno == EINTR)
-      continue;
-    return result > 0 && (fd.revents & events) &&
-                   !(fd.revents & (POLLERR | POLLHUP | POLLNVAL))
-               ? 0
-               : -1;
-  }
-}
-
-static int sl_x11_io(sl_x11_t *x, void *data, size_t length, int writing) {
-  unsigned char *bytes = data;
-  ssize_t count;
-  while (length) {
-    /* A responsive peer must not extend the paste's overall deadline. */
-    if (sl_now_ms() >= x->deadline)
-      return -1;
-    count = writing ? send(x->fd, bytes, length, MSG_NOSIGNAL)
-                    : recv(x->fd, bytes, length, 0);
-    if (count > 0) {
-      bytes += count;
-      length -= (size_t)count;
-      continue;
-    }
-    if (count < 0 && errno == EINTR)
-      continue;
-    if (count < 0 && (errno == EAGAIN || errno == EWOULDBLOCK) &&
-        sl_x11_poll(x, writing ? POLLOUT : POLLIN) == 0)
-      continue;
-    return -1;
-  }
-  return 0;
-}
-
 static int sl_x11_parse_display(const char *value, sl_x11_display_t *display) {
   const char *colon, *end;
   size_t host_len;
@@ -238,88 +191,6 @@ static int sl_x11_parse_display(const char *value, sl_x11_display_t *display) {
     end = parsed;
   }
   return *end == '\0' ? 0 : -1;
-}
-
-static int sl_x11_connect(sl_x11_t *x, const sl_x11_display_t *display) {
-  int fd = -1, result, flags;
-  socklen_t result_size;
-  struct sockaddr_storage peer;
-  struct sockaddr_un unix_addr;
-  struct ares_addrinfo *addresses = NULL;
-  struct ares_addrinfo_node *item;
-  char port[8];
-  if (display->local) {
-    memset(&unix_addr, 0, sizeof(unix_addr));
-    unix_addr.sun_family = AF_UNIX;
-    (void)snprintf(unix_addr.sun_path, sizeof(unix_addr.sun_path),
-                   "/tmp/.X11-unix/X%u", display->display);
-    fd = socket(AF_UNIX, SOCK_STREAM, 0);
-    if (fd < 0)
-      return -1;
-    flags = fcntl(fd, F_GETFL, 0);
-    if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0)
-      goto fail;
-    result = connect(fd, (struct sockaddr *)&unix_addr, sizeof(unix_addr));
-    if (result < 0 && errno != EINPROGRESS)
-      goto fail;
-    x->fd = fd;
-    if (result < 0 && sl_x11_poll(x, POLLOUT) != 0)
-      goto fail;
-  } else {
-    (void)snprintf(port, sizeof(port), "%u", 6000 + display->display);
-    if (sl_resolve(display->host, port, x->deadline, NULL, &addresses) != 0)
-      return -1;
-    for (item = addresses->nodes; item; item = item->ai_next) {
-      fd = socket(item->ai_family, item->ai_socktype, item->ai_protocol);
-      if (fd < 0)
-        continue;
-      flags = fcntl(fd, F_GETFL, 0);
-      if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
-        close(fd);
-        fd = -1;
-        continue;
-      }
-      result = connect(fd, item->ai_addr, item->ai_addrlen);
-      if (result < 0 && errno != EINPROGRESS) {
-        close(fd);
-        fd = -1;
-        continue;
-      }
-      x->fd = fd;
-      if (result == 0 || sl_x11_poll(x, POLLOUT) == 0) {
-        result_size = sizeof(result);
-        if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &result, &result_size) == 0 &&
-            result == 0)
-          break;
-      }
-      close(fd);
-      fd = -1;
-      x->fd = -1;
-    }
-    sl_resolve_free(addresses);
-    if (fd < 0)
-      return -1;
-  }
-  result_size = sizeof(result);
-  if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &result, &result_size) != 0 ||
-      result != 0)
-    goto fail;
-  result_size = sizeof(peer);
-  if (getpeername(fd, (struct sockaddr *)&peer, &result_size) != 0)
-    goto fail;
-  x->peer_family = peer.ss_family;
-  if (peer.ss_family == AF_INET)
-    memcpy(x->peer_address, &((const struct sockaddr_in *)&peer)->sin_addr, 4);
-  else if (peer.ss_family == AF_INET6)
-    memcpy(x->peer_address, &((const struct sockaddr_in6 *)&peer)->sin6_addr,
-           16);
-  else if (peer.ss_family != AF_UNIX)
-    goto fail;
-  return 0;
-fail:
-  close(fd);
-  x->fd = -1;
-  return -1;
 }
 
 /* Xauthority records use network-order lengths even for little-endian X11. */
@@ -394,350 +265,6 @@ static int sl_x11_authority(const sl_x11_display_t *display, const sl_x11_t *x,
   }
   fclose(file);
   return best;
-}
-
-static int sl_x11_setup(sl_x11_t *x, const sl_x11_display_t *display,
-                        int *rejected) {
-  unsigned char cookie[256], request[8 + 20 + 256 + 4], head[8];
-  unsigned char *reply;
-  size_t cookie_len = 0, length, cursor;
-  uint16_t vendor_len;
-  unsigned int formats, roots, index;
-  uint32_t depths, visuals, j;
-  (void)sl_x11_authority(display, x, cookie, &cookie_len);
-  memset(request, 0, sizeof(request));
-  request[0] = 'l';
-  sl_put16(request + 2, 11);
-  if (cookie_len) {
-    sl_put16(request + 6, 18);
-    sl_put16(request + 8, (uint16_t)cookie_len);
-    memcpy(request + 12, "MIT-MAGIC-COOKIE-1", 18);
-    memcpy(request + 12 + 20, cookie, cookie_len);
-  }
-  length = 12 + (cookie_len ? 20 + ((cookie_len + 3) & ~(size_t)3) : 0);
-  if (sl_x11_io(x, request, length, 1) != 0 ||
-      sl_x11_io(x, head, sizeof(head), 0) != 0)
-    return -1;
-  length = (size_t)sl_get16(head + 6) * 4;
-  if (head[0] != 1) {
-    *rejected = head[0] == 0 || head[0] == 2;
-    return -1;
-  }
-  if (length < 32 || length > SL_X11_MAX_PACKET)
-    return -1;
-  reply = malloc(length);
-  if (!reply)
-    return -1;
-  if (sl_x11_io(x, reply, length, 0) != 0)
-    goto fail;
-  x->resource_base = sl_get32(reply + 4);
-  x->resource_mask = sl_get32(reply + 8);
-  vendor_len = sl_get16(reply + 16);
-  roots = reply[20];
-  formats = reply[21];
-  cursor = 32 + ((vendor_len + 3u) & ~3u) + formats * 8u;
-  for (index = 0; index < roots; ++index) {
-    if (cursor + 40 > length)
-      goto fail;
-    if (index == display->screen) {
-      x->root = sl_get32(reply + cursor);
-      free(reply);
-      return x->resource_mask && x->root ? 0 : -1;
-    }
-    depths = reply[cursor + 39];
-    cursor += 40;
-    for (j = 0; j < depths; ++j) {
-      if (cursor + 8 > length)
-        goto fail;
-      visuals = sl_get16(reply + cursor + 2);
-      cursor += 8 + (size_t)visuals * 24;
-      if (cursor > length)
-        goto fail;
-    }
-  }
-fail:
-  free(reply);
-  return -1;
-}
-
-/* Status is separate from the wire sequence: zero is valid after wraparound.
- * Requests are synchronous, so reply callers use x->sequence after success. */
-static int sl_x11_request(sl_x11_t *x, const unsigned char *data,
-                          size_t length) {
-  if (sl_x11_io(x, (void *)data, length, 1) != 0)
-    return -1;
-  ++x->sequence;
-  return 0;
-}
-
-/* The only subscribed events are PropertyNotify and SelectionNotify. */
-static unsigned char *sl_x11_packet(sl_x11_t *x, size_t *size) {
-  unsigned char head[32], *packet;
-  size_t extra = 0;
-  uint32_t units;
-  if (sl_x11_io(x, head, sizeof(head), 0) != 0)
-    return NULL;
-  if (head[0] == 1 || (head[0] & 127) == 35) {
-    units = sl_get32(head + 4);
-    if (units > (SL_X11_MAX_PACKET - 32) / 4)
-      return NULL;
-    extra = (size_t)units * 4;
-  }
-  packet = malloc(32 + extra);
-  if (!packet)
-    return NULL;
-  memcpy(packet, head, 32);
-  if (extra && sl_x11_io(x, packet + 32, extra, 0) != 0) {
-    free(packet);
-    return NULL;
-  }
-  *size = 32 + extra;
-  return packet;
-}
-
-static unsigned char *sl_x11_reply(sl_x11_t *x, uint16_t sequence,
-                                   size_t *size) {
-  unsigned char *packet;
-  for (;;) {
-    packet = sl_x11_packet(x, size);
-    if (!packet)
-      return NULL;
-    if (packet[0] == 0) {
-      free(packet);
-      return NULL;
-    }
-    if (packet[0] == 1 && sl_get16(packet + 2) == sequence)
-      return packet;
-    free(packet);
-  }
-}
-
-static unsigned char *sl_x11_event(sl_x11_t *x) {
-  unsigned char *packet;
-  size_t size;
-  for (;;) {
-    packet = sl_x11_packet(x, &size);
-    if (!packet)
-      return NULL;
-    if (packet[0] == 0) {
-      free(packet);
-      return NULL;
-    }
-    if (packet[0] != 1)
-      return packet;
-    free(packet);
-  }
-}
-
-static uint32_t sl_x11_atom(sl_x11_t *x, const char *name) {
-  unsigned char request[64], *reply;
-  size_t size, length = strlen(name);
-  uint32_t atom;
-  if (length > sizeof(request) - 8)
-    return 0;
-  memset(request, 0, sizeof(request));
-  request[0] = 16;
-  sl_put16(request + 2, (uint16_t)(2 + (length + 3) / 4));
-  sl_put16(request + 4, (uint16_t)length);
-  memcpy(request + 8, name, length);
-  if (sl_x11_request(x, request, 8 + ((length + 3) & ~(size_t)3)) != 0)
-    return 0;
-  reply = sl_x11_reply(x, x->sequence, &size);
-  if (!reply)
-    return 0;
-  atom = sl_get32(reply + 8);
-  free(reply);
-  return atom;
-}
-
-static int sl_x11_create_window(sl_x11_t *x, uint32_t window) {
-  unsigned char request[36];
-  memset(request, 0, sizeof(request));
-  request[0] = 1;
-  sl_put16(request + 2, 9);
-  sl_put32(request + 4, window);
-  sl_put32(request + 8, x->root);
-  sl_put16(request + 16, 1);
-  sl_put16(request + 18, 1);
-  sl_put16(request + 22, 2);
-  sl_put32(request + 28, SL_X11_WINDOW_EVENT_MASK);
-  sl_put32(request + 32, SL_X11_PROPERTY_CHANGE_MASK);
-  return sl_x11_request(x, request, sizeof(request));
-}
-
-static int sl_x11_delete_property(sl_x11_t *x, uint32_t window,
-                                  uint32_t property) {
-  unsigned char request[12] = {0};
-  request[0] = 19;
-  sl_put16(request + 2, 3);
-  sl_put32(request + 4, window);
-  sl_put32(request + 8, property);
-  return sl_x11_request(x, request, sizeof(request));
-}
-
-static int sl_x11_wait_property(sl_x11_t *x, uint32_t window, uint32_t property,
-                                uint32_t *timestamp) {
-  unsigned char *event;
-  for (;;) {
-    event = sl_x11_event(x);
-    if (!event)
-      return -1;
-    if ((event[0] & 127) == SL_X11_PROPERTY_NOTIFY &&
-        sl_get32(event + 4) == window && sl_get32(event + 8) == property &&
-        event[16] == 0) {
-      if (timestamp)
-        *timestamp = sl_get32(event + 12);
-      free(event);
-      return 0;
-    }
-    free(event);
-  }
-}
-
-static int sl_x11_timestamp(sl_x11_t *x, uint32_t window, uint32_t property,
-                            uint32_t *timestamp) {
-  unsigned char request[28] = {0};
-  request[0] = 18;
-  sl_put16(request + 2, 7);
-  sl_put32(request + 4, window);
-  sl_put32(request + 8, property);
-  sl_put32(request + 12, SL_X11_ATOM_STRING);
-  request[16] = 8;
-  sl_put32(request + 20, 1);
-  request[24] = 'x';
-  if (sl_x11_request(x, request, sizeof(request)) != 0)
-    return -1;
-  return sl_x11_wait_property(x, window, property, timestamp);
-}
-
-static int sl_x11_select_image(sl_x11_t *x, uint32_t window, uint32_t selection,
-                               uint32_t property, uint32_t target,
-                               uint32_t timestamp) {
-  unsigned char request[24] = {0}, *event;
-  if (sl_x11_delete_property(x, window, property) != 0)
-    return -1;
-  request[0] = 24;
-  sl_put16(request + 2, 6);
-  sl_put32(request + 4, window);
-  sl_put32(request + 8, selection);
-  sl_put32(request + 12, target);
-  sl_put32(request + 16, property);
-  sl_put32(request + 20, timestamp);
-  if (sl_x11_request(x, request, sizeof(request)) != 0)
-    return -1;
-  for (;;) {
-    event = sl_x11_event(x);
-    if (!event)
-      return -1;
-    if ((event[0] & 127) == SL_X11_SELECTION_NOTIFY &&
-        sl_get32(event + 8) == window && sl_get32(event + 12) == selection &&
-        sl_get32(event + 16) == target) {
-      int accepted = sl_get32(event + 20) == property;
-      free(event);
-      return accepted;
-    }
-    free(event);
-  }
-}
-
-static int sl_clipboard_write(int fd, const void *data, size_t length) {
-  const unsigned char *bytes = data;
-  while (length) {
-    ssize_t written = write(fd, bytes, length);
-    if (written < 0 && errno == EINTR)
-      continue;
-    if (written <= 0)
-      return -1;
-    bytes += written;
-    length -= (size_t)written;
-  }
-  return 0;
-}
-
-static int sl_x11_read_value(sl_x11_t *x, uint32_t window, uint32_t property,
-                             uint32_t target, int fd, size_t *size,
-                             unsigned char *head, size_t *head_len,
-                             uint32_t incremental) {
-  uint32_t offset = 0;
-  int first = 1;
-  for (;;) {
-    unsigned char request[24] = {0}, *reply;
-    size_t packet_size, length, take;
-    uint32_t after;
-    request[0] = 20;
-    sl_put16(request + 2, 6);
-    sl_put32(request + 4, window);
-    sl_put32(request + 8, property);
-    sl_put32(request + 16, offset);
-    sl_put32(request + 20, 262144);
-    if (sl_x11_request(x, request, sizeof(request)) != 0)
-      return -1;
-    reply = sl_x11_reply(x, x->sequence, &packet_size);
-    if (!reply)
-      return -1;
-    if (first && sl_get32(reply + 8) == incremental && reply[1] == 32) {
-      free(reply);
-      return 1;
-    }
-    first = 0;
-    after = sl_get32(reply + 12);
-    length = sl_get32(reply + 16);
-    if (sl_get32(reply + 8) != target || reply[1] != 8 ||
-        length > packet_size - 32 || length > SL_IMAGE_MAX_BYTES - *size ||
-        (after && (!length || (length & 3)))) {
-      free(reply);
-      return -1;
-    }
-    if (*head_len < 8 && length) {
-      take = length;
-      if (take > 8 - *head_len)
-        take = 8 - *head_len;
-      memcpy(head + *head_len, reply + 32, take);
-      *head_len += take;
-    }
-    if (sl_clipboard_write(fd, reply + 32, length) != 0) {
-      free(reply);
-      return -1;
-    }
-    *size += length;
-    free(reply);
-    if (!after)
-      return length ? 0 : 2;
-    offset += (uint32_t)length / 4;
-  }
-}
-
-static int sl_x11_transfer(sl_x11_t *x, uint32_t window, uint32_t property,
-                           uint32_t target, uint32_t incr, int is_png, int fd) {
-  size_t size = 0, head_len = 0;
-  unsigned char head[8];
-  int result;
-  static const unsigned char png[] = {137, 80, 78, 71, 13, 10, 26, 10};
-  result = sl_x11_read_value(x, window, property, target, fd, &size, head,
-                             &head_len, incr);
-  if (result == 1) {
-    if (sl_x11_delete_property(x, window, property) != 0)
-      return -1;
-    do {
-      if (sl_x11_wait_property(x, window, property, NULL) != 0)
-        return -1;
-      result = sl_x11_read_value(x, window, property, target, fd, &size, head,
-                                 &head_len, incr);
-      if (sl_x11_delete_property(x, window, property) != 0)
-        return -1;
-    } while (result == 0);
-    if (result != 2)
-      return -1;
-  } else if (result != 0) {
-    return -1;
-  }
-  if (sl_x11_delete_property(x, window, property) != 0 || !size)
-    return -1;
-  if (is_png)
-    return head_len >= 8 && memcmp(head, png, sizeof(png)) == 0 ? 0 : -1;
-  return head_len >= 3 && head[0] == 255 && head[1] == 216 && head[2] == 255
-             ? 0
-             : -1;
 }
 
 static int sl_clipboard_random(unsigned char *bytes, size_t count) {
@@ -980,119 +507,612 @@ static int sl_clipboard_image_file(const char *path_template,
   return -1;
 }
 
-int sl_clipboard_save_image(const char *path_template, char **path, char *error,
-                            size_t error_size) {
+/* One nonblocking X11 conversation. Request, reply and payload buffers are
+ * bounded independently of the selected image's size. */
+enum sl_capture_phase {
+  CP_RESOLVE,
+  CP_CONNECT,
+  CP_SETUP,
+  CP_SETUP_REPLY,
+  CP_ATOM,
+  CP_ATOM_REPLY,
+  CP_WINDOW,
+  CP_TIME,
+  CP_TIME_EVENT,
+  CP_SELECT,
+  CP_CONVERT,
+  CP_SELECT_EVENT,
+  CP_BEGIN,
+  CP_PROPERTY,
+  CP_PROPERTY_REPLY,
+  CP_INCR_EVENT,
+  CP_END,
+  CP_DONE
+};
+#define SL_CAPTURE_CHUNK 16384u
+#define SL_SETUP_MAX 262140u
+struct sl_clipboard {
   sl_x11_t x;
   sl_x11_display_t display;
-  uint32_t window = 0, clipboard, png, jpeg, property, incr, timestamp;
-  uint32_t target = 0;
-  char *saved = NULL;
-  int fd = -1, selected, result = -1, rejected = 0;
-  const char *display_name = getenv("DISPLAY");
-  if (!path)
-    return -1;
-  *path = NULL;
-  sl_clipboard_error(error, error_size, "X11 clipboard image paste failed");
-  if (!display_name || !*display_name) {
-    sl_clipboard_error(error, error_size, "X11 DISPLAY is unavailable");
-    return -1;
-  }
-  if (sl_x11_parse_display(display_name, &display) != 0) {
-    sl_clipboard_error(error, error_size, "invalid X11 DISPLAY");
-    return -1;
-  }
-  memset(&x, 0, sizeof(x));
-  x.fd = -1;
-  x.deadline = sl_now_ms() + SL_CLIPBOARD_TIMEOUT_MS;
-  if (sl_x11_connect(&x, &display) != 0) {
-    sl_clipboard_error(error, error_size, "cannot connect to X11 DISPLAY");
-    goto cleanup;
-  }
-  if (sl_x11_setup(&x, &display, &rejected) != 0) {
-    sl_clipboard_error(
-        error, error_size,
-        rejected ? "X11 server rejected connection setup; check XAUTHORITY"
-                 : "X11 connection setup failed");
-    goto cleanup;
-  }
-  window = x.resource_base | (x.resource_mask & (~x.resource_mask + 1));
-  if (sl_x11_create_window(&x, window) != 0)
-    goto cleanup;
-  clipboard = sl_x11_atom(&x, "CLIPBOARD");
-  png = sl_x11_atom(&x, "image/png");
-  jpeg = sl_x11_atom(&x, "image/jpeg");
-  property = sl_x11_atom(&x, "SOFTLINE_IMAGE_PASTE");
-  incr = sl_x11_atom(&x, "INCR");
-  if (!clipboard || !png || !jpeg || !property || !incr)
-    goto cleanup;
-  if (sl_x11_timestamp(&x, window, property, &timestamp) != 0)
-    goto cleanup;
-  selected =
-      sl_x11_select_image(&x, window, clipboard, property, png, timestamp);
-  if (selected < 0) {
-    sl_clipboard_error(error, error_size, "X11 clipboard request timed out");
-    goto cleanup;
-  }
-  if (selected == 1)
-    target = png;
-  else {
-    selected =
-        sl_x11_select_image(&x, window, clipboard, property, jpeg, timestamp);
-    if (selected < 0) {
-      sl_clipboard_error(error, error_size, "X11 clipboard request timed out");
-      goto cleanup;
-    }
-    if (selected == 1)
-      target = jpeg;
-  }
-  if (!target) {
-    sl_clipboard_error(error, error_size,
-                       "no PNG or JPEG image on the X11 clipboard");
-    goto cleanup;
-  }
-  fd = sl_clipboard_image_file(path_template, target == png ? "png" : "jpeg",
-                               &saved);
-  if (fd < 0) {
-    sl_clipboard_error(error, error_size, "cannot create clipboard image file");
-    goto cleanup;
-  }
-  if (sl_x11_transfer(&x, window, property, target, incr, target == png, fd) !=
-      0) {
-    sl_clipboard_error(error, error_size,
-                       "clipboard image transfer failed or exceeded 32 MiB");
-    goto cleanup;
-  }
-  if (close(fd) != 0) {
-    fd = -1;
-    sl_clipboard_error(error, error_size, "cannot finish clipboard image file");
-    goto cleanup;
-  }
-  fd = -1;
-  *path = saved;
-  saved = NULL;
-  result = 0;
-cleanup:
-  if (fd >= 0)
-    (void)close(fd);
-  if (saved)
-    sl_clipboard_discard_image(saved, path_template);
-  free(saved);
-  if (x.fd >= 0)
-    (void)close(x.fd);
-  return result;
-}
+  sl_lookup_t *lookup;
+  struct ares_addrinfo *addresses;
+  struct ares_addrinfo_node *address;
+  enum sl_capture_phase phase;
+  unsigned char *packet;
+  size_t have, need;
+  unsigned char tx[320];
+  size_t tx_len, tx_at;
+  uint32_t window, atoms[5], timestamp, target, property_offset;
+  unsigned int atom_index;
+  uint16_t expected;
+  int incremental, is_png, property_first;
+  size_t limit, total;
+  unsigned char signature[8];
+  size_t signature_len;
+  char error[160];
+};
+static const char *const sl_capture_atoms[] = {
+    "CLIPBOARD", "image/png", "image/jpeg", "SOFTLINE_IMAGE_PASTE", "INCR"};
 
-#else
-
-int sl_clipboard_save_image(const char *path_template, char **path, char *error,
-                            size_t error_size) {
-  (void)path_template;
-  if (path)
-    *path = NULL;
-  if (error && error_size)
-    (void)snprintf(error, error_size,
-                   "X11 clipboard image paste is unavailable on this platform");
+static int sl_capture_fail(sl_clipboard_t *c, const char *reason) {
+  sl_clipboard_error(c->error, sizeof(c->error), reason);
   return -1;
 }
 
+static void sl_capture_request(sl_clipboard_t *c, unsigned int opcode,
+                               size_t length) {
+  memset(c->tx, 0, sizeof(c->tx));
+  c->tx[0] = (unsigned char)opcode;
+  sl_put16(c->tx + 2, (uint16_t)(length / 4));
+  c->tx_len = length;
+  c->tx_at = 0;
+  c->expected = ++c->x.sequence;
+}
+
+static int sl_capture_send(sl_clipboard_t *c) {
+  ssize_t n;
+  if (c->tx_at == c->tx_len)
+    return 1;
+  n = send(c->x.fd, c->tx + c->tx_at, c->tx_len - c->tx_at, MSG_NOSIGNAL);
+  if (n < 0 && (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK))
+    return 0;
+  if (n <= 0)
+    return sl_capture_fail(c, "X11 clipboard connection lost while writing");
+  c->tx_at += (size_t)n;
+  return c->tx_at == c->tx_len;
+}
+
+/* One recv per call. A peer cannot make a pump spin on unsolicited events. */
+static int sl_capture_packet(sl_clipboard_t *c, int setup) {
+  ssize_t n;
+  size_t extra, bound = setup ? SL_SETUP_MAX : SL_CAPTURE_CHUNK + 32u;
+  if (c->have == c->need && c->need) {
+    c->have = c->need = 0;
+  }
+  if (!c->need)
+    c->need = setup ? 8 : 32;
+  n = recv(c->x.fd, c->packet + c->have, c->need - c->have, 0);
+  if (n < 0 && (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK))
+    return 0;
+  if (n <= 0)
+    return sl_capture_fail(c, "X11 clipboard owner or connection lost");
+  c->have += (size_t)n;
+  if (c->have != c->need)
+    return 0;
+  if (c->need == (setup ? 8u : 32u)) {
+    if (setup)
+      extra = (size_t)sl_get16(c->packet + 6) * 4;
+    else if (c->packet[0] == 1 || (c->packet[0] & 127) == 35) {
+      uint32_t units = sl_get32(c->packet + 4);
+      if (units > (bound - 32) / 4)
+        return sl_capture_fail(c,
+                               "X11 clipboard reply exceeds bounded request");
+      extra = (size_t)units * 4;
+    } else
+      extra = 0;
+    if (extra) {
+      if (extra > bound - c->need)
+        return sl_capture_fail(c, "X11 clipboard setup exceeds limit");
+      c->need += extra;
+      return 0;
+    }
+  }
+  if (!setup && c->packet[0] == 0)
+    return sl_capture_fail(c, "X11 clipboard protocol error");
+  return 1;
+}
+
+static int sl_capture_connect(sl_clipboard_t *c) {
+  struct sockaddr_un local;
+  const struct sockaddr *address;
+  socklen_t length;
+  struct sockaddr_storage peer;
+  int result, flags;
+  if (c->x.fd >= 0) {
+    struct pollfd fd;
+    fd.fd = c->x.fd;
+    fd.events = POLLOUT;
+    fd.revents = 0;
+    if (poll(&fd, 1, 0) <= 0)
+      return 0;
+    length = sizeof(result);
+    if (getsockopt(c->x.fd, SOL_SOCKET, SO_ERROR, &result, &length) != 0 ||
+        result) {
+      close(c->x.fd);
+      c->x.fd = -1;
+      if (c->display.local)
+        return sl_capture_fail(c, "cannot connect to X11 DISPLAY");
+      c->address = c->address->ai_next;
+      return 0;
+    }
+    length = sizeof(peer);
+    if (getpeername(c->x.fd, (struct sockaddr *)&peer, &length) != 0)
+      return sl_capture_fail(c, "cannot inspect X11 peer");
+    c->x.peer_family = peer.ss_family;
+    if (peer.ss_family == AF_INET)
+      memcpy(c->x.peer_address, &((struct sockaddr_in *)&peer)->sin_addr, 4);
+    else if (peer.ss_family == AF_INET6)
+      memcpy(c->x.peer_address, &((struct sockaddr_in6 *)&peer)->sin6_addr, 16);
+    c->phase = CP_SETUP;
+    return 1;
+  }
+  if (c->display.local) {
+    memset(&local, 0, sizeof(local));
+    local.sun_family = AF_UNIX;
+    (void)snprintf(local.sun_path, sizeof(local.sun_path), "/tmp/.X11-unix/X%u",
+                   c->display.display);
+    address = (struct sockaddr *)&local;
+    length = sizeof(local);
+    c->x.fd = socket(AF_UNIX, SOCK_STREAM, 0);
+  } else {
+    if (!c->address)
+      return sl_capture_fail(c, "cannot connect to X11 DISPLAY");
+    address = c->address->ai_addr;
+    length = c->address->ai_addrlen;
+    c->x.fd =
+        socket(c->address->ai_family, SOCK_STREAM, c->address->ai_protocol);
+  }
+  if (c->x.fd < 0)
+    return sl_capture_fail(c, "cannot open X11 connection");
+  flags = fcntl(c->x.fd, F_GETFL, 0);
+  if (flags < 0 || fcntl(c->x.fd, F_SETFL, flags | O_NONBLOCK) < 0 ||
+      fcntl(c->x.fd, F_SETFD, FD_CLOEXEC) < 0)
+    return sl_capture_fail(c, "cannot configure X11 connection");
+  result = connect(c->x.fd, address, length);
+  if (result < 0 && errno != EINPROGRESS) {
+    close(c->x.fd);
+    c->x.fd = -1;
+    if (c->display.local)
+      return sl_capture_fail(c, "cannot connect to X11 DISPLAY");
+    c->address = c->address->ai_next;
+  }
+  return 0;
+}
+
+sl_clipboard_t *sl_clipboard_open(size_t limit) {
+  sl_clipboard_t *c = calloc(1, sizeof(*c));
+  if (!c)
+    return NULL;
+  c->x.fd = -1;
+  c->limit = limit;
+  c->packet = malloc(SL_SETUP_MAX);
+  if (!c->packet) {
+    free(c);
+    return NULL;
+  }
+  c->phase = CP_RESOLVE;
+  if (!getenv("DISPLAY") || !*getenv("DISPLAY"))
+    sl_capture_fail(c, "X11 DISPLAY is unavailable");
+  else if (sl_x11_parse_display(getenv("DISPLAY"), &c->display) != 0)
+    sl_capture_fail(c, "invalid X11 DISPLAY");
+  return c;
+}
+
+int sl_clipboard_prepare(sl_clipboard_t *c, struct pollfd *fds, size_t capacity,
+                         int *timeout_ms) {
+  if (!c || !capacity)
+    return -1;
+  *timeout_ms = 0;
+  if (c->error[0] || c->phase == CP_DONE)
+    return 0;
+  if (c->lookup)
+    return sl_resolve_prepare(c->lookup, fds, capacity, timeout_ms);
+  if (c->x.fd < 0 || c->phase == CP_RESOLVE || c->phase == CP_SETUP ||
+      c->phase == CP_ATOM || c->phase == CP_WINDOW || c->phase == CP_TIME ||
+      c->phase == CP_SELECT || c->phase == CP_CONVERT || c->phase == CP_BEGIN ||
+      c->phase == CP_PROPERTY || c->phase == CP_END)
+    return 0;
+  fds[0].fd = c->x.fd;
+  fds[0].events =
+      c->phase == CP_CONNECT || c->tx_at < c->tx_len ? POLLOUT : POLLIN;
+  fds[0].revents = 0;
+  *timeout_ms = -1;
+  return 1;
+}
+
+/* Emit at most one bounded event, and perform at most one socket operation. */
+int sl_clipboard_next(sl_clipboard_t *c, sl_image_paste_event_t *event) {
+  int result;
+  size_t length, cursor, i;
+  unsigned char *p;
+  if (!c || c->error[0])
+    return -1;
+  memset(event, 0, sizeof(*event));
+  event->media_type =
+      c->target ? (c->is_png ? "image/png" : "image/jpeg") : NULL;
+  event->filename = c->target ? (c->is_png ? "image.png" : "image.jpeg") : NULL;
+  event->offset = c->total;
+  if (c->tx_at < c->tx_len)
+    return sl_capture_send(c) < 0 ? -1 : 0;
+  switch (c->phase) {
+  case CP_RESOLVE:
+    if (c->display.local) {
+      c->phase = CP_CONNECT;
+      return 0;
+    }
+    if (!c->lookup) {
+      char port[8];
+      (void)snprintf(port, sizeof(port), "%u", 6000 + c->display.display);
+      c->lookup = sl_resolve_start(c->display.host, port, NULL);
+      if (!c->lookup)
+        return sl_capture_fail(c, "cannot resolve X11 DISPLAY");
+    }
+    result = sl_resolve_step(c->lookup);
+    if (result < 0)
+      return sl_capture_fail(c, "cannot resolve X11 DISPLAY");
+    if (!result)
+      return 0;
+    c->addresses = sl_resolve_take(c->lookup);
+    sl_resolve_destroy(c->lookup);
+    c->lookup = NULL;
+    c->address = c->addresses->nodes;
+    c->phase = CP_CONNECT;
+    return 0;
+  case CP_CONNECT:
+    return sl_capture_connect(c) < 0 ? -1 : 0;
+  case CP_SETUP: {
+    unsigned char cookie[256];
+    size_t cookie_len = 0;
+    (void)sl_x11_authority(&c->display, &c->x, cookie, &cookie_len);
+    memset(c->tx, 0, sizeof(c->tx));
+    c->tx[0] = 'l';
+    sl_put16(c->tx + 2, 11);
+    if (cookie_len) {
+      sl_put16(c->tx + 6, 18);
+      sl_put16(c->tx + 8, (uint16_t)cookie_len);
+      memcpy(c->tx + 12, "MIT-MAGIC-COOKIE-1", 18);
+      memcpy(c->tx + 32, cookie, cookie_len);
+    }
+    c->tx_len = 12 + (cookie_len ? 20 + ((cookie_len + 3) & ~(size_t)3) : 0);
+    c->tx_at = 0;
+    c->phase = CP_SETUP_REPLY;
+    return 0;
+  }
+  case CP_SETUP_REPLY:
+    result = sl_capture_packet(c, 1);
+    if (result <= 0)
+      return result;
+    p = c->packet;
+    if (p[0] != 1 || c->need < 40)
+      return sl_capture_fail(c, "X11 server rejected setup; check XAUTHORITY");
+    c->x.resource_base = sl_get32(p + 12);
+    c->x.resource_mask = sl_get32(p + 16);
+    cursor = 40 + ((sl_get16(p + 24) + 3u) & ~3u) + p[29] * 8u;
+    for (i = 0; i < p[28]; ++i) {
+      unsigned int j, depths;
+      if (cursor > c->need || c->need - cursor < 40)
+        return sl_capture_fail(c, "invalid X11 setup");
+      if (i == c->display.screen) {
+        c->x.root = sl_get32(p + cursor);
+        break;
+      }
+      depths = p[cursor + 39];
+      cursor += 40;
+      for (j = 0; j < depths; ++j) {
+        if (cursor > c->need || c->need - cursor < 8)
+          return sl_capture_fail(c, "invalid X11 setup");
+        cursor += 8 + (size_t)sl_get16(p + cursor + 2) * 24;
+      }
+    }
+    if (!c->x.resource_mask || !c->x.root)
+      return sl_capture_fail(c, "invalid X11 screen");
+    c->window =
+        c->x.resource_base | (c->x.resource_mask & (~c->x.resource_mask + 1));
+    c->phase = CP_ATOM;
+    return 0;
+  case CP_ATOM:
+    length = strlen(sl_capture_atoms[c->atom_index]);
+    sl_capture_request(c, 16, 8 + ((length + 3) & ~(size_t)3));
+    sl_put16(c->tx + 4, (uint16_t)length);
+    memcpy(c->tx + 8, sl_capture_atoms[c->atom_index], length);
+    c->phase = CP_ATOM_REPLY;
+    return 0;
+  case CP_ATOM_REPLY:
+    result = sl_capture_packet(c, 0);
+    if (result <= 0)
+      return result;
+    if (c->packet[0] != 1 || sl_get16(c->packet + 2) != c->expected)
+      return 0;
+    c->atoms[c->atom_index] = sl_get32(c->packet + 8);
+    if (!c->atoms[c->atom_index])
+      return sl_capture_fail(c, "invalid X11 atom");
+    c->phase = ++c->atom_index == 5 ? CP_WINDOW : CP_ATOM;
+    return 0;
+  case CP_WINDOW:
+    sl_capture_request(c, 1, 36);
+    sl_put32(c->tx + 4, c->window);
+    sl_put32(c->tx + 8, c->x.root);
+    sl_put16(c->tx + 16, 1);
+    sl_put16(c->tx + 18, 1);
+    sl_put16(c->tx + 22, 2);
+    sl_put32(c->tx + 28, SL_X11_WINDOW_EVENT_MASK);
+    sl_put32(c->tx + 32, SL_X11_PROPERTY_CHANGE_MASK);
+    c->phase = CP_TIME;
+    return 0;
+  case CP_TIME:
+    sl_capture_request(c, 18, 28);
+    sl_put32(c->tx + 4, c->window);
+    sl_put32(c->tx + 8, c->atoms[3]);
+    sl_put32(c->tx + 12, SL_X11_ATOM_STRING);
+    c->tx[16] = 8;
+    sl_put32(c->tx + 20, 1);
+    c->tx[24] = 'x';
+    c->phase = CP_TIME_EVENT;
+    return 0;
+  case CP_TIME_EVENT:
+  case CP_INCR_EVENT:
+    result = sl_capture_packet(c, 0);
+    if (result <= 0)
+      return result;
+    p = c->packet;
+    if ((p[0] & 127) != SL_X11_PROPERTY_NOTIFY ||
+        sl_get32(p + 4) != c->window || sl_get32(p + 8) != c->atoms[3] || p[16])
+      return 0;
+    if (c->phase == CP_TIME_EVENT) {
+      c->timestamp = sl_get32(p + 12);
+      c->target = c->atoms[1];
+      c->is_png = 1;
+      c->phase = CP_SELECT;
+    } else {
+      c->property_offset = 0;
+      c->property_first = 1;
+      c->phase = CP_PROPERTY;
+    }
+    return 0;
+  case CP_SELECT:
+    sl_capture_request(c, 19, 12);
+    sl_put32(c->tx + 4, c->window);
+    sl_put32(c->tx + 8, c->atoms[3]);
+    c->phase = CP_CONVERT;
+    return 0;
+  case CP_CONVERT:
+    sl_capture_request(c, 24, 24);
+    sl_put32(c->tx + 4, c->window);
+    sl_put32(c->tx + 8, c->atoms[0]);
+    sl_put32(c->tx + 12, c->target);
+    sl_put32(c->tx + 16, c->atoms[3]);
+    sl_put32(c->tx + 20, c->timestamp);
+    c->phase = CP_SELECT_EVENT;
+    return 0;
+  case CP_SELECT_EVENT:
+    result = sl_capture_packet(c, 0);
+    if (result <= 0)
+      return result;
+    p = c->packet;
+    if ((p[0] & 127) != SL_X11_SELECTION_NOTIFY ||
+        sl_get32(p + 8) != c->window || sl_get32(p + 12) != c->atoms[0] ||
+        sl_get32(p + 16) != c->target)
+      return 0;
+    if (sl_get32(p + 20) != c->atoms[3]) {
+      if (!c->is_png)
+        return sl_capture_fail(c, "no PNG or JPEG image on the X11 clipboard");
+      c->target = c->atoms[2];
+      c->is_png = 0;
+      c->phase = CP_SELECT;
+    } else
+      c->phase = CP_BEGIN;
+    return 0;
+  case CP_BEGIN:
+    event->operation = SL_IMAGE_PASTE_BEGIN;
+    c->property_first = 1;
+    c->phase = CP_PROPERTY;
+    return 1;
+  case CP_PROPERTY:
+    sl_capture_request(c, 20, 24);
+    sl_put32(c->tx + 4, c->window);
+    sl_put32(c->tx + 8, c->atoms[3]);
+    sl_put32(c->tx + 12, 0); /* AnyPropertyType; detect INCR on first reply. */
+    sl_put32(c->tx + 16, c->property_offset);
+    sl_put32(c->tx + 20, SL_CAPTURE_CHUNK / 4);
+    c->phase = CP_PROPERTY_REPLY;
+    return 0;
+  case CP_PROPERTY_REPLY: {
+    uint32_t after, type;
+    result = sl_capture_packet(c, 0);
+    if (result <= 0)
+      return result;
+    p = c->packet;
+    if (p[0] != 1 || sl_get16(p + 2) != c->expected)
+      return 0;
+    type = sl_get32(p + 8);
+    if (c->property_first && !c->incremental && type == c->atoms[4] &&
+        p[1] == 32) {
+      if (sl_get32(p + 16) != 1 || c->need != 36)
+        return sl_capture_fail(c, "invalid X11 INCR header");
+      if ((size_t)sl_get32(p + 32) > c->limit)
+        return sl_capture_fail(c, "clipboard image exceeds byte limit");
+      c->incremental = 1;
+      c->phase = CP_INCR_EVENT;
+      sl_capture_request(c, 19, 12);
+      sl_put32(c->tx + 4, c->window);
+      sl_put32(c->tx + 8, c->atoms[3]);
+      return 0;
+    }
+    c->property_first = 0;
+    after = sl_get32(p + 12);
+    length = sl_get32(p + 16);
+    if (type != c->target || p[1] != 8 || length > SL_CAPTURE_CHUNK ||
+        ((length + 3) & ~(size_t)3) != c->need - 32 ||
+        (after && (!length || (length & 3))))
+      return sl_capture_fail(c, "invalid X11 image property");
+    if (length > c->limit - c->total ||
+        (size_t)after > c->limit - c->total - length)
+      return sl_capture_fail(c, "clipboard image exceeds byte limit");
+    if (length && c->signature_len < sizeof(c->signature)) {
+      size_t take = sizeof(c->signature) - c->signature_len;
+      if (take > length)
+        take = length;
+      memcpy(c->signature + c->signature_len, p + 32, take);
+      c->signature_len += take;
+    }
+    c->property_offset += (uint32_t)(length / 4);
+    if (after)
+      c->phase = CP_PROPERTY;
+    else {
+      c->phase = c->incremental && length ? CP_INCR_EVENT : CP_END;
+      sl_capture_request(c, 19, 12);
+      sl_put32(c->tx + 4, c->window);
+      sl_put32(c->tx + 8, c->atoms[3]);
+    }
+    if (!length)
+      return 0;
+    event->operation = SL_IMAGE_PASTE_DATA;
+    event->data = p + 32;
+    event->length = length;
+    event->offset = c->total;
+    c->total += length;
+    return 1;
+  }
+  case CP_END: {
+    static const unsigned char png[] = {137, 80, 78, 71, 13, 10, 26, 10};
+    if ((c->is_png && (c->signature_len < 8 || memcmp(c->signature, png, 8))) ||
+        (!c->is_png && (c->signature_len < 3 || c->signature[0] != 255 ||
+                        c->signature[1] != 216 || c->signature[2] != 255)))
+      return sl_capture_fail(c, "invalid or truncated clipboard image");
+    event->operation = SL_IMAGE_PASTE_END;
+    event->offset = c->total;
+    c->phase = CP_DONE;
+    return 1;
+  }
+  case CP_DONE:
+    return 0;
+  }
+  return sl_capture_fail(c, "invalid clipboard capture state");
+}
+
+const char *sl_clipboard_error_text(const sl_clipboard_t *c) {
+  return c ? c->error : "out of memory starting clipboard capture";
+}
+
+void sl_clipboard_close(sl_clipboard_t *c) {
+  if (!c)
+    return;
+  if (c->x.fd >= 0)
+    close(c->x.fd);
+  sl_resolve_destroy(c->lookup);
+  sl_resolve_free(c->addresses);
+  free(c->packet);
+  free(c);
+}
+
+/* Standalone saving is a sink over the exact same acquisition state machine.
+ * Adapter mode never enters this function or creates a staging file. */
+int sl_clipboard_save_image(const char *path_template, char **path, char *error,
+                            size_t error_size) {
+  sl_clipboard_t *c = sl_clipboard_open(SL_IMAGE_MAX_BYTES);
+  sl_image_paste_event_t event;
+  struct pollfd fds[SL_IMAGE_PASTE_MAX_FDS];
+  int count, timeout, result = -1, fd = -1, status;
+  int64_t deadline = sl_now_ms() + SL_CLIPBOARD_TIMEOUT_MS, remaining;
+  char *saved = NULL;
+  *path = NULL;
+  while (c && (remaining = deadline - sl_now_ms()) > 0) {
+    status = sl_clipboard_next(c, &event);
+    if (status < 0)
+      break;
+    if (status > 0) {
+      if (event.operation == SL_IMAGE_PASTE_BEGIN) {
+        fd = sl_clipboard_image_file(path_template, c->is_png ? "png" : "jpeg",
+                                     &saved);
+        if (fd < 0) {
+          sl_capture_fail(c, "cannot create clipboard image file");
+          break;
+        }
+      } else if (event.operation == SL_IMAGE_PASTE_DATA) {
+        size_t at = 0;
+        while (at < event.length) {
+          ssize_t n = write(fd, event.data + at, event.length - at);
+          if (n < 0 && errno == EINTR)
+            continue;
+          if (n <= 0)
+            goto done;
+          at += (size_t)n;
+        }
+      } else if (event.operation == SL_IMAGE_PASTE_END) {
+        if (close(fd) != 0) {
+          fd = -1;
+          break;
+        }
+        fd = -1;
+        *path = saved;
+        saved = NULL;
+        result = 0;
+        break;
+      }
+      continue;
+    }
+    count = sl_clipboard_prepare(c, fds, SL_IMAGE_PASTE_MAX_FDS, &timeout);
+    if (count < 0)
+      break;
+    if (timeout < 0 || timeout > remaining)
+      timeout = (int)remaining;
+    if (poll(fds, (nfds_t)count, timeout) < 0 && errno != EINTR)
+      break;
+  }
+done:
+  if (result && error && error_size)
+    (void)snprintf(error, error_size,
+                   "clipboard image transfer failed or exceeded 32 MiB: %s",
+                   c && c->error[0] ? c->error : "timed out or write failed");
+  if (fd >= 0)
+    close(fd);
+  if (saved)
+    sl_clipboard_discard_image(saved, path_template);
+  free(saved);
+  sl_clipboard_close(c);
+  return result;
+}
+#else
+struct sl_clipboard {
+  int unused;
+};
+sl_clipboard_t *sl_clipboard_open(size_t limit) {
+  (void)limit;
+  return NULL;
+}
+int sl_clipboard_next(sl_clipboard_t *c, sl_image_paste_event_t *e) {
+  (void)c;
+  (void)e;
+  return -1;
+}
+int sl_clipboard_prepare(sl_clipboard_t *c, struct pollfd *p, size_t n,
+                         int *t) {
+  (void)c;
+  (void)p;
+  (void)n;
+  *t = -1;
+  return -1;
+}
+const char *sl_clipboard_error_text(const sl_clipboard_t *c) {
+  (void)c;
+  return "X11 image paste is only available on Linux";
+}
+void sl_clipboard_close(sl_clipboard_t *c) { (void)c; }
+int sl_clipboard_save_image(const char *p, char **out, char *error, size_t n) {
+  (void)p;
+  *out = NULL;
+  if (error && n)
+    (void)snprintf(error, n, "X11 image paste is only available on Linux");
+  return -1;
+}
 #endif

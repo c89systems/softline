@@ -39,6 +39,9 @@ typedef struct softline_lua_handle {
   sl_queue_backend_t backend_callbacks;
   int backend_callback_active;
   int terminal_callback_active;
+  int image_callback_active;
+  const sl_image_paste_event_t *image_event;
+  char image_error[SOFTLINE_LUA_IDLE_ERROR_LEN];
   int policy_callback_active;
   int idle_callback_active;
   int idle_callback_failed;
@@ -66,6 +69,9 @@ static softline_lua_handle_t *softline_lua_check(lua_State *L, int index) {
                 "cannot reenter softline from a backend callback");
   luaL_argcheck(L, !handle->terminal_callback_active, index,
                 "cannot reenter softline from a terminal callback");
+  luaL_argcheck(L, !handle->image_callback_active, index,
+                "cannot reenter softline from an image callback");
+  handle->L = L;
   return handle;
 }
 
@@ -81,6 +87,133 @@ static int softline_lua_status(lua_State *L, int status) {
 
 #include "softline_queue_backend_lua.h"
 #include "softline_terminal_lua.h"
+
+/* Protect metadata/string allocation as well as the user callback. */
+static int softline_lua_image_frame(lua_State *L) {
+  softline_lua_handle_t *h = lua_touserdata(L, 1);
+  const sl_image_paste_event_t *e = h->image_event;
+  lua_getiuservalue(L, 1, 4);
+  lua_getfield(L, -1, "callback");
+  lua_getfield(L, -2, "context");
+  lua_createtable(L, 0, 8);
+  backend_put_integer(L, "operation", e->operation);
+  backend_put_integer(L, "id", (lua_Integer)e->id);
+  backend_put_integer(L, "offset", (lua_Integer)e->offset);
+  backend_put_integer(L, "length", (lua_Integer)e->length);
+  backend_put_string(L, "media_type", e->media_type);
+  backend_put_string(L, "filename", e->filename);
+  backend_put_string(L, "reason", e->reason);
+  if (e->operation == SL_IMAGE_PASTE_DATA) {
+    lua_pushlstring(L, (const char *)e->data, e->length);
+    lua_setfield(L, -2, "data");
+  }
+  lua_call(L, 2, 1);
+  return 1;
+}
+
+static int softline_lua_image_callback(void *context,
+                                       const sl_image_paste_event_t *event) {
+  softline_lua_handle_t *h = context;
+  lua_State *L = h->L;
+  int base = lua_gettop(L), status = SL_ERROR;
+  h->image_event = event;
+  h->image_callback_active = 1;
+  if (lua_checkstack(L, 5)) {
+    lua_pushcfunction(L, softline_lua_image_frame);
+    lua_pushvalue(L, 1);
+    if (lua_pcall(L, 1, 1, 0) == LUA_OK) {
+      if (lua_isboolean(L, -1) && lua_toboolean(L, -1))
+        status = SL_OK;
+      else if (lua_isinteger(L, -1)) {
+        lua_Integer value = lua_tointeger(L, -1);
+        if (value >= INT_MIN && value <= INT_MAX)
+          status = (int)value;
+      }
+    } else if (!h->image_error[0]) {
+      const char *message =
+          lua_type(L, -1) == LUA_TSTRING ? lua_tostring(L, -1) : NULL;
+      (void)snprintf(h->image_error, sizeof(h->image_error), "%s",
+                     message ? message : "image callback failed");
+    }
+  }
+  lua_settop(L, base);
+  h->image_callback_active = 0;
+  h->image_event = NULL;
+  return status;
+}
+
+static sl_image_paste_id_t softline_lua_image_id(lua_State *L) {
+  lua_Integer id = luaL_checkinteger(L, 2);
+  luaL_argcheck(L, id > 0 && (lua_Unsigned)id <= ULONG_MAX, 2,
+                "invalid image transfer id");
+  return (sl_image_paste_id_t)id;
+}
+
+static int softline_lua_image_start(lua_State *L) {
+  softline_lua_handle_t *h = softline_lua_check(L, 1);
+  sl_image_paste_id_t id;
+  int status;
+  h->image_error[0] = '\0';
+  status = sl_image_paste_start(h->sl, &id);
+  if (status != SL_OK)
+    return softline_lua_status(L, status);
+  lua_pushinteger(L, (lua_Integer)id);
+  return 1;
+}
+
+static int softline_lua_image_pump(lua_State *L) {
+  softline_lua_handle_t *h = softline_lua_check(L, 1);
+  return softline_lua_status(L, sl_image_paste_pump(h->sl));
+}
+
+static int softline_lua_image_prepare(lua_State *L) {
+  softline_lua_handle_t *h = softline_lua_check(L, 1);
+  sl_image_paste_wait_t wait;
+  size_t i;
+  int status = sl_image_paste_prepare(h->sl, &wait);
+  if (status != SL_OK)
+    return softline_lua_status(L, status);
+  lua_createtable(L, 0, 2);
+  backend_put_integer(L, "timeout_ms", wait.timeout_ms);
+  lua_createtable(L, (int)wait.count, 0);
+  for (i = 0; i < wait.count; ++i) {
+    lua_createtable(L, 0, 2);
+    backend_put_integer(L, "fd", wait.fds[i].fd);
+    backend_put_integer(L, "events", wait.fds[i].events);
+    lua_rawseti(L, -2, (lua_Integer)i + 1);
+  }
+  lua_setfield(L, -2, "fds");
+  return 1;
+}
+
+static int softline_lua_image_resume(lua_State *L) {
+  softline_lua_handle_t *h = softline_lua_check(L, 1);
+  return softline_lua_status(
+      L, sl_image_paste_resume(h->sl, softline_lua_image_id(L)));
+}
+
+static int softline_lua_image_cancel(lua_State *L) {
+  softline_lua_handle_t *h = softline_lua_check(L, 1);
+  return softline_lua_status(
+      L, sl_image_paste_cancel(h->sl, softline_lua_image_id(L)));
+}
+
+static int softline_lua_image_complete(lua_State *L) {
+  softline_lua_handle_t *h = softline_lua_check(L, 1);
+  sl_image_paste_id_t id = softline_lua_image_id(L);
+  const char *path = NULL, *reason = NULL;
+  size_t length;
+  if (!lua_isnoneornil(L, 3)) {
+    path = luaL_checklstring(L, 3, &length);
+    luaL_argcheck(L, strlen(path) == length, 3, "path contains NUL");
+  }
+  if (!lua_isnoneornil(L, 4)) {
+    reason = luaL_checklstring(L, 4, &length);
+    luaL_argcheck(L, strlen(reason) == length, 4, "reason contains NUL");
+  }
+  return softline_lua_status(L,
+                             sl_image_paste_complete(h->sl, id, path, reason));
+}
 
 static int softline_lua_find_key_ref(softline_lua_handle_t *handle,
                                      sl_key_t key) {
@@ -273,6 +406,12 @@ static const char *const softline_lua_config_fields[] = {
     "live_scroll_region",
     "disable_image_paste",
     "image_paste_path_template",
+    "image_paste_callback",
+    "image_paste_context",
+    "image_paste_max_bytes",
+    "image_paste_source_timeout_ms",
+    "image_paste_host_timeout_ms",
+    "image_paste_total_timeout_ms",
     "clear_prompt_on_exit",
     "prompt_queue",
     "prompt_queue_max_entries",
@@ -289,6 +428,14 @@ static const char *const softline_lua_config_fields[] = {
     "queue_backend_context",
     "osc8_mode"};
 
+static int softline_lua_image_option(lua_State *L) {
+  lua_Integer value = lua_isnil(L, -1) ? 0 : luaL_checkinteger(L, -1);
+  luaL_argcheck(L, value >= 0 && value <= INT_MAX, 1,
+                "image limits and timeouts must be between 0 and INT_MAX");
+  lua_pop(L, 1);
+  return (int)value;
+}
+
 static void softline_lua_config(lua_State *L, int index, sl_config_t *config,
                                 int *rooted_template, int *backend,
                                 int *backend_context) {
@@ -298,6 +445,20 @@ static void softline_lua_config(lua_State *L, int index, sl_config_t *config,
     return;
   luaL_checktype(L, index, LUA_TTABLE);
   index = lua_absindex(L, index);
+  lua_getfield(L, index, "image_paste_max_bytes");
+  config->image_paste_max_bytes = (size_t)softline_lua_image_option(L);
+  lua_getfield(L, index, "image_paste_source_timeout_ms");
+  config->image_paste_source_timeout_ms = softline_lua_image_option(L);
+  lua_getfield(L, index, "image_paste_host_timeout_ms");
+  config->image_paste_host_timeout_ms = softline_lua_image_option(L);
+  lua_getfield(L, index, "image_paste_total_timeout_ms");
+  config->image_paste_total_timeout_ms = softline_lua_image_option(L);
+  lua_getfield(L, index, "image_paste_callback");
+  if (!lua_isnil(L, -1))
+    luaL_checktype(L, -1, LUA_TFUNCTION);
+  lua_pop(L, 1);
+  lua_getfield(L, index, "image_paste_context");
+  lua_pop(L, 1);
   lua_pushnil(L);
   while (lua_next(L, index) != 0) {
     size_t field, name_len;
@@ -437,7 +598,7 @@ static int softline_lua_new(lua_State *L) {
   sl_config_init(&config);
   softline_lua_config(L, 1, &config, &rooted_template, &backend,
                       &backend_context);
-  handle = (softline_lua_handle_t *)lua_newuserdatauv(L, sizeof(*handle), 3);
+  handle = (softline_lua_handle_t *)lua_newuserdatauv(L, sizeof(*handle), 4);
   memset(handle, 0, sizeof(*handle));
   handle->L = L;
   handle->history_callback_active = 0;
@@ -462,6 +623,28 @@ static int softline_lua_new(lua_State *L) {
   luaL_getmetatable(L, SOFTLINE_LUA_HANDLE);
   lua_setmetatable(L, -2);
   backend_config(L, handle, &config, backend, backend_context);
+  if (lua_istable(L, 1)) {
+    int receiver = lua_gettop(L);
+    lua_getfield(L, 1, "image_paste_callback");
+    if (!lua_isnil(L, -1)) {
+      luaL_checktype(L, -1, LUA_TFUNCTION);
+      lua_newtable(L);
+      lua_pushvalue(L, -2);
+      lua_setfield(L, -2, "callback");
+      lua_getfield(L, 1, "image_paste_context");
+      lua_setfield(L, -2, "context");
+      lua_setiuservalue(L, receiver, 4);
+      lua_pop(L, 1);
+      config.image_paste_callback = softline_lua_image_callback;
+      config.image_paste_context = handle;
+    } else {
+      lua_pop(L, 1);
+      lua_getfield(L, 1, "image_paste_context");
+      luaL_argcheck(L, lua_isnil(L, -1), 1,
+                    "image context requires a callback");
+      lua_pop(L, 1);
+    }
+  }
   handle->sl = sl_create_with_config(&config);
   if (!handle->sl)
     return luaL_error(L, "failed to create softline handle");
@@ -478,7 +661,7 @@ static int softline_lua_gc(lua_State *L) {
   if (handle->completion_callback_active || handle->backend_callback_active ||
       handle->policy_callback_active || handle->idle_callback_active ||
       handle->watch_callback_active || handle->history_callback_active ||
-      handle->terminal_callback_active)
+      handle->terminal_callback_active || handle->image_callback_active)
     return 0;
   for (i = 0; i < SOFTLINE_LUA_MAX_KEY_BINDINGS; i++) {
     if (handle->key_bindings[i].ref != LUA_NOREF) {
@@ -505,6 +688,8 @@ static int softline_lua_gc(lua_State *L) {
     handle->sl = NULL;
   }
   lua_pushnil(L);
+  lua_setiuservalue(L, 1, 4);
+  lua_pushnil(L);
   lua_setiuservalue(L, 1, 2);
   lua_pushnil(L);
   lua_setiuservalue(L, 1, 3);
@@ -517,7 +702,7 @@ static int softline_lua_close(lua_State *L) {
   if (handle->completion_callback_active || handle->backend_callback_active ||
       handle->policy_callback_active || handle->idle_callback_active ||
       handle->watch_callback_active || handle->history_callback_active ||
-      handle->terminal_callback_active)
+      handle->terminal_callback_active || handle->image_callback_active)
     return luaL_error(L, "cannot close softline handle from its callback");
   return softline_lua_gc(L);
 }
@@ -1926,6 +2111,10 @@ static int softline_lua_last_error(lua_State *L) {
   softline_lua_handle_t *handle;
   const char *error;
   handle = softline_lua_check(L, 1);
+  if (handle->image_error[0]) {
+    lua_pushstring(L, handle->image_error);
+    return 1;
+  }
   if (handle->idle_callback_failed || handle->watch_callback_failed) {
     lua_pushstring(L, handle->watch_callback_failed
                           ? handle->watch_callback_error
@@ -2108,6 +2297,12 @@ static int softline_lua_output_stream_end(lua_State *L) {
 }
 
 static const luaL_Reg softline_lua_methods[] = {
+    {"image_paste_start", softline_lua_image_start},
+    {"image_paste_prepare", softline_lua_image_prepare},
+    {"image_paste_pump", softline_lua_image_pump},
+    {"image_paste_resume", softline_lua_image_resume},
+    {"image_paste_complete", softline_lua_image_complete},
+    {"image_paste_cancel", softline_lua_image_cancel},
     {"queue_backend_request", softline_lua_queue_backend_request},
     {"queue_backend_result", softline_lua_queue_backend_result},
     {"queue_backend_update", softline_lua_queue_backend_update},
@@ -2220,6 +2415,16 @@ int luaopen_softline(lua_State *L) {
 
   lua_newtable(L);
   luaL_setfuncs(L, softline_lua_functions, 0);
+  lua_pushinteger(L, SL_IMAGE_PASTE_BEGIN);
+  lua_setfield(L, -2, "IMAGE_PASTE_BEGIN");
+  lua_pushinteger(L, SL_IMAGE_PASTE_DATA);
+  lua_setfield(L, -2, "IMAGE_PASTE_DATA");
+  lua_pushinteger(L, SL_IMAGE_PASTE_END);
+  lua_setfield(L, -2, "IMAGE_PASTE_END");
+  lua_pushinteger(L, SL_IMAGE_PASTE_ABORT);
+  lua_setfield(L, -2, "IMAGE_PASTE_ABORT");
+  lua_pushinteger(L, SL_IMAGE_PASTE_DONE);
+  lua_setfield(L, -2, "IMAGE_PASTE_DONE");
   lua_pushinteger(L, SL_TERMINAL_OPEN);
   lua_setfield(L, -2, "TERMINAL_OPEN");
   lua_pushinteger(L, SL_TERMINAL_STEP);

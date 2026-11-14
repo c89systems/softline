@@ -102,7 +102,12 @@ Currently implemented:
   built-in capture (the draft stays unchanged). A missing or unsupported
   image leaves the draft unchanged and sets `last_error()`. X11 image paste is
   currently available on Linux when `DISPLAY` is present;
-  the transfer limit is 32 MiB. A `Ctrl-V` key binding takes precedence.
+  the standalone transfer limit is 32 MiB. A `Ctrl-V` key binding takes precedence.
+  Applications can instead configure `image_paste_callback` to receive bounded
+  PNG/JPEG chunks without creating frontend image files. This handover defaults
+  to 10 MB (10,000,000 bytes), supports backpressure and backend acknowledgement,
+  and keeps typing responsive. During a pending upload Ctrl-C cancels only the
+  upload; Enter/Alt-Enter retain the draft. See [image handover](docs/image-paste.md).
 - Long input wraps by words where possible and reflows after terminal resize.
 - Bracketed paste is enabled while editing so pasted carriage returns become
   buffer content instead of submitting the prompt.
@@ -874,10 +879,10 @@ that database; public-header Doxygen comments supply API hover documentation.
 of `src/softline.c`. Lua API usage and callback contracts are documented in
 [lua/README.md](lua/README.md) and the facade's source comments.
 
-Shared builds use `SOFTLINE_ABI_VERSION=4` for SONAME/SOVERSION. Constructor-selected
-queue backends extend the public configuration and receiver layout. Rebuild
-consumers against the new header/library pair. ABI 4 advances exactly once from
-released v0.15.1's ABI 3, independently of the project release version.
+Shared builds use `SOFTLINE_ABI_VERSION=5` for SONAME/SOVERSION. Image-paste handover
+extends the public configuration and receiver layout. Rebuild consumers against
+the new header/library pair. ABI 5 advances exactly once from released v0.17.0's
+ABI 4, independently of the project release version.
 The ABI is fixed by the source, not a CMake option. Reconfiguring an existing
 build discards any obsolete cached ABI value before generating library names
 and installed metadata.

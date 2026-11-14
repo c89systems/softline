@@ -94,15 +94,22 @@ The editor supports these built-in behaviors:
   submitting or queueing it; a subsequent Enter follows the normal keymap.
   Escape or `Ctrl-G` restores the draft. An explicit Enter binding requesting
   `SL_KEY_ACTION_SUBMIT` can opt into immediate submission during search.
-- `Ctrl-V` in the TTY editor saves PNG or JPEG data from the X11 `CLIPBOARD`
+- Without a handover adapter, `Ctrl-V` in the TTY editor saves PNG or JPEG data
+  from the X11 `CLIPBOARD`
   selection to an owner-only cache file and inserts its visible absolute path
   at the cursor. The image file persists after the handle closes. On Linux,
   X11 is accessed directly over Unix or TCP sockets with Xauthority credentials,
   including a `DISPLAY` forwarded by `ssh -Y`. No host X11 library is required.
+  A constructor `image_paste_callback` instead receives bounded binary chunks
+  without a frontend image file. It supports pause/resume, source/host/total
+  deadlines, Ctrl-C upload cancellation and deferred insertion of an acknowledged
+  backend path. The default handover cap is 10 MB (10,000,000 bytes). See the
+  [image handover contract](image-paste.md) for C/Lua lifecycle and draft semantics.
   Both Linux library forms embed MIT-licensed c-ares 1.34.9 privately. TCP
   display hosts support literal IPv4/IPv6, `/etc/hosts`, then DNS configured by
-  `/etc/resolv.conf`, including search domains. Lookup shares the clipboard's
-  10-second deadline and uses no libc NSS modules or additional link libraries.
+  `/etc/resolv.conf`, including search domains, without libc NSS modules or
+  additional link libraries. Standalone lookup shares the clipboard's
+  10-second deadline.
   The same overall deadline bounds X11 setup, replies, selection and INCR events;
   incoming unrelated events do not restart it. INCR capture waits for the
   zero-length terminator and deletes that property to acknowledge completion
@@ -691,10 +698,10 @@ Current build surfaces include:
 - CMake presets
 - static and shared library builds
 - shared-library ABI/SOVERSION policy through the source-owned
-  `SOFTLINE_ABI_VERSION`, currently `4`, decoupled from the project release
-  version and not a CMake cache option. Constructor-selected backends extend
-  the public configuration and receiver layouts, advancing exactly once from
-  released v0.15.1's ABI 3. Consumers must rebuild.
+  `SOFTLINE_ABI_VERSION`, currently `5`, decoupled from the project release
+  version and not a CMake cache option. Image-paste handover extends the public
+  configuration and receiver layouts, advancing exactly once from released
+  v0.17.0's ABI 4. Consumers must rebuild.
 - installed CMake package exports with canonical target `softline::softline`
 - installed pkg-config metadata
 - Lua 5.5 facade packaged as LuaRocks source artifacts

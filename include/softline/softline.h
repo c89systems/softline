@@ -13,6 +13,74 @@ typedef struct sl sl_t;
 /** Opaque per-handle identifier for an external event watch. */
 typedef unsigned long sl_watch_id_t;
 
+/** Image transfer identity; nonzero and never reused during a handle's life. */
+typedef unsigned long sl_image_paste_id_t;
+
+/** Notification delivered to the constructor's image-paste callback. */
+typedef enum sl_image_paste_operation {
+  /** Admit the chosen PNG/JPEG representation before reading image content. */
+  SL_IMAGE_PASTE_BEGIN = 1,
+  /** Consume all length bytes, or return SL_ERROR_NOT_READY consuming none. */
+  SL_IMAGE_PASTE_DATA,
+  /** Clean acquisition EOF; backend storage has not yet been acknowledged. */
+  SL_IMAGE_PASTE_END,
+  /** Terminal failure/cancellation; abort backend work. Exactly once. */
+  SL_IMAGE_PASTE_ABORT,
+  /** Terminal success: acknowledged path was inserted. Exactly once. */
+  SL_IMAGE_PASTE_DONE
+} sl_image_paste_operation_t;
+
+/** Borrowed callback-scoped image metadata and binary chunk. */
+typedef struct sl_image_paste_event {
+  /** Notification kind. */
+  sl_image_paste_operation_t operation;
+  /** Stable transfer identity. */
+  sl_image_paste_id_t id;
+  /** Selected image/png or image/jpeg; NULL before negotiation succeeds. */
+  const char *media_type;
+  /** Suggested display filename, image.png or image.jpeg; never a path. */
+  const char *filename;
+  /** DATA bytes; may contain NUL. Borrowed only until the callback returns. */
+  const unsigned char *data;
+  /** DATA byte length; zero for other operations. */
+  size_t length;
+  /** DATA offset, or actual accepted byte count for END/ABORT/DONE. */
+  size_t offset;
+  /** Bounded failure reason for ABORT; NULL otherwise. */
+  const char *reason;
+} sl_image_paste_event_t;
+
+/** Owner-thread callback: return SL_OK, or reject with an SL_ERROR_* status.
+ * Only DATA permits SL_ERROR_NOT_READY. Consume/copy the entire chunk before
+ * SL_OK; NOT_READY consumes none. Never block, yield, or reenter Softline.
+ * The application context is borrowed until destruction's final ABORT returns.
+ * Installing this callback transfers storage responsibility to the application;
+ * failures never fall back to local image saving. ABORT/DONE return values
+ * are ignored; each transfer has exactly one terminal notification. */
+typedef int (*sl_image_paste_callback_t)(void *context,
+                                         const sl_image_paste_event_t *event);
+
+/** Maximum number of readiness descriptors used by image acquisition. */
+#define SL_IMAGE_PASTE_MAX_FDS 16
+
+/** One borrowed descriptor to watch; Softline owns it. */
+typedef struct sl_image_paste_fd {
+  /** Descriptor; never close or read it in the application. */
+  int fd;
+  /** SL_WATCH_READ/WRITE interests. */
+  unsigned int events;
+} sl_image_paste_fd_t;
+
+/** Readiness snapshot for an application's loop outside readline. */
+typedef struct sl_image_paste_wait {
+  /** Bounded descriptor array, valid until the next image-paste operation. */
+  sl_image_paste_fd_t fds[SL_IMAGE_PASTE_MAX_FDS];
+  /** Number of valid descriptors. */
+  size_t count;
+  /** Maximum wait in milliseconds; -1 when no transfer is pending. */
+  int timeout_ms;
+} sl_image_paste_wait_t;
+
 /** Opaque nonzero queue identity, unique for the lifetime of one handle.
  * Zero denotes a direct draft without a queued origin. IDs are never reused. */
 typedef unsigned long sl_prompt_id_t;
@@ -919,6 +987,19 @@ typedef struct sl_config {
    * `/tmp/softline/` + `*` + `/image` produces
    * `/tmp/softline/{xid}/image.png`. */
   const char *image_paste_path_template;
+  /** Optional PNG/JPEG streaming handover; NULL retains local image saving. */
+  sl_image_paste_callback_t image_paste_callback;
+  /** Borrowed image-paste callback context. */
+  void *image_paste_context;
+  /** Per-image byte limit; zero selects 10,000,000 bytes (10 MB). */
+  size_t image_paste_max_bytes;
+  /** Source inactivity deadline; zero selects 10,000 ms. Pauses are excluded.
+   */
+  int image_paste_source_timeout_ms;
+  /** Pause/backend acknowledgement deadline; zero selects 30,000 ms. */
+  int image_paste_host_timeout_ms;
+  /** Whole-operation deadline, including pauses; zero selects 120,000 ms. */
+  int image_paste_total_timeout_ms;
   /** NULL keeps the native local queue. A backend requires prompt_queue=1 and
    * selects external authority for this handle's entire lifetime. */
   const sl_queue_backend_t *queue_backend;
@@ -936,6 +1017,19 @@ typedef struct sl_config {
  * state; callers must not read, write, copy, or free it.
  */
 struct sl {
+  /** Start PNG/JPEG clipboard handover at the current draft cursor. */
+  int (*image_paste_start)(sl_t *, sl_image_paste_id_t *);
+  /** Obtain nonblocking acquisition readiness and its next deadline. */
+  int (*image_paste_prepare)(sl_t *, sl_image_paste_wait_t *);
+  /** Advance bounded work without waiting; also used by native editing. */
+  int (*image_paste_pump)(sl_t *);
+  /** Permit retry of a previously unconsumed DATA chunk. */
+  int (*image_paste_resume)(sl_t *, sl_image_paste_id_t);
+  /** Acknowledge backend storage with an absolute path, or fail with reason. */
+  int (*image_paste_complete)(sl_t *, sl_image_paste_id_t, const char *,
+                              const char *);
+  /** Abort acquisition/backend wait without cancelling the draft. */
+  int (*image_paste_cancel)(sl_t *, sl_image_paste_id_t);
   /**
    * Read one submitted line.
    *
@@ -1706,6 +1800,29 @@ int sl_watch_remove(sl_t *self, sl_watch_id_t id);
 
 /** Remove every registered watch from this handle. */
 int sl_watch_clear(sl_t *self);
+
+/** Start image-only clipboard handover. One transfer per handle; requires a
+ * constructor callback. Calls and callbacks run on the owner thread. A fresh
+ * readline replaces a non-suspended draft and cancels its pending transfer. */
+int sl_image_paste_start(sl_t *, sl_image_paste_id_t *);
+/** Snapshot readiness outside readline. Call pump on readiness/deadline, then
+ * prepare again. Native editing drives the same mechanism automatically. */
+int sl_image_paste_prepare(sl_t *, sl_image_paste_wait_t *);
+/** Perform bounded nonblocking work. Completion insertion is deferred while
+ * suspended; resume the original draft to reconcile it. */
+int sl_image_paste_pump(sl_t *);
+/** Resume paused DATA. Wrong/stale IDs or invalid ordering return INVALID. */
+int sl_image_paste_resume(sl_t *, sl_image_paste_id_t);
+/** After END, supply a nonempty absolute path without control characters,
+ * at most 4095 bytes, or NULL and a printable failure reason. Insertion is
+ * atomic and deferred until pump/native dispatch. Duplicate/stale results
+ * return INVALID and never insert twice. No server file is deleted by undo. */
+int sl_image_paste_complete(sl_t *, sl_image_paste_id_t, const char *,
+                            const char *);
+/** Cancel one pending transfer, preserving draft text. Duplicate/stale IDs
+ * return INVALID. Ctrl-C performs this operation while a transfer is pending;
+ * otherwise its normal SIGINT behavior applies. */
+int sl_image_paste_cancel(sl_t *, sl_image_paste_id_t);
 
 /** Bind key to callback for this handle; NULL callback removes the binding.
  * Bind SL_KEY_ENTER with SL_KEY_ACTION_SUBMIT to submit a reverse-search match

@@ -50,7 +50,7 @@ mutate(c_constant lua/softline_lua.c "lua_pushinteger(L, SL_KEY_NONE)"
   "lua_pushinteger(L, SL_FIXTURE_ONLY)" "Missing public Lua constant declaration/doc: SL_FIXTURE_ONLY")
 mutate(lua_constant lua/softline_lua.c "lua_setfield(L, -2, \"KEY_NONE\")"
   "lua_setfield(L, -2, \"FIXTURE_ONLY\")" "Missing public Lua constant declaration/doc: SL_KEY_NONE")
-mutate(abi CMakeLists.txt "set(SOFTLINE_ABI_VERSION \"4\""
+mutate(abi CMakeLists.txt "set(SOFTLINE_ABI_VERSION \"5\""
   "set(SOFTLINE_ABI_VERSION \"999\"" "ABI documentation and implementation differ")
 mutate(config_docs lua/README.md "`history_max_len`" "history_max_len"
   "Lua config documentation missing: history_max_len")

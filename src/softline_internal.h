@@ -77,6 +77,7 @@ typedef struct sl_prompt_queue {
 } sl_prompt_queue_t;
 
 typedef struct sl_backend sl_backend_t;
+typedef struct sl_image sl_image_t;
 
 typedef struct sl_statusline {
   char *elements[SL_STATUS_MAX_ELEMENTS];
@@ -123,6 +124,14 @@ typedef struct sl_history_search {
 } sl_history_search_t;
 
 typedef struct sl_impl {
+  sl_image_t *image;
+  sl_image_paste_callback_t image_callback;
+  void *image_context;
+  size_t image_limit;
+  int image_source_timeout, image_host_timeout, image_total_timeout;
+  int image_callback_active;
+  int image_literal;
+  char image_notice[SL_ERROR_LEN];
   struct sl_pty *terminal_children;
   int terminal_active;
   int input_fd;
@@ -242,6 +251,19 @@ typedef struct sl_impl {
 void sl_terminal_reap(sl_impl_t *impl);
 void sl_terminal_cleanup(sl_impl_t *impl);
 void sl_terminal_abandon(sl_t *self);
+
+int sl_image_start(sl_t *, sl_image_paste_id_t *);
+int sl_image_prepare(sl_t *, sl_image_paste_wait_t *);
+int sl_image_pump(sl_t *);
+int sl_image_resume(sl_t *, sl_image_paste_id_t);
+int sl_image_complete(sl_t *, sl_image_paste_id_t, const char *, const char *);
+int sl_image_cancel(sl_t *, sl_image_paste_id_t);
+int sl_image_pending(const sl_impl_t *);
+void sl_image_changed(sl_t *, size_t, size_t, size_t);
+void sl_image_invalidate(sl_t *, const char *);
+void sl_image_destroy(sl_t *);
+int sl_image_insert_result(sl_t *, size_t, const char *);
+int sl_image_valid_path(const char *);
 
 /* Internal editor/cache operations shared with the transport-independent queue
  * adapter. These are not application queue admission or consumption seams. */

@@ -28,7 +28,7 @@ mkdir -p "${ROOT_DIR}/build"
 # Exercise ordinary path spaces in both CMake and pkg-config consumers.
 TMP_DIR="$(mktemp -d "${ROOT_DIR}/build/consumer with spaces.XXXXXX")"
 VERSION="$(bash "${ROOT_DIR}/scripts/release_version.sh")"
-SOFTLINE_ABI_VERSION="${SOFTLINE_ABI_VERSION:-4}"
+SOFTLINE_ABI_VERSION="${SOFTLINE_ABI_VERSION:-5}"
 BOOTLIN_TOOLCHAIN="${ROOT_DIR}/cmake/toolchains/bootlin-linux.cmake"
 BOOTLIN_TARGET=""
 BOOTLIN_TOOLCHAIN_ARG=""

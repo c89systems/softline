@@ -22,6 +22,16 @@ endif()
 set_tests_properties(lua_runtime PROPERTIES ENVIRONMENT
   "SOFTLINE_TOOLCHAIN_ROOT=${runtime_root};SOFTLINE_EXPECTED_LIBRARY_ROOT=${library_root}")
 add_test(NAME lua_smoke COMMAND "${SOFTLINE_LUA_EXECUTABLE}" "${root}/tests/lua_smoke.lua")
+if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Linux")
+  add_test(NAME lua_image_paste COMMAND "${SOFTLINE_LUA_EXECUTABLE}" "${root}/tests/lua_image_paste.lua")
+  set_tests_properties(lua_image_paste PROPERTIES ENVIRONMENT "DISPLAY=")
+  add_test(NAME lua_image_paste_x11 COMMAND "${BASH_EXECUTABLE}" "${root}/scripts/terminal-test-env.sh"
+    xvfb-run -a "${root}/build/debug/tests/test_clipboard_image"
+    "${root}/build/debug/tests/clipboard_fixture" "${root}/build"
+    "${root}/build/debug/tests/clipboard-paste-inputs")
+  set_tests_properties(lua_image_paste_x11 PROPERTIES ENVIRONMENT
+    "SOFTLINE_TEST_LUA=${SOFTLINE_LUA_EXECUTABLE};SOFTLINE_TEST_LUA_IMAGE_SCRIPT=${root}/tests/lua-fixtures/image-paste.lua")
+endif()
 add_test(NAME lua_osc8 COMMAND "${SOFTLINE_LUA_EXECUTABLE}" "${root}/tests/lua_osc8.lua")
 add_test(NAME lua_queue_backend COMMAND "${SOFTLINE_LUA_EXECUTABLE}" "${root}/tests/lua_queue_backend.lua")
 add_test(NAME lua_backend_coroutines COMMAND "${pty_test}" backend-coroutines "${SOFTLINE_LUA_EXECUTABLE}" "${root}")
