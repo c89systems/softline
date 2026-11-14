@@ -105,7 +105,7 @@ Currently implemented:
   the standalone transfer limit is 32 MiB. A `Ctrl-V` key binding takes precedence.
   Applications can instead configure `image_paste_callback` to receive bounded
   PNG/JPEG chunks without creating frontend image files. This handover defaults
-  to 10 MB (10,000,000 bytes), supports backpressure and backend acknowledgement,
+  to 32 MiB (33,554,432 bytes), supports backpressure and backend acknowledgement,
   and keeps typing responsive. During a pending upload Ctrl-C cancels only the
   upload; Enter/Alt-Enter retain the draft. See [image handover](docs/image-paste.md).
 - Long input wraps by words where possible and reflows after terminal resize.

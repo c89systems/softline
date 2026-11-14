@@ -103,7 +103,7 @@ The editor supports these built-in behaviors:
   A constructor `image_paste_callback` instead receives bounded binary chunks
   without a frontend image file. It supports pause/resume, source/host/total
   deadlines, Ctrl-C upload cancellation and deferred insertion of an acknowledged
-  backend path. The default handover cap is 10 MB (10,000,000 bytes). See the
+  backend path. The default handover cap is 32 MiB (33,554,432 bytes). See the
   [image handover contract](image-paste.md) for C/Lua lifecycle and draft semantics.
   Both Linux library forms embed MIT-licensed c-ares 1.34.9 privately. TCP
   display hosts support literal IPv4/IPv6, `/etc/hosts`, then DNS configured by

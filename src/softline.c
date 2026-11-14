@@ -9733,7 +9733,7 @@ static sl_t *sl_create_with_config_impl(const sl_config_t *config) {
   impl->image_callback = config->image_paste_callback;
   impl->image_context = config->image_paste_context;
   impl->image_limit =
-      config->image_paste_max_bytes ? config->image_paste_max_bytes : 10000000u;
+      config->image_paste_max_bytes ? config->image_paste_max_bytes : 33554432u;
   impl->image_source_timeout = config->image_paste_source_timeout_ms
                                    ? config->image_paste_source_timeout_ms
                                    : 10000;

@@ -157,8 +157,20 @@ static int local_cases(const char *fixture, const char *build,
     }
     CHECK(offer(&large) == 0);
     CHECK(run_case(fixture, base, "draft\026", "adapter", &result) == 0);
+    CHECK(!strcmp(result.line, "draft/backend/image") &&
+          !strcmp(result.error, expected) && unchanged(base, &before));
+    CHECK(offer(&oversized) == 0);
+    CHECK(run_case(fixture, base, "draft\026", "adapter", &result) == 0);
     CHECK(!strcmp(result.line, "draft") && strstr(result.error, "byte limit") &&
           unchanged(base, &before));
+    hash = 2166136261UL;
+    for (byte = 0; byte < oversized.length; ++byte)
+      hash = ((hash ^ oversized.bytes[byte]) * 16777619UL) & 0xffffffffUL;
+    snprintf(expected, sizeof(expected), "%lu:%lu",
+             (unsigned long)oversized.length, hash);
+    CHECK(run_case(fixture, base, "draft\026", "adapter-wide", &result) == 0);
+    CHECK(!strcmp(result.line, "draft/backend/image") &&
+          !strcmp(result.error, expected) && unchanged(base, &before));
     unsetenv("SOFTLINE_TEST_IMAGE_TEMPLATE");
     CHECK(offer(&small) == 0);
   }

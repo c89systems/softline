@@ -12,6 +12,19 @@ local-file opening, arbitrary file upload and terminal file-transfer protocols
 are outside this interface. Pasted text and path-looking strings remain text.
 Softline does not implement a backend transport, filesystem service or workers.
 
+All six operations are available on the public receiver shell as well as through
+free functions. Both forms use the same constructor callback, context and
+`image_paste_max_bytes` setting:
+
+| Free function | Receiver call |
+| --- | --- |
+| `sl_image_paste_start(editor, &id)` | `editor->image_paste_start(editor, &id)` |
+| `sl_image_paste_prepare(editor, &wait)` | `editor->image_paste_prepare(editor, &wait)` |
+| `sl_image_paste_pump(editor)` | `editor->image_paste_pump(editor)` |
+| `sl_image_paste_resume(editor, id)` | `editor->image_paste_resume(editor, id)` |
+| `sl_image_paste_complete(editor, id, path, reason)` | `editor->image_paste_complete(editor, id, path, reason)` |
+| `sl_image_paste_cancel(editor, id)` | `editor->image_paste_cancel(editor, id)` |
+
 ## Callback lifecycle
 
 Set `image_paste_callback` and borrowed `image_paste_context` in `sl_config_t`
@@ -49,7 +62,7 @@ it. Destruction aborts pending work before releasing the borrowed context.
 
 ## Bounds and deadlines
 
-`image_paste_max_bytes = 0` selects **10 MB (10,000,000 bytes) per image**. Positive
+`image_paste_max_bytes = 0` selects **32 MiB (33,554,432 bytes) per image**. Positive
 values select explicit byte limits up to INT_MAX. Actual acquired bytes enforce
 the limit even when X11 size hints are dishonest. Known oversized properties are
 rejected early. An exact-limit image requires clean EOF. Source chunks are at

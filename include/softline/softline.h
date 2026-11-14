@@ -991,7 +991,7 @@ typedef struct sl_config {
   sl_image_paste_callback_t image_paste_callback;
   /** Borrowed image-paste callback context. */
   void *image_paste_context;
-  /** Per-image byte limit; zero selects 10,000,000 bytes (10 MB). */
+  /** Per-image byte limit; zero selects 33,554,432 bytes (32 MiB). */
   size_t image_paste_max_bytes;
   /** Source inactivity deadline; zero selects 10,000 ms. Pauses are excluded.
    */

@@ -958,7 +958,7 @@ cycles are collectible. Callbacks run synchronously in the coroutine driving
 readline, next_prompt or the explicit pump/cancel operation, through a protected
 Lua frame. They must return promptly without yielding or reentering the editor.
 
-`image_paste_max_bytes` defaults to 10,000,000 bytes (10 MB) when zero. Positive
+`image_paste_max_bytes` defaults to 33,554,432 bytes (32 MiB) when zero. Positive
 values select a per-image cap, at most INT_MAX. `image_paste_source_timeout_ms`,
 `image_paste_host_timeout_ms` and `image_paste_total_timeout_ms` use zero for
 10,000, 30,000 and 120,000 milliseconds respectively. Negative values are invalid.

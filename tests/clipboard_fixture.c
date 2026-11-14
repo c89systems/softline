@@ -94,6 +94,8 @@ int main(int argc, char **argv) {
     config.image_paste_context = &upload;
     if (!strcmp(argv[2], "adapter-large"))
       config.image_paste_max_bytes = 32u * 1024u * 1024u;
+    else if (!strcmp(argv[2], "adapter-wide"))
+      config.image_paste_max_bytes = 64u * 1024u * 1024u;
   }
   if (argc >= 3 && strcmp(argv[2], "limit") == 0)
     config.line_max_len = 16;

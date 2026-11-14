@@ -333,19 +333,26 @@ void sl_image_destroy(sl_t *self) {
 }
 
 int sl_image_paste_start(sl_t *s, sl_image_paste_id_t *id) {
-  return sl_image_start(s, id);
+  return s && s->image_paste_start ? s->image_paste_start(s, id)
+                                   : SL_ERROR_INVALID;
 }
 int sl_image_paste_prepare(sl_t *s, sl_image_paste_wait_t *w) {
-  return sl_image_prepare(s, w);
+  return s && s->image_paste_prepare ? s->image_paste_prepare(s, w)
+                                     : SL_ERROR_INVALID;
 }
-int sl_image_paste_pump(sl_t *s) { return sl_image_pump(s); }
+int sl_image_paste_pump(sl_t *s) {
+  return s && s->image_paste_pump ? s->image_paste_pump(s) : SL_ERROR_INVALID;
+}
 int sl_image_paste_resume(sl_t *s, sl_image_paste_id_t id) {
-  return sl_image_resume(s, id);
+  return s && s->image_paste_resume ? s->image_paste_resume(s, id)
+                                    : SL_ERROR_INVALID;
 }
 int sl_image_paste_complete(sl_t *s, sl_image_paste_id_t id, const char *p,
                             const char *r) {
-  return sl_image_complete(s, id, p, r);
+  return s && s->image_paste_complete ? s->image_paste_complete(s, id, p, r)
+                                      : SL_ERROR_INVALID;
 }
 int sl_image_paste_cancel(sl_t *s, sl_image_paste_id_t id) {
-  return sl_image_cancel(s, id);
+  return s && s->image_paste_cancel ? s->image_paste_cancel(s, id)
+                                    : SL_ERROR_INVALID;
 }

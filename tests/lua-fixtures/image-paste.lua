@@ -7,7 +7,7 @@ local finished=false
 local context={}
 local owner=coroutine.running()
 local creator=coroutine.create(function()
-  return assert(softline.new {image_paste_max_bytes=32*1024*1024,
+  return assert(softline.new {image_paste_max_bytes=0,
     image_paste_context=context,
     image_paste_callback=function(ctx,event)
       assert(ctx==context and coroutine.running()==owner)

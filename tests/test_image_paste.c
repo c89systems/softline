@@ -21,10 +21,22 @@ extern size_t image_fixture_size, image_fixture_reads;
 extern int image_fixture_gate, image_fixture_fail;
 extern const char *image_fixture_mime;
 unsigned char image_fixture_byte(size_t);
+struct image_api {
+  int (*start)(sl_t *, sl_image_paste_id_t *);
+  int (*prepare)(sl_t *, sl_image_paste_wait_t *);
+  int (*pump)(sl_t *);
+  int (*resume)(sl_t *, sl_image_paste_id_t);
+  int (*complete)(sl_t *, sl_image_paste_id_t, const char *, const char *);
+  int (*cancel)(sl_t *, sl_image_paste_id_t);
+};
+static const struct image_api free_api = {
+    sl_image_paste_start,  sl_image_paste_prepare,  sl_image_paste_pump,
+    sl_image_paste_resume, sl_image_paste_complete, sl_image_paste_cancel};
 struct host {
   sl_t *sl;
   sl_image_paste_id_t id;
   size_t received;
+  const struct image_api *api;
   int begin, end, aborts, done, pause, paused, reject, failed;
 };
 static int receive_image(void *context, const sl_image_paste_event_t *e) {
@@ -92,76 +104,89 @@ static sl_t *editor(struct host *h, size_t limit, size_t line_limit,
 static int drive(struct host *h) {
   unsigned int i;
   for (i = 0; i < 10000 && !h->end && !h->aborts && !h->paused; ++i)
-    CHECK(sl_image_paste_pump(h->sl) == SL_OK);
+    CHECK((h->api ? h->api->pump(h->sl) : sl_image_paste_pump(h->sl)) == SL_OK);
   CHECK(i < 10000 && !h->failed);
   return 0;
 }
-static int basic(void) {
+static int basic(int receiver) {
   struct host h;
   sl_t *sl;
   sl_image_paste_id_t id, another;
   sl_image_paste_wait_t wait;
   size_t reads;
+  struct image_api api = free_api;
   image_fixture_size = 32769;
   image_fixture_gate = 1;
   sl = editor(&h, 0, 131072, 0);
   CHECK(sl && sl_set_buffer(sl, "AB") == SL_OK &&
         sl_set_cursor(sl, 1) == SL_OK);
-  CHECK(sl->image_paste_start(sl, &id) == SL_OK);
-  CHECK(sl_image_paste_start(sl, &another) == SL_ERROR_INVALID);
-  CHECK(sl_image_paste_complete(sl, id, "/backend/image.png", NULL) ==
-        SL_ERROR_INVALID);
+  if (receiver) {
+    api.start = sl->image_paste_start;
+    api.prepare = sl->image_paste_prepare;
+    api.pump = sl->image_paste_pump;
+    api.resume = sl->image_paste_resume;
+    api.complete = sl->image_paste_complete;
+    api.cancel = sl->image_paste_cancel;
+  }
+  CHECK(api.start && api.prepare && api.pump && api.resume && api.complete &&
+        api.cancel);
+  h.api = &api;
+  CHECK(api.start(sl, &id) == SL_OK);
+  CHECK(api.start(sl, &another) == SL_ERROR_INVALID);
+  CHECK(api.complete(sl, id, "/backend/image.png", NULL) == SL_ERROR_INVALID);
   h.pause = 1;
   CHECK(drive(&h) == 0 && h.begin == 1 && h.paused && h.received == 0);
   reads = image_fixture_reads;
-  CHECK(sl_image_paste_prepare(sl, &wait) == SL_OK && wait.count == 0 &&
+  CHECK(api.prepare(sl, &wait) == SL_OK && wait.count == 0 &&
         wait.timeout_ms > 0);
   CHECK(sl_insert(sl, "X") == SL_OK && !strcmp(sl_buffer(sl), "AXB"));
   CHECK(sl_set_cursor(sl, 0) == SL_OK && sl_insert(sl, "Y") == SL_OK);
   CHECK(sl_set_cursor(sl, 4) == SL_OK && sl_insert(sl, "Z") == SL_OK);
-  CHECK(sl_image_paste_pump(sl) == SL_OK && image_fixture_reads == reads);
-  CHECK(sl_image_paste_resume(sl, id + 1) == SL_ERROR_INVALID);
-  CHECK(sl_image_paste_resume(sl, id) == SL_OK);
+  CHECK(api.pump(sl) == SL_OK && image_fixture_reads == reads);
+  CHECK(api.resume(sl, id + 1) == SL_ERROR_INVALID);
+  CHECK(api.resume(sl, id) == SL_OK);
   h.paused = 0;
   CHECK(drive(&h) == 0 && h.paused && image_fixture_reads == reads);
   h.pause = h.paused = 0;
-  CHECK(sl_image_paste_resume(sl, id) == SL_OK &&
-        sl_image_paste_pump(sl) == SL_OK);
+  CHECK(api.resume(sl, id) == SL_OK && api.pump(sl) == SL_OK);
   CHECK(h.received == 16384 && !h.end);
-  CHECK(sl_image_paste_pump(sl) == SL_OK && image_fixture_reads == reads &&
-        !h.end);
+  CHECK(api.pump(sl) == SL_OK && image_fixture_reads == reads && !h.end);
   image_fixture_gate = 0;
   CHECK(drive(&h) == 0 && h.end == 1 && h.received == image_fixture_size);
   CHECK(!strcmp(sl_buffer(sl), "YAXBZ"));
-  CHECK(sl_image_paste_prepare(sl, &wait) == SL_OK && wait.count == 0 &&
+  CHECK(api.prepare(sl, &wait) == SL_OK && wait.count == 0 &&
         wait.timeout_ms > 0);
-  CHECK(sl_image_paste_complete(sl, id, "relative.png", NULL) ==
-        SL_ERROR_INVALID);
-  CHECK(sl_image_paste_complete(sl, id, "/bad\033path", NULL) ==
-        SL_ERROR_INVALID);
-  CHECK(sl_image_paste_complete(sl, id, "/backend/image.png", NULL) == SL_OK);
+  CHECK(api.complete(sl, id, "relative.png", NULL) == SL_ERROR_INVALID);
+  CHECK(api.complete(sl, id, "/bad\033path", NULL) == SL_ERROR_INVALID);
+  CHECK(api.complete(sl, id, "/backend/image.png", NULL) == SL_OK);
   CHECK(!strcmp(sl_buffer(sl), "YAXBZ"));
-  CHECK(sl_image_paste_complete(sl, id, "/backend/duplicate", NULL) ==
-        SL_ERROR_INVALID);
-  CHECK(sl_image_paste_pump(sl) == SL_OK &&
+  CHECK(api.complete(sl, id, "/backend/duplicate", NULL) == SL_ERROR_INVALID);
+  CHECK(api.pump(sl) == SL_OK &&
         !strcmp(sl_buffer(sl), "YA/backend/image.pngXBZ"));
-  CHECK(sl_image_paste_cancel(sl, id) == SL_ERROR_INVALID && !h.aborts);
+  CHECK(api.cancel(sl, id) == SL_ERROR_INVALID && !h.aborts);
   CHECK(h.done == 1 && !h.failed);
+  memset(&h, 0, sizeof(h));
+  h.sl = sl;
+  h.api = &api;
+  CHECK(api.start(sl, &id) == SL_OK && api.cancel(sl, id) == SL_OK);
+  CHECK(h.aborts == 1 && !h.failed && api.cancel(sl, id) == SL_ERROR_INVALID);
   sl_destroy(sl);
   return 0;
 }
 static int limits(void) {
-  size_t sizes[] = {10000000u, 10000001u, 32u, 33u};
+  size_t sizes[] = {33554432u, 33554433u, 32u, 33u, 33554433u, 33554434u};
+  size_t limits[] = {0, 0, 32u, 32u, 33554433u, 33554433u};
   size_t i;
-  for (i = 0; i < 4; ++i) {
+  for (i = 0; i < 6; ++i) {
     struct host h;
     sl_image_paste_id_t id;
-    sl_t *sl = editor(&h, i < 2 ? 0 : 32, 100, 0);
+    sl_t *sl = editor(&h, limits[i], 100, 0);
     CHECK(sl);
     image_fixture_size = sizes[i];
     CHECK(sl_image_paste_start(sl, &id) == SL_OK && drive(&h) == 0);
     if (i & 1) {
-      CHECK(h.aborts == 1 && !h.end && h.received <= (i < 2 ? 10000000u : 32u));
+      CHECK(h.aborts == 1 && !h.end &&
+            h.received <= (limits[i] ? limits[i] : 33554432u));
       CHECK(sl_image_paste_complete(sl, id, "/late", NULL) == SL_ERROR_INVALID);
     } else {
       CHECK(h.end == 1 && !h.aborts && h.received == sizes[i]);
@@ -461,7 +486,7 @@ static void *worker(void *unused) {
       stack > 160u * 1024u)
     return (void *)1;
   pthread_attr_destroy(&attributes);
-  result = basic() || limits() || failures() || deadlines() ||
+  result = basic(0) || basic(1) || limits() || failures() || deadlines() ||
            deadline_domains() || native_cases();
   return (void *)(size_t)result;
 }
