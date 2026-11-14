@@ -18,7 +18,7 @@
 
 typedef struct softline_lua_handle {
   sl_t *sl;
-  /* Input/backend wrappers scope native callbacks to the active caller;
+  /* Native-call dispatch scopes callbacks to the active caller;
    * the constructor coroutine need not remain alive after construction. */
   lua_State *L;
   struct {
@@ -71,8 +71,33 @@ static softline_lua_handle_t *softline_lua_check(lua_State *L, int index) {
                 "cannot reenter softline from a terminal callback");
   luaL_argcheck(L, !handle->image_callback_active, index,
                 "cannot reenter softline from an image callback");
-  handle->L = L;
   return handle;
+}
+
+/* Scope callback dispatch to this native call, including nested calls from
+ * other coroutines and Lua errors raised during argument/result handling. */
+static int softline_lua_dispatch(lua_State *L) {
+  softline_lua_handle_t *handle = luaL_testudata(L, 1, SOFTLINE_LUA_HANDLE);
+  lua_State *previous = handle ? handle->L : NULL;
+  int arguments = lua_gettop(L), status;
+  lua_pushvalue(L, lua_upvalueindex(1));
+  lua_insert(L, 1);
+  if (handle)
+    handle->L = L;
+  status = lua_pcall(L, arguments, LUA_MULTRET, 0);
+  if (handle)
+    handle->L = previous;
+  if (status != LUA_OK)
+    return lua_error(L);
+  return lua_gettop(L);
+}
+
+static void softline_lua_register(lua_State *L, const luaL_Reg *functions) {
+  for (; functions->name; ++functions) {
+    lua_pushcfunction(L, functions->func);
+    lua_pushcclosure(L, softline_lua_dispatch, 1);
+    lua_setfield(L, -2, functions->name);
+  }
 }
 
 static int softline_lua_status(lua_State *L, int status) {
@@ -651,6 +676,7 @@ static int softline_lua_new(lua_State *L) {
   lua_pushvalue(L, -1);
   lua_replace(L, 1);
   lua_settop(L, 1);
+  handle->L = NULL;
   return 1;
 }
 
@@ -686,6 +712,7 @@ static int softline_lua_gc(lua_State *L) {
     handle->L = L;
     sl_destroy(handle->sl);
     handle->sl = NULL;
+    handle->L = NULL;
   }
   lua_pushnil(L);
   lua_setiuservalue(L, 1, 4);
@@ -715,7 +742,7 @@ static int softline_lua_close(lua_State *L) {
  * restored on release. */
 static int softline_lua_readline(lua_State *L) {
   softline_lua_handle_t *handle;
-  lua_State *previous, *previous_backend;
+  lua_State *previous;
   const char *prompt;
   char *line;
   handle = softline_lua_check(L, 1);
@@ -725,12 +752,7 @@ static int softline_lua_readline(lua_State *L) {
   handle->history_callback_error[0] = '\0';
   previous = handle->history_caller;
   handle->history_caller = L;
-  /* All native callbacks belong to this input call, including when the
-   * constructor coroutine has already been collected. */
-  previous_backend = handle->L;
-  handle->L = L;
   line = sl_readline(handle->sl, prompt);
-  handle->L = previous_backend;
   handle->history_caller = previous;
   if (handle->idle_callback_failed || handle->watch_callback_failed) {
     if (line)
@@ -758,7 +780,7 @@ static int softline_lua_readline(lua_State *L) {
  * never returns accepted backend work as local model input. */
 static int softline_lua_next_prompt(lua_State *L) {
   softline_lua_handle_t *handle;
-  lua_State *previous, *previous_backend;
+  lua_State *previous;
   const char *prompt;
   char *line;
   sl_prompt_source_t source;
@@ -770,10 +792,7 @@ static int softline_lua_next_prompt(lua_State *L) {
   source = SL_PROMPT_SOURCE_NONE;
   previous = handle->history_caller;
   handle->history_caller = L;
-  previous_backend = handle->L;
-  handle->L = L;
   line = sl_next_prompt(handle->sl, prompt, &source);
-  handle->L = previous_backend;
   handle->history_caller = previous;
   if (handle->idle_callback_failed || handle->watch_callback_failed) {
     if (line)
@@ -1486,11 +1505,8 @@ static int softline_lua_queue_stopped(lua_State *L) {
 
 static int softline_lua_queue_resume(lua_State *L) {
   softline_lua_handle_t *handle = softline_lua_check(L, 1);
-  lua_State *previous = handle->L;
   int status;
-  handle->L = L;
   status = sl_prompt_queue_resume(handle->sl);
-  handle->L = previous;
   return softline_lua_status(L, status);
 }
 
@@ -1523,27 +1539,21 @@ static int softline_lua_queue_draft_info(lua_State *L) {
 
 static int softline_lua_queue_approve(lua_State *L) {
   softline_lua_handle_t *handle = softline_lua_check(L, 1);
-  lua_State *previous = handle->L;
   int status;
   sl_prompt_id_t id;
   if (!softline_lua_queue_identity(L, &id))
     return softline_lua_status(L, SL_ERROR_INVALID);
-  handle->L = L;
   status = sl_prompt_queue_approve(handle->sl, id);
-  handle->L = previous;
   return softline_lua_status(L, status);
 }
 
 static int softline_lua_queue_reject(lua_State *L) {
   softline_lua_handle_t *handle = softline_lua_check(L, 1);
-  lua_State *previous = handle->L;
   int status;
   sl_prompt_id_t id;
   if (!softline_lua_queue_identity(L, &id))
     return softline_lua_status(L, SL_ERROR_INVALID);
-  handle->L = L;
   status = sl_prompt_queue_reject(handle->sl, id);
-  handle->L = previous;
   return softline_lua_status(L, status);
 }
 
@@ -1616,17 +1626,14 @@ static int softline_lua_queue_clear(lua_State *L) {
 
 static int softline_lua_queue_draft(lua_State *L) {
   softline_lua_handle_t *handle;
-  lua_State *previous, *previous_backend;
+  lua_State *previous;
   int status;
   handle = softline_lua_check(L, 1);
   if (!handle->history_callback_active)
     handle->history_callback_error[0] = '\0';
   previous = handle->history_caller;
   handle->history_caller = L;
-  previous_backend = handle->L;
-  handle->L = L;
   status = sl_prompt_queue_enqueue_draft(handle->sl);
-  handle->L = previous_backend;
   handle->history_caller = previous;
   return softline_lua_history_status(L, handle, status);
 }
@@ -2409,12 +2416,12 @@ int luaopen_softline(lua_State *L) {
   lua_pushcfunction(L, softline_lua_gc);
   lua_setfield(L, -2, "__gc");
   lua_newtable(L);
-  luaL_setfuncs(L, softline_lua_methods, 0);
+  softline_lua_register(L, softline_lua_methods);
   lua_setfield(L, -2, "__index");
   lua_pop(L, 1);
 
   lua_newtable(L);
-  luaL_setfuncs(L, softline_lua_functions, 0);
+  softline_lua_register(L, softline_lua_functions);
   lua_pushinteger(L, SL_IMAGE_PASTE_BEGIN);
   lua_setfield(L, -2, "IMAGE_PASTE_BEGIN");
   lua_pushinteger(L, SL_IMAGE_PASTE_DATA);

@@ -5,11 +5,14 @@
 #include <poll.h>
 #include <pthread.h>
 #include <pty.h>
+#include <signal.h>
 #include <softline/softline.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 #define CHECK(c)                                                               \
@@ -505,6 +508,166 @@ static int native_cases(void) {
   }
   return 0;
 }
+struct watched_image {
+  struct host host;
+  int events, pump;
+};
+static int watched_image_event(void *context, const sl_image_paste_event_t *e) {
+  struct watched_image *w = context;
+  char event;
+  int status = receive_image(&w->host, e);
+  if (e->operation == SL_IMAGE_PASTE_END ||
+      e->operation == SL_IMAGE_PASTE_DONE) {
+    event = e->operation == SL_IMAGE_PASTE_END ? 'E' : 'D';
+    if (write(w->events, &event, 1) != 1)
+      return SL_ERROR_IO;
+  }
+  return status;
+}
+static int watched_image_ready(sl_t *sl, const sl_watch_event_t *event,
+                               void *context) {
+  struct watched_image *w = context;
+  char command;
+  if (read(event->fd, &command, 1) != 1)
+    return SL_ERROR_IO;
+  if (command == 'S')
+    return sl->image_paste_start(sl, &w->host.id);
+  if (command != 'C' ||
+      sl->image_paste_complete(sl, w->host.id, "/backend/watch-image.png",
+                               NULL) != SL_OK)
+    return SL_ERROR;
+  return w->pump ? sl->image_paste_pump(sl) : SL_OK;
+}
+static double redraw_time(void) {
+  struct timespec t;
+  clock_gettime(CLOCK_MONOTONIC, &t);
+  return t.tv_sec + t.tv_nsec / 1000000000.0;
+}
+static int watched_redraw(int pump) {
+  int master = -1, slave = -1, commands[2] = {-1, -1}, events[2] = {-1, -1};
+  int failed = 1, submitted = 0, done_notice = 0, status;
+  pid_t child = -1;
+  char *output = calloc(1, 8192);
+  size_t used = 0, scanned = 0;
+  double deadline = redraw_time() + 4;
+  struct winsize size;
+  memset(&size, 0, sizeof(size));
+  size.ws_row = 24;
+  size.ws_col = 100;
+  if (!output || openpty(&master, &slave, NULL, NULL, &size) ||
+      pipe(commands) || pipe(events))
+    goto cleanup;
+  child = fork();
+  if (!child) {
+    struct watched_image w;
+    sl_config_t config;
+    sl_watch_id_t watch;
+    char *line;
+    close(master);
+    close(commands[1]);
+    close(events[0]);
+    memset(&w, 0, sizeof(w));
+    w.events = events[1];
+    w.pump = pump;
+    sl_config_init(&config);
+    config.input_fd = config.output_fd = slave;
+    config.image_paste_callback = watched_image_event;
+    config.image_paste_context = &w;
+    w.host.sl = sl_create_with_config(&config);
+    if (!w.host.sl || sl_watch_add(w.host.sl, commands[0], SL_WATCH_READ,
+                                   watched_image_ready, &w, &watch) != SL_OK)
+      _exit(2);
+    image_fixture_size = 64;
+    image_fixture_gate = image_fixture_fail = 0;
+    line = sl_readline(w.host.sl, "watch> ");
+    status = !line || strcmp(line, "/backend/watch-image.png") ||
+             w.host.failed || w.host.done != 1;
+    sl_free_string(w.host.sl, line);
+    sl_destroy(w.host.sl);
+    _exit(status ? 2 : 0);
+  }
+  if (child < 0)
+    goto cleanup;
+  close(slave);
+  slave = -1;
+  close(commands[0]);
+  commands[0] = -1;
+  close(events[1]);
+  events[1] = -1;
+  if (write(commands[1], "S", 1) != 1)
+    goto cleanup;
+  do {
+    struct pollfd fds[2];
+    pid_t exited;
+    fds[0].fd = master;
+    fds[0].events = POLLIN;
+    fds[0].revents = 0;
+    fds[1].fd = events[0];
+    fds[1].events = POLLIN;
+    fds[1].revents = 0;
+    if (poll(fds, 2, 10) < 0 && errno != EINTR)
+      goto cleanup;
+    if (fds[0].revents & POLLIN) {
+      const char *query;
+      ssize_t count = read(master, output + used, 8191 - used);
+      if (count > 0)
+        used += (size_t)count;
+      output[used] = 0;
+      if (used == 8191)
+        goto cleanup;
+      while ((query = strstr(output + scanned, "\033[6n")) != NULL) {
+        if (write(master, "\033[1;1R", 6) != 6)
+          goto cleanup;
+        scanned = (size_t)(query - output) + 4;
+      }
+    }
+    if (fds[1].revents & POLLIN) {
+      char notice;
+      if (read(events[0], &notice, 1) != 1)
+        goto cleanup;
+      if (notice == 'E' && write(commands[1], "C", 1) != 1)
+        goto cleanup;
+      if (notice == 'D')
+        done_notice = 1;
+    }
+    /* No input key is sent until the completed path has actually appeared. */
+    if (!submitted && done_notice &&
+        strstr(output, "/backend/watch-image.png")) {
+      if (write(master, "\r", 1) != 1)
+        goto cleanup;
+      submitted = 1;
+    }
+    exited = waitpid(child, &status, WNOHANG);
+    if (exited == child) {
+      child = -1;
+      failed = !submitted || !WIFEXITED(status) || WEXITSTATUS(status);
+      break;
+    }
+  } while (redraw_time() < deadline);
+cleanup:
+  if (failed)
+    fprintf(stderr,
+            "watch image redraw failed (explicit pump=%d, DONE=%d)\n%s\n", pump,
+            done_notice, output ? output : "");
+  if (child > 0) {
+    kill(child, SIGKILL);
+    waitpid(child, NULL, 0);
+  }
+  if (master >= 0)
+    close(master);
+  if (slave >= 0)
+    close(slave);
+  if (commands[0] >= 0)
+    close(commands[0]);
+  if (commands[1] >= 0)
+    close(commands[1]);
+  if (events[0] >= 0)
+    close(events[0]);
+  if (events[1] >= 0)
+    close(events[1]);
+  free(output);
+  return failed;
+}
 static void *worker(void *unused) {
   int result;
   pthread_attr_t attributes;
@@ -520,11 +683,15 @@ static void *worker(void *unused) {
            deadline_domains() || native_cases();
   return (void *)(size_t)result;
 }
-int main(void) {
+int main(int argc, char **argv) {
   pthread_t thread;
   void *result;
 #if defined(__GLIBC__)
   pthread_attr_t attributes;
+#endif
+  if (argc == 2 && !strcmp(argv[1], "redraw"))
+    return watched_redraw(0) || watched_redraw(1);
+#if defined(__GLIBC__)
   CHECK(pthread_getattr_default_np(&attributes) == 0);
   CHECK(pthread_attr_setstacksize(&attributes, 128u * 1024u) == 0);
   CHECK(pthread_setattr_default_np(&attributes) == 0);

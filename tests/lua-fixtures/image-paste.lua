@@ -32,7 +32,18 @@ local ok,editor=coroutine.resume(creator)
 assert(ok and editor)
 creator=nil;collectgarbage("collect");collectgarbage("collect")
 assert(editor:set_idle_callback(function()
-  if paused then paused=false;assert(editor:image_paste_resume(id)) end
+  if paused then
+    paused=false
+    local producer=coroutine.create(function()
+      owner=coroutine.running()
+      assert(editor:image_paste_resume(id))
+      assert(editor:image_paste_pump())
+    end)
+    local ok,message=coroutine.resume(producer)
+    owner=coroutine.running()
+    assert(ok,message)
+    producer=nil;collectgarbage("collect")
+  end
   if aborted then assert(editor:submit());return end
   if ended and phase==0 then
     assert(not editor:buffer():find("/backend/",1,true))

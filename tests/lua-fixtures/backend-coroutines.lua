@@ -1,7 +1,8 @@
 local softline = require("softline")
 
 local function run(method, construct_on_main, collect_constructor, read_on_main, mode)
-  local editor, creator, caller, observed, synchronize
+  local editor, creator, caller, observed, synchronize, nested
+  local idle_passes = 0
   local sync_calls, offers, detached = 0, 0, 0
   local context = {}
   local function make()
@@ -58,9 +59,26 @@ local function run(method, construct_on_main, collect_constructor, read_on_main,
         end))
       end
       assert(editor:set_idle_callback(function()
-        if mode == "idle" then
+        if mode == "idle" or mode == "nested" or mode == "nested-error" or mode == "nested-collected" then
           observed = coroutine.running()
-          assert(editor:cancel())
+          assert(observed == caller, "nested accessor changed callback coroutine")
+          idle_passes = idle_passes + 1
+          if mode ~= "idle" and idle_passes == 1 then
+            nested = coroutine.create(function()
+              assert(editor:buffer() == "")
+              if mode == "nested-error" then
+                local ok = pcall(editor.set_cursor, editor, "invalid")
+                assert(not ok, "invalid nested argument was accepted")
+              end
+            end)
+            assert(coroutine.resume(nested))
+            if mode == "nested-collected" then
+              local weak = setmetatable({nested}, {__mode="v"})
+              nested = nil
+              collectgarbage("collect"); collectgarbage("collect")
+              assert(weak[1] == nil, "nested accessor coroutine remained rooted")
+            end
+          else assert(editor:cancel()) end
         elseif not synchronized then
           assert(synchronize, "native synchronization callback missing")
           assert(editor:queue_backend_update {revision="q0", entries={}, total_count=0})
@@ -98,5 +116,8 @@ for _, method in ipairs({"readline", "next_prompt"}) do
   run(method, false, true, true, "idle")
   run(method, false, true, false, "key")
   run(method, false, true, false, "watch")
+  run(method, false, true, false, "nested")
+  run(method, true, false, true, "nested-error")
+  run(method, false, true, false, "nested-collected")
 end
 print("lua backend coroutine dispatch passed")

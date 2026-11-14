@@ -5693,13 +5693,22 @@ static ssize_t sl_read_input_byte(sl_t *self, char *ch, int timeout_ms) {
   int dispatched;
   int poll_timeout_ms;
   int deadline_valid;
+  int image_was_pending;
   struct timeval deadline_started;
   if (!self || !ch)
     return -1;
   impl = sl_impl(self);
   if (!impl)
     return -1;
+  image_was_pending = sl_image_pending(impl);
   (void)sl_image_pump(self);
+  /* Completion can retire the last deadline. Paint its edit before a
+   * watch-only owner enters the next unbounded input wait. */
+  if (image_was_pending && !sl_image_pending(impl) && impl->active_prompt &&
+      sl_render_apply(self, impl->active_prompt) != 0) {
+    errno = EIO;
+    return -1;
+  }
   if (sl_image_prepare(self, &image_wait) != SL_OK)
     return -1;
   errno = 0;

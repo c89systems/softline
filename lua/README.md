@@ -607,6 +607,9 @@ lua examples/chat.lua
 
 The facade loads the installed public shared `libsoftline`; a static-only SDK
 is rejected. Local SDK tests install from the common Debug library producer.
+`make lua-test` (also `make lua-rock`) and `make lua-debug-test` prepare the
+pinned terminal-test environment, X11 fixture executables and generated images
+before configuring the Lua suite. A prior native test build is not required.
 
 `examples/chat.lua` accepts the same `SOFTLINE_PROMPT_THEME` values as the C
 chat example. It uses the default native persistent output session: transcript
@@ -994,6 +997,10 @@ The host owns upload status presentation. Image handover adds no row and never
 changes status-message text or spinner state. Record lifecycle updates in the
 callback, then use the normal status-message APIs from the owner loop after the
 callback returns.
+
+Native callbacks run on the coroutine making the active native call. Nested
+accessors, validation errors, and calls from another coroutine restore the
+previous caller on return; they cannot redirect subsequent readline callbacks.
 
 Mutation methods return true or nil, status. Stale IDs, duplicate notifications
 and invalid ordering return softline.ERROR_INVALID. Metadata/paths are literal;

@@ -15,8 +15,10 @@ INSTALL_LIBDIR_ARG="-DCMAKE_INSTALL_LIBDIR=${INSTALL_LIBDIR:-lib}"
 
 (
   cd "${ROOT_DIR}"
-  cmake --preset debug "${INSTALL_LIBDIR_ARG}"
-  cmake --build --preset debug --target softline_static softline_shared
+  "${ROOT_DIR}/scripts/terminal-test-env.sh" cmake --preset debug \
+    "${INSTALL_LIBDIR_ARG}" -DSL_BUILD_TESTS=ON -DSL_BUILD_EXAMPLES=ON
+  cmake --build --preset debug --target softline_static softline_shared \
+    test_clipboard_image clipboard_fixture
 )
 rm -rf "${SDK_DIR}"
 cmake --install "${ROOT_DIR}/build/debug" --prefix "${SDK_DIR}"

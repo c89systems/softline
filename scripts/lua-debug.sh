@@ -17,7 +17,12 @@ fi
 
 (
   cd "${ROOT_DIR}"
-  cmake --preset debug
+  if [ "${MODE}" = test ]; then
+    "${ROOT_DIR}/scripts/terminal-test-env.sh" cmake --preset debug \
+      -DSL_BUILD_TESTS=ON -DSL_BUILD_EXAMPLES=ON
+  else
+    cmake --preset debug
+  fi
   cmake --build --preset debug
 )
 
