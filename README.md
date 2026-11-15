@@ -198,6 +198,15 @@ Not currently implemented:
 
 ## Examples
 
+Interactive C Make targets run through an independent terminal recovery parent.
+The application uses its existing terminal directly, with no extra PTY or byte
+relay. The parent restores terminal attributes, file flags and foreground
+ownership even if the application crashes or is killed, provided the parent
+survives. Web-only and queue-server targets run directly. To wrap another host:
+`./build/debug/examples/softline_terminal_supervisor -- PROGRAM [ARG ...]`.
+See [terminal recovery](docs/terminal-handoff-design.md#independent-launcher)
+for suspension, signal handling and the recovery boundary.
+
 The opt-in [web frontend](docs/web-frontend.md) ships with the library and uses
 your host's HTTP/WebSocket routes. `make run-chat-web` runs local ANSI and web
 views together; `make run-chat-web-only` serves only the browser. Queue-server

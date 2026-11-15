@@ -5,6 +5,15 @@ foreach(terminal_root "${SOFTLINE_TERMINAL_TEST_ROOT}" "$ENV{SOFTLINE_TERMINAL_T
 endforeach()
 find_package(Threads REQUIRED)
 if(UNIX)
+  add_executable(test_terminal_supervisor test_terminal_supervisor.c)
+  if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_link_libraries(test_terminal_supervisor PRIVATE util)
+  endif()
+  softline_apply_warnings(test_terminal_supervisor)
+  softline_local_runtime(test_terminal_supervisor)
+  add_test(NAME softline_terminal_supervisor COMMAND test_terminal_supervisor
+    "$<TARGET_FILE:softline_terminal_supervisor>")
+  set_tests_properties(softline_terminal_supervisor PROPERTIES LABELS "integration;terminal;memcheck" TIMEOUT 30)
   add_executable(test_terminal_transport test_terminal_transport.c)
   target_include_directories(test_terminal_transport PRIVATE "${PROJECT_SOURCE_DIR}/examples")
   target_link_libraries(test_terminal_transport PRIVATE queue_demo_client)
@@ -564,6 +573,15 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND TARGET example_chat)
     "$<TARGET_FILE:example_chat_remote>" "${PROJECT_SOURCE_DIR}" "${PROJECT_BINARY_DIR}"
     "${chat_history_key}.history" "$<TARGET_FILE:test_chat_shell>" "$<TARGET_FILE:example_queue_owner>")
   set_tests_properties(softline_chat_remote_shell PROPERTIES LABELS "integration;queue;remote" TIMEOUT 60)
+  add_test(NAME softline_chat_supervised_shell COMMAND test_chat_shell c
+    "$<TARGET_FILE:example_chat>" "${PROJECT_SOURCE_DIR}" "${PROJECT_BINARY_DIR}"
+    "${chat_history_key}.history" "$<TARGET_FILE:test_chat_shell>")
+  add_test(NAME softline_chat_supervised_remote_shell COMMAND test_chat_shell remote
+    "$<TARGET_FILE:example_chat_remote>" "${PROJECT_SOURCE_DIR}" "${PROJECT_BINARY_DIR}"
+    "${chat_history_key}.history" "$<TARGET_FILE:test_chat_shell>" "$<TARGET_FILE:example_queue_owner>")
+  set_tests_properties(softline_chat_supervised_shell softline_chat_supervised_remote_shell PROPERTIES
+    LABELS "integration;terminal;example-smoke;memcheck" TIMEOUT 60
+    ENVIRONMENT "SOFTLINE_TEST_TERMINAL_SUPERVISOR=$<TARGET_FILE:softline_terminal_supervisor>")
   foreach(control quiet controls)
     add_test(NAME softline_chat_remote_${control} COMMAND test_chat_shell ${control}
       "$<TARGET_FILE:example_chat_remote>" "${PROJECT_SOURCE_DIR}" "${PROJECT_BINARY_DIR}"

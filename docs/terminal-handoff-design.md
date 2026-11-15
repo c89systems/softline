@@ -171,6 +171,49 @@ foreground job group as well as the shell group before closing the master.
 
 ## Raw-mode recovery
 
+### Independent launcher
+
+The C example Make targets launch the whole TUI application through
+`build/debug/examples/softline_terminal_supervisor -- PROGRAM [ARG ...]`.
+This is a host-side launcher, outside libsoftline. It creates one recovery parent
+and executes the application in its own foreground process group on the existing
+terminal. It creates no client PTY and never reads, writes, parses or buffers the
+application's terminal stream. Stdin/stdout/stderr, terminal identity, geometry,
+environment, working directory and arguments pass directly to the application.
+Kernel terminal input and window-change signals reach its foreground group.
+Softline, Lua and transport callbacks remain together in that application.
+
+Before starting the application, the parent saves terminal attributes and file
+flags using close-on-exec duplicate descriptors. It restores them and returns
+foreground ownership when the application exits, including `_exit()`, an exec
+replacement, SIGKILL or a crash in the application. Closing/reusing the
+application's descriptors cannot remove the parent's recovery descriptors.
+When the application stops, the parent saves its active modes, restores the
+original terminal and stops its own shell job. Foreground continuation restores
+the active modes and resumes the application. Supervisor HUP/TERM/INT/QUIT requests
+are forwarded to the application group, with SIGKILL after a one-second grace
+period if it does not exit. Other application control signals are forwarded
+without imposing termination. Exit codes pass through; signal termination uses
+128 plus the signal number. Launcher/setup/restoration failures return 125,
+and exec failures return 126/127.
+
+The launcher requires foreground startup and continuation when stdin and stdout
+are terminals. A background continuation is rejected without taking foreground
+ownership or changing the current owner's terminal settings. With non-TTY stdin
+or stdout it execs directly without supervision;
+Softline uses its existing noninteractive path. Web-only and queue-server Make
+targets run directly. Other hosts can explicitly use this launcher; merely
+linking libsoftline does not fork a process. The launcher is example/host source,
+not an installed SDK executable or an implicit runtime inside the library.
+
+Recovery still requires the parent to survive and the terminal to accept
+restoration. Killing/stopping the supervisor itself without a catchable signal,
+crashing both processes, or losing the terminal defeats this protection.
+This recovery concerns terminal attributes, descriptor flags and foreground
+ownership; it does not reconstruct terminal screen contents after a crash.
+
+### In-process library guards
+
 Native editing and handoff protect the original terminal attributes and file
 flags before changing them. Close-on-exec duplicate descriptors keep restoration
 attached to the original terminals even if application descriptors are closed or

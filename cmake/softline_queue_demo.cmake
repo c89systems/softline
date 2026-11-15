@@ -1,5 +1,10 @@
 # Shared example/fixture sources. Keep transport tests in hardening presets
 # that disable the interactive examples; none of these targets are installed.
+add_executable(softline_terminal_supervisor "${PROJECT_SOURCE_DIR}/examples/terminal_supervisor.c")
+set_target_properties(softline_terminal_supervisor PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/examples")
+softline_apply_warnings(softline_terminal_supervisor)
+softline_local_runtime(softline_terminal_supervisor)
 add_library(www_mock STATIC "${PROJECT_SOURCE_DIR}/examples/www_mock.c")
 target_link_libraries(www_mock PUBLIC softline)
 softline_apply_warnings(www_mock)
