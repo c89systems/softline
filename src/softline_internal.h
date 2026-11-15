@@ -257,6 +257,8 @@ void sl_terminal_cleanup(sl_impl_t *impl);
 void sl_terminal_abandon(sl_t *self);
 
 int sl_image_start(sl_t *, sl_image_paste_id_t *);
+int sl_image_start_source(sl_t *, const sl_image_paste_source_t *,
+                          sl_image_paste_id_t *);
 int sl_image_prepare(sl_t *, sl_image_paste_wait_t *);
 int sl_image_pump(sl_t *);
 int sl_image_resume(sl_t *, sl_image_paste_id_t);

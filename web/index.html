@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en" data-theme="default" data-font="sans">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="color-scheme" content="dark light">
+  <title>softline</title>
+  <link rel="stylesheet" href="./softline.css">
+  <script type="module" src="./softline.js"></script>
+</head>
+<body>
+  <header class="toolbar">
+    <a class="brand" href="./" aria-label="softline home">softline<span class="brand-dot"></span></a>
+    <div class="appearance">
+      <label>Theme <select id="theme" aria-label="Theme">
+        <option value="default">Default</option><option value="light">Light</option>
+        <option value="gruvbox">Gruvbox</option><option value="dracula">Dracula</option>
+        <option value="solarized">Solarized</option><option value="monokai">Monokai</option>
+        <option value="synthwave">Synthwave</option><option value="plain">Plain</option>
+        <option value="accent">Accent</option><option value="monochrome">Monochrome</option>
+        <option value="monogreen">Monogreen</option><option value="outrun">Outrun</option>
+        <option value="riced">Riced</option>
+      </select></label>
+      <label>Font <select id="font" aria-label="Font"><option value="sans">Sans</option><option value="mono">JetBrains Mono</option></select></label>
+    </div>
+    <span id="connection" role="status">Connecting</span>
+  </header>
+  <main id="chat" class="welcome-state">
+    <div id="scroll" tabindex="0" aria-label="Conversation">
+      <div id="messages" role="log" aria-label="Messages" aria-live="off"></div>
+    </div>
+    <section id="welcome"><div id="banner"></div><div id="welcome-text">Welcome to softline</div></section>
+    <div id="composer-area">
+      <button id="latest" class="icon-button" aria-label="Jump to latest" title="Jump to latest" hidden>↓</button>
+      <div id="queue" aria-label="Prompt queue" hidden></div>
+      <div id="activity" role="status" hidden></div>
+      <div id="completions" role="listbox" aria-label="Completions" hidden></div>
+      <form id="composer" autocomplete="off">
+        <div id="uploads" aria-label="Image attachments" hidden></div>
+        <div class="input-row">
+          <button id="plus" class="icon-button" type="button" aria-label="Completions and images" aria-expanded="false" title="Completions and images">+</button>
+          <textarea id="prompt" rows="1" placeholder="Ask softline" aria-label="Message" spellcheck="true"></textarea>
+          <button id="send" type="submit" aria-label="Send message" title="Send (Enter)"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5m-6 6 6-6 6 6"/></svg></button>
+        </div>
+      </form>
+      <div class="composer-hint"><span>Enter to send · Shift+Enter for a new line · Alt+Enter to steer</span></div>
+    </div>
+  </main>
+  <input id="image-input" type="file" accept="image/png,image/jpeg" multiple hidden>
+  <div id="toast" role="status" hidden></div>
+  <template id="copy-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="4" width="12" height="13" rx="3"/><path d="M16 17v2a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V9a2 2 0 0 1 2-2h3"/></svg></template>
+</body>
+</html>

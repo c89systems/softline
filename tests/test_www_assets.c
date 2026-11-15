@@ -1,0 +1,126 @@
+#include <softline/www.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#define CHECK(c)                                                               \
+  do {                                                                         \
+    if (!(c)) {                                                                \
+      fprintf(stderr, "asset line %d: %s\n", __LINE__, #c);                    \
+      return 1;                                                                \
+    }                                                                          \
+  } while (0)
+static char *asset(sl_www_t *w, const char *path) {
+  sl_www_asset_t a;
+  char *s;
+  if (sl_www_asset(w, path, &a) != SL_OK)
+    return NULL;
+  s = malloc(a.length + 1);
+  if (s) {
+    memcpy(s, a.data, a.length);
+    s[a.length] = 0;
+  }
+  return s;
+}
+int main(int argc, char **argv) {
+  static const char *paths[] = {"/",
+                                "/softline.css",
+                                "/softline.js",
+                                "/markdown.js",
+                                "/smd.js",
+                                "/JetBrainsMono-Regular.woff2"};
+  static const char *sources[] = {
+      "web/index.html",
+      "web/softline.css",
+      "web/softline.js",
+      "web/markdown.js",
+      "vendor/streaming-markdown/smd.js",
+      "vendor/jetbrains-mono/JetBrainsMono-Regular.woff2"};
+  sl_www_config_t cfg;
+  sl_www_t *w;
+  char *html, *css, *js, *md, *at;
+  size_t i;
+  int depth = 0;
+  CHECK(argc == 2);
+  sl_www_config_init(&cfg);
+  cfg.enabled = 1;
+  w = sl_www_create(&cfg);
+  CHECK(w);
+  for (i = 0; i < sizeof(paths) / sizeof(paths[0]); ++i) {
+    char file[4096];
+    FILE *f;
+    sl_www_asset_t a;
+    size_t offset = 0;
+    unsigned char bytes[4096];
+    CHECK(sl_www_asset(w, paths[i], &a) == SL_OK);
+    CHECK(snprintf(file, sizeof(file), "%s/%s", argv[1], sources[i]) <
+          (int)sizeof(file));
+    f = fopen(file, "rb");
+    CHECK(f);
+    for (;;) {
+      size_t n = fread(bytes, 1, sizeof(bytes), f);
+      CHECK(n <= a.length - offset && !memcmp(bytes, a.data + offset, n));
+      offset += n;
+      if (!n)
+        break;
+    }
+    CHECK(!ferror(f) && offset == a.length);
+    fclose(f);
+  }
+  html = asset(w, "/");
+  css = asset(w, "/softline.css");
+  js = asset(w, "/softline.js");
+  md = asset(w, "/markdown.js");
+  CHECK(html && css && js && md);
+  /* Every literal ID lookup in the shipped module names a real control. */
+  for (at = js; (at = strstr(at, "$('")) != NULL; at += 3) {
+    char id[128], *end = strchr(at + 3, '\'');
+    size_t n;
+    CHECK(end && (n = (size_t)(end - at - 3)) < 100);
+    strcpy(id, "id=\"");
+    memcpy(id + 4, at + 3, n);
+    id[n + 4] = '"';
+    id[n + 5] = 0;
+    CHECK(strstr(html, id));
+  }
+  for (at = html; (at = strstr(at, "<option value=\"")) != NULL; ++at) {
+    char selector[128], *end;
+    size_t n;
+    at += 15;
+    end = strchr(at, '"');
+    CHECK(end);
+    n = (size_t)(end - at);
+    CHECK(n < 60);
+    if (!strncmp(at, "sans", n) || !strncmp(at, "mono", n) ||
+        !strncmp(at, "default", n))
+      continue;
+    strcpy(selector, "data-theme=");
+    memcpy(selector + 11, at, n);
+    selector[11 + n] = ']';
+    selector[12 + n] = 0;
+    CHECK(strstr(css, selector));
+  }
+  for (at = css; *at; ++at) {
+    if (*at == '{')
+      ++depth;
+    else if (*at == '}')
+      --depth;
+    CHECK(depth >= 0);
+  }
+  CHECK(!depth && strstr(css, "scrollbar-color") &&
+        strstr(css, ".welcome-state #composer-area"));
+  CHECK(strstr(js, "file.stream().getReader()") &&
+        strstr(js, "navigator.clipboard.writeText") &&
+        !strstr(js, "file.arrayBuffer()"));
+  CHECK(strstr(md, "mdf-bar-chart") && strstr(md, "mdf-vertical-bar-chart") &&
+        strstr(md, "mdf-tile-chart"));
+  CHECK(!strstr(html, "http://") && !strstr(html, "https://"));
+  CHECK(!strstr(js, "innerHTML") || strstr(js, "banner').innerHTML"));
+  CHECK(!strstr(html, "microphone") && !strstr(html, "Read aloud") &&
+        !strstr(html, "High"));
+  free(html);
+  free(css);
+  free(js);
+  free(md);
+  sl_www_destroy(w);
+  return 0;
+}

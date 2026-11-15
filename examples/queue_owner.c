@@ -9,6 +9,7 @@
 #include "queue_demo_image.h"
 #include "queue_demo_terminal.h"
 #include "queue_demo_wire.h"
+#include "web_chat.h"
 #include <arpa/inet.h>
 #include <errno.h>
 #include <limits.h>
@@ -45,6 +46,10 @@ typedef struct item {
   int direct_start;
 } item_t;
 typedef struct owner {
+  demo_web_chat_t *web;
+  client_t web_client, *request_client;
+  sl_queue_result_status_t web_status;
+  int web_reasoning;
   demo_image_store_t image;
   demo_terminal_server_t *terminal, *closed_terminals;
   demo_link_t link;
@@ -63,6 +68,9 @@ typedef struct owner {
   char previous;
   double next_piece, next_injection;
 } owner_t;
+static int web_submit(void *, const char *, int, sl_queue_request_id_t *);
+static int web_control(void *, const char *, const char *, const char *);
+static void web_snapshot(void *, demo_web_chat_t *);
 static volatile sig_atomic_t quitting;
 static volatile sig_atomic_t producer_paused;
 /* Optional deterministic fixture control: queue service remains live while
@@ -128,6 +136,28 @@ static void send_packet(owner_t *o, demo_packet_t *p) {
 }
 static void text_event(owner_t *o, int kind, const char *text) {
   demo_packet_t p = {0};
+  if (o->web) {
+    if (kind == DEMO_PROMPT)
+      demo_web_message(o->web, "user", text);
+    else if (kind == DEMO_RESPONSE_BEGIN) {
+      demo_web_response_end(o->web);
+      o->web_reasoning = 0;
+      demo_web_status(o->web, "Thinking...", 1);
+    } else if (kind == DEMO_OUTPUT) {
+      demo_web_response(o->web, text, strlen(text));
+      if (!o->web_reasoning && o->answer_pos >= 15) {
+        o->web_reasoning = 1;
+        demo_web_status(o->web, "Reasoning...", 1);
+      }
+    } else if (kind == DEMO_OUTPUT_END || kind == DEMO_SEGMENT_END) {
+      demo_web_response_end(o->web);
+      if (kind == DEMO_OUTPUT_END)
+        demo_web_status(o->web, "", 0);
+    } else if (kind == DEMO_MESSAGE)
+      demo_web_status(o->web, text ? text : "", o->active);
+    else if (kind == DEMO_NOTE)
+      demo_web_message(o->web, "note", text ? text : "");
+  }
   if (!o->client || o->shell_pending)
     return;
   demo_put_number(&p, (unsigned long)kind);
@@ -158,6 +188,7 @@ static void change(owner_t *o, sl_queue_change_kind_t kind, size_t index,
   if (kind != SL_QUEUE_SNAPSHOT)
     ++o->revision;
   (void)snprintf(revision, sizeof(revision), "q%lu", o->revision);
+  demo_web_queue(o->web);
   if (!o->client || o->shell_pending)
     return;
   memset(&c, 0, sizeof(c));
@@ -166,7 +197,7 @@ static void change(owner_t *o, sl_queue_change_kind_t kind, size_t index,
   c.revision = revision;
   c.index = index;
   c.item_id = removed;
-  c.request_id = request;
+  c.request_id = o->request_client ? 0 : request;
   c.total_count = o->count;
   c.stopped = o->stopped;
   c.auto_approval = o->auto_approval;
@@ -241,6 +272,10 @@ static item_t *add(owner_t *o, const char *text, sl_prompt_queue_mode_t mode,
 }
 static void emit_result(owner_t *o, const sl_queue_result_t *result) {
   demo_packet_t p = {0};
+  if (o->request_client) {
+    o->web_status = result->status;
+    return;
+  }
   demo_put_result(&p, result);
   send_packet(o, &p);
 }
@@ -321,7 +356,7 @@ static int command(const char *text) {
 }
 static void handle_request(owner_t *o, const sl_queue_request_t *r) {
   sl_queue_result_t result;
-  client_t *client = o->client;
+  client_t *client = o->request_client ? o->request_client : o->client;
   unsigned long previous_high;
   item_t *item = NULL;
   size_t index, i;
@@ -511,6 +546,61 @@ done:
   save_result(client, &result);
   emit_result(
       o, &client->results[(client->next + RESULT_MAX - 1) % RESULT_MAX].value);
+}
+static int web_request(owner_t *o, sl_queue_request_t *r) {
+  if (o->web_client.high == ULONG_MAX)
+    return SL_ERROR_FULL;
+  r->request_id = o->web_client.high + 1;
+  o->request_client = &o->web_client;
+  o->web_status = SL_QUEUE_REJECTED;
+  handle_request(o, r);
+  o->request_client = NULL;
+  return o->web_status == SL_QUEUE_ACCEPTED ? SL_OK : SL_ERROR_CONFLICT;
+}
+static int web_submit(void *context, const char *text, int steer,
+                      sl_queue_request_id_t *request_id) {
+  owner_t *o = context;
+  sl_queue_request_t r;
+  (void)request_id;
+  if (is_shell_command(text) || !strcmp(text, "/quit"))
+    return SL_ERROR_INVALID;
+  memset(&r, 0, sizeof(r));
+  r.operation = SL_QUEUE_OFFER;
+  r.mode = steer ? SL_PROMPT_QUEUE_MODE_STEER : SL_PROMPT_QUEUE_MODE_QUEUED;
+  r.text = text;
+  return web_request(o, &r);
+}
+static int web_control(void *context, const char *action, const char *id,
+                       const char *revision) {
+  owner_t *o = context;
+  sl_queue_request_t r;
+  if (!strcmp(action, "cancel")) {
+    o->active = o->waiting_gate = o->shell_requested = 0;
+    set_stopped(o, 1, 0);
+    text_event(o, DEMO_OUTPUT_END, NULL);
+    return SL_OK;
+  }
+  memset(&r, 0, sizeof(r));
+  if (!strcmp(action, "approve"))
+    r.operation = SL_QUEUE_APPROVE;
+  else if (!strcmp(action, "reject"))
+    r.operation = SL_QUEUE_WITHDRAW;
+  else
+    return SL_ERROR_INVALID;
+  r.item_id = id;
+  r.item_revision = revision;
+  return web_request(o, &r);
+}
+static void web_snapshot(void *context, demo_web_chat_t *web) {
+  owner_t *o = context;
+  size_t i;
+  demo_web_queue_begin(web);
+  for (i = 0; i < o->count; ++i) {
+    const sl_queue_entry_t *e = &o->items[i].value;
+    demo_web_queue_entry(web, e->id, e->revision, e->text,
+                         e->mode == SL_PROMPT_QUEUE_MODE_STEER, e->held);
+  }
+  demo_web_queue_end(web);
 }
 static void hello(owner_t *o, const char *name, unsigned long delay_us,
                   unsigned long request_high, int approvals,
@@ -833,6 +923,7 @@ int main(int argc, char **argv) {
   o->gate_fd = -1;
   o->stall_hello_once = getenv("SOFTLINE_CHAT_TEST_STALL_HELLO") != NULL;
   o->input_empty = 1;
+  (void)snprintf(o->web_client.name, sizeof(o->web_client.name), "web");
   if (gate) {
     long fd = strtol(gate, &end, 10);
     if (!*gate || *end || fd < 3 || fd > 9) {
@@ -878,11 +969,30 @@ int main(int argc, char **argv) {
   (void)getsockname(listener, (struct sockaddr *)&address, &address_length);
   printf("LISTEN 127.0.0.1 %u\n", (unsigned)ntohs(address.sin_port));
   fflush(stdout);
+  {
+    demo_web_ops_t ops;
+    int enabled;
+    memset(&ops, 0, sizeof(ops));
+    ops.submit = web_submit;
+    ops.control = web_control;
+    ops.snapshot = web_snapshot;
+    o->web = demo_web_open(NULL, &ops, o, 8081, &enabled);
+    if (enabled && !o->web) {
+      perror("web listener");
+      close(listener);
+      free(o);
+      return 1;
+    }
+    if (o->web) {
+      printf("WEB http://127.0.0.1:%u\n", (unsigned)demo_web_port(o->web));
+      fflush(stdout);
+    }
+  }
   while (!quitting) {
-    struct pollfd fds[4];
+    struct pollfd fds[4 + DEMO_WWW_FDS];
     double now = milliseconds(), due = now + 60000;
     double image_due = demo_image_store_due(&o->image);
-    int ready;
+    int ready, web_fds = 0, timeout;
     if (image_due && image_due < due)
       due = image_due;
     if (o->active && !o->waiting_gate && !producer_paused &&
@@ -912,7 +1022,13 @@ int main(int argc, char **argv) {
     if (!fds[3].events)
       fds[3].fd = -1;
     fds[3].revents = 0;
-    ready = poll(fds, 4, due <= now ? 0 : (int)(due - now) + 1);
+    if (o->web)
+      web_fds = demo_www_descriptors(demo_web_listener(o->web), fds + 4,
+                                     DEMO_WWW_FDS);
+    if (web_fds < 0)
+      break;
+    timeout = demo_web_timeout(o->web, due <= now ? 0 : (int)(due - now) + 1);
+    ready = poll(fds, (nfds_t)(4 + web_fds), timeout);
     if (ready < 0 && errno != EINTR)
       break;
     if (o->terminal && o->terminal->input_len &&
@@ -962,6 +1078,8 @@ int main(int argc, char **argv) {
           at = &s->next;
       }
     }
+    if (demo_web_tick(o->web))
+      break;
     pump(o, now);
     if (o->demo_enabled && now >= o->next_injection) {
       schedule_injection(o, now);
@@ -969,6 +1087,8 @@ int main(int argc, char **argv) {
         inject(o);
     }
   }
+  demo_web_close(o->web);
+  o->web = NULL;
   disconnect(o);
   {
     int remaining = 100;

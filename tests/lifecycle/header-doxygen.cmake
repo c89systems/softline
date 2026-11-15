@@ -9,7 +9,7 @@ set(declaration_patterns
   "\\(\\*[a-z][a-z0-9_]*\\)[ \t]*\\("
   "^(char[ \t]*\\*|const char[ \t]*\\*|void|int|size_t|sl_t[ \t]*\\*|sl_readline_status_t)[ \t]*sl_[a-z0-9_]+\\("
   "^#define (SOFTLINE_VERSION(_[A-Z]+)?|SL_STATUS_MAX_ELEMENTS)([ \t]|$)")
-foreach(relative include/softline/softline.h cmake/softline_version.h.in)
+foreach(relative include/softline/softline.h include/softline/www.h cmake/softline_version.h.in)
   file(STRINGS "${ROOT}/${relative}" lines ENCODING UTF-8)
   set(in_comment FALSE)
   set(documented FALSE)

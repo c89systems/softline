@@ -62,10 +62,12 @@ typedef int (*sl_image_paste_callback_t)(void *context,
 
 /** Maximum number of readiness descriptors used by image acquisition. */
 #define SL_IMAGE_PASTE_MAX_FDS 16
+/** Maximum DATA bytes delivered by one image-source pump. */
+#define SL_IMAGE_PASTE_CHUNK_MAX 16384u
 
-/** One borrowed descriptor to watch; Softline owns it. */
+/** One borrowed descriptor to watch; its acquisition source owns it. */
 typedef struct sl_image_paste_fd {
-  /** Descriptor; never close or read it in the application. */
+  /** Descriptor; external wait loops must neither close nor consume it. */
   int fd;
   /** SL_WATCH_READ/WRITE interests. */
   unsigned int events;
@@ -80,6 +82,28 @@ typedef struct sl_image_paste_wait {
   /** Maximum wait in milliseconds; -1 when no transfer is pending. */
   int timeout_ms;
 } sl_image_paste_wait_t;
+
+/** Nonblocking image acquisition supplied by a host (for example browser
+ * upload chunks). It uses the same handover, limits, timeouts, backpressure,
+ * completion insertion and cancellation as native clipboard acquisition.
+ * next returns 1 for BEGIN/DATA/END, 0 for no work, or -1 for source failure.
+ * Event bytes/metadata remain valid until the next next/close call. prepare
+ * fills readiness and returns SL_OK. close runs exactly once after successful
+ * adoption, before the terminal callback. No callback may reenter Softline.
+ * The source validates its PNG/JPEG bytes; no file is staged by this API. */
+typedef struct sl_image_paste_source {
+  /** Borrowed context, retained until close returns. */
+  void *context;
+  /** Return one BEGIN/DATA/END event; DATA is at most SL_IMAGE_PASTE_CHUNK_MAX.
+   */
+  int (*next)(void *, sl_image_paste_event_t *);
+  /** Fill a bounded readiness snapshot and return SL_OK. */
+  int (*prepare)(void *, sl_image_paste_wait_t *);
+  /** Optional borrowed diagnostic after a failed next call. */
+  const char *(*error)(void *);
+  /** Release source resources exactly once after successful adoption. */
+  void (*close)(void *);
+} sl_image_paste_source_t;
 
 /** Opaque nonzero queue identity, unique for the lifetime of one handle.
  * Zero denotes a direct draft without a queued origin. IDs are never reused. */
@@ -1022,6 +1046,9 @@ typedef struct sl_config {
  * state; callers must not read, write, copy, or free it.
  */
 struct sl {
+  /** Adopt a host-owned nonblocking PNG/JPEG source instead of X11. */
+  int (*image_paste_start_source)(sl_t *, const sl_image_paste_source_t *,
+                                  sl_image_paste_id_t *);
   /** Start PNG/JPEG clipboard handover at the current draft cursor. */
   int (*image_paste_start)(sl_t *, sl_image_paste_id_t *);
   /** Obtain nonblocking acquisition readiness and its next deadline. */
@@ -1258,6 +1285,8 @@ struct sl {
   /** Explicitly resume the retained backlog without changing manual delivery,
    * approval, execution readiness or editing state. */
   int (*prompt_queue_resume)(sl_t *self);
+  /** Pause queued delivery without changing the editor draft. */
+  int (*prompt_queue_stop)(sl_t *self);
   /** Register an application-owned descriptor to wake active TTY editing;
    * non-TTY handles reject watches. */
   int (*watch_add)(sl_t *self, int fd, unsigned int events,
@@ -1751,6 +1780,8 @@ int sl_get_prompt_queue_stopped(const sl_t *self, int *out);
 
 /** Resume the backlog explicitly; all other delivery gates still apply. */
 int sl_prompt_queue_resume(sl_t *self);
+/** Pause queued delivery without changing any editor draft. */
+int sl_prompt_queue_stop(sl_t *self);
 
 /** Select a built-in theme for the complete interactive prompt UI. */
 int sl_set_prompt_theme(sl_t *self, sl_prompt_theme_t theme);
@@ -1823,6 +1854,9 @@ int sl_watch_clear(sl_t *self);
  * constructor callback. Calls and callbacks run on the owner thread. A fresh
  * readline replaces a non-suspended draft and cancels its pending transfer. */
 int sl_image_paste_start(sl_t *, sl_image_paste_id_t *);
+/** Adopt a streaming source. On error ownership stays with the caller. */
+int sl_image_paste_start_source(sl_t *, const sl_image_paste_source_t *,
+                                sl_image_paste_id_t *);
 /** Snapshot readiness outside readline. Call pump on readiness/deadline, then
  * prepare again. Native editing drives the same mechanism automatically. */
 int sl_image_paste_prepare(sl_t *, sl_image_paste_wait_t *);

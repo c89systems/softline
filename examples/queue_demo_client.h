@@ -18,6 +18,8 @@ enum demo_connection_event {
   DEMO_IMAGE_FAILED
 };
 typedef int (*demo_event_fn)(void *context, int kind, const char *text);
+typedef void (*demo_result_fn)(void *, const sl_queue_result_t *);
+void demo_client_results(demo_client_t *, demo_result_fn, void *);
 void demo_client_events(demo_client_t *client, demo_event_fn handler,
                         void *context);
 void demo_client_options(demo_client_t *client, unsigned int delay_us,
@@ -34,6 +36,9 @@ int demo_client_attach(demo_client_t *client, sl_t *editor);
 /* Register image handover before creating the editor. Uses the same bounded
  * connection as the queue, without saving image bytes on the frontend. */
 int demo_client_image_config(demo_client_t *client, sl_config_t *config);
+/* The same upload adapter for independent browser/editor sources. */
+int demo_client_image_event(demo_client_t *, sl_t *,
+                            const sl_image_paste_event_t *);
 /* Explicit reconnect resolves original request identities; it never reoffers.
  */
 int demo_client_reconnect(demo_client_t *client);

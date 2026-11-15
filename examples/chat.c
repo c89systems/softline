@@ -20,6 +20,7 @@
 #include "queue_demo_client.h"
 #include "queue_demo_timer.h"
 #include "queue_demo_wire.h"
+#include "web_chat.h"
 
 struct chat_state {
   sl_t *sl;
@@ -51,6 +52,10 @@ struct chat_state {
   sl_watch_id_t reconnect_watch;
   unsigned int reconnect_ms;
   double connecting_since;
+  demo_web_chat_t *web;
+  int web_only, null_fd;
+  char web_bytes[64];
+  size_t web_length;
 };
 
 static int start_operation(struct chat_state *state);
@@ -58,6 +63,17 @@ static int dispatch_next_turn(struct chat_state *state);
 static int sync_geometry(struct chat_state *state);
 static int handle_command(struct chat_state *state, const char *line,
                           int *handled);
+static void web_flush(struct chat_state *state) {
+  demo_web_response(state->web, state->web_bytes, state->web_length);
+  state->web_length = 0;
+}
+static void web_byte(struct chat_state *state, char byte) {
+  if (!state->web)
+    return;
+  state->web_bytes[state->web_length++] = byte;
+  if (state->web_length == sizeof(state->web_bytes))
+    web_flush(state);
+}
 
 /* Keep the reasoning row separate from queue/approval rows while idle.
  * Actual messages retain the normal status prefix. */
@@ -228,6 +244,8 @@ static int finish_note_document(struct chat_state *state) {
 }
 
 static int render_note(struct chat_state *state, const char *note) {
+  web_flush(state);
+  demo_web_message(state->web, "note", note);
   if (begin_note_document(state) != 0 ||
       state->note_renderer->feed(state->note_renderer, "\n", 1) != MDF_OK ||
       state->note_renderer->feed(state->note_renderer, note, strlen(note)) !=
@@ -238,6 +256,8 @@ static int render_note(struct chat_state *state, const char *note) {
 }
 
 static int render_user_prompt(struct chat_state *state, const char *line) {
+  web_flush(state);
+  demo_web_message(state->web, "user", line);
   return sl_output_stream_write_quoted_prompt(state->sl, line) == SL_OK ? 0
                                                                         : -1;
 }
@@ -251,6 +271,7 @@ static int refresh_chat_activity(struct chat_state *state) {
     message = state->image_storing ? "Saving image..." : "Uploading image...";
   else if (state->busy)
     message = state->response_bytes >= 15 ? "Reasoning..." : "Thinking...";
+  demo_web_status(state->web, message, active);
   return sl_set_status_busy(state->sl, active) == SL_OK &&
                  sl_set_status_spinner(state->sl, active) == SL_OK &&
                  set_chat_message(state->sl, message) == SL_OK
@@ -275,6 +296,8 @@ static int show_goodbye(struct chat_state *state) {
 }
 
 static int finish_response_document(struct chat_state *state) {
+  web_flush(state);
+  demo_web_response_end(state->web);
   if (!state->response_open)
     return 0;
   if (state->response_renderer->finish_document(state->response_renderer) !=
@@ -286,6 +309,7 @@ static int finish_response_document(struct chat_state *state) {
 }
 
 static int command_message(struct chat_state *state, const char *message) {
+  demo_web_status(state->web, message, state->busy);
   return set_chat_message(state->sl, message) == SL_OK &&
                  sl_output_stream_reconcile(state->sl) == SL_OK
              ? 0
@@ -477,6 +501,7 @@ static int operation_watch(sl_t *sl, const sl_watch_event_t *event,
       if (state->response_renderer->feed(state->response_renderer, bytes + i,
                                          1) != MDF_OK)
         return SL_ERROR_IO;
+      web_byte(state, bytes[i]);
       if (bytes[i] == '\n' && state->previous_response_char == '\n') {
         if (deliver_steers(state, 1) != 0)
           return SL_ERROR_IO;
@@ -488,6 +513,7 @@ static int operation_watch(sl_t *sl, const sl_watch_event_t *event,
       if (state->response_bytes == 15 && refresh_chat_activity(state) != 0)
         return SL_ERROR_IO;
     }
+    web_flush(state);
     return SL_OK;
   }
   if (amount == 0)
@@ -571,9 +597,10 @@ static int start_operation(struct chat_state *state) {
   state->worker_pid = pid;
   state->watch_id = 0;
   if (set_busy(state, 1) != 0 ||
-      sl_watch_add(state->sl, state->watch_fd,
-                   SL_WATCH_READ | SL_WATCH_HANGUP | SL_WATCH_ERROR,
-                   operation_watch, state, &state->watch_id) != SL_OK) {
+      (!state->web_only &&
+       sl_watch_add(state->sl, state->watch_fd,
+                    SL_WATCH_READ | SL_WATCH_HANGUP | SL_WATCH_ERROR,
+                    operation_watch, state, &state->watch_id) != SL_OK)) {
     (void)cancel_operation(state);
     return -1;
   }
@@ -587,13 +614,36 @@ static int dispatch_next_turn(struct chat_state *state) {
   for (index = 0; index < sl_prompt_queue_count(state->sl);) {
     if (sl_prompt_queue_info(state->sl, index, &info) != SL_OK)
       return -1;
-    if (!info.eligible || info.policy.enqueue) {
+    if (!info.eligible || (info.policy.enqueue && !state->web)) {
       index++;
       continue;
+    }
+    if (state->web && info.policy.enqueue) {
+      char *peek = NULL;
+      int shell;
+      if (sl_prompt_queue_peek(state->sl, index, &peek) != SL_OK)
+        return -1;
+      shell = is_shell_command(peek);
+      sl_free_string(state->sl, peek);
+      if (shell) {
+        ++index;
+        continue;
+      }
     }
     line = NULL;
     if (sl_prompt_queue_take(state->sl, index, &line) != SL_OK)
       return -1;
+    if (state->web && info.policy.enqueue) {
+      int handled;
+      if (handle_command(state, line, &handled)) {
+        sl_free_string(state->sl, line);
+        return -1;
+      }
+      if (handled) {
+        sl_free_string(state->sl, line);
+        continue;
+      }
+    }
     if (strcmp(line, "/quit") == 0) {
       sl_free_string(state->sl, line);
       state->exit_requested = 1;
@@ -631,14 +681,17 @@ static void approval_demo_idle(sl_t *sl, void *userdata) {
   sl_prompt_queue_entry_info_t draft;
   double now = monotonic_seconds();
   int result = SL_OK;
+  if (demo_web_tick(state->web))
+    state->demo_failed = 1;
   if (state->remote) {
     if (demo_client_idle(state->remote) != SL_OK)
       state->demo_failed = 1;
+    demo_web_queue(state->web);
     return;
   }
   if (now < 0)
     result = SL_ERROR_IO;
-  else if (now >= state->next_injection) {
+  else if (state->approval_demo && now >= state->next_injection) {
     schedule_injection(state, now);
     if (sl_prompt_queue_count(sl) < 4) {
       char message[2048];
@@ -660,8 +713,8 @@ static void approval_demo_idle(sl_t *sl, void *userdata) {
   }
   /* An approved steer arriving between turns gets its own response. Respect
    * the queue's stopped state after cancellation and an unfinished draft. */
-  if (result == SL_OK && !state->busy && !sl_buffer(sl)[0] &&
-      !sl->history_search_active(sl)) {
+  if (result == SL_OK && !state->busy && (state->web || !sl_buffer(sl)[0]) &&
+      (state->web || !sl->history_search_active(sl))) {
     result = sl_prompt_queue_draft_info(sl, &draft);
     if (result == SL_OK && !draft.id) {
       result = sl_get_prompt_queue_delivery(sl, &delivery);
@@ -674,6 +727,7 @@ static void approval_demo_idle(sl_t *sl, void *userdata) {
     state->demo_failed = 1;
     (void)sl_cancel(sl);
   }
+  demo_web_queue(state->web);
 }
 
 static int setup_approval_demo(struct chat_state *state) {
@@ -867,6 +921,9 @@ static int remote_event(void *context, int kind, const char *text) {
         sl_set_status_busy(state->sl, 0) != SL_OK)
       return SL_ERROR_IO;
     state->busy = 0;
+    demo_web_status(state->web,
+                    "Disconnected; retrying automatically. Alt-R reconnects.",
+                    0);
     return set_chat_message(
         state->sl, "Disconnected; retrying automatically. Alt-R reconnects.");
   case DEMO_READY:
@@ -900,9 +957,11 @@ static int remote_event(void *context, int kind, const char *text) {
       if (state->response_renderer->feed(state->response_renderer, text + i,
                                          1) != MDF_OK)
         return SL_ERROR_IO;
+      web_byte(state, text[i]);
       if (++state->response_bytes == 15 && refresh_chat_activity(state) != 0)
         return SL_ERROR_IO;
     }
+    web_flush(state);
     return SL_OK;
   case DEMO_SEGMENT_END:
     return finish_response_document(state) == 0 ? SL_OK : SL_ERROR_IO;
@@ -983,6 +1042,124 @@ static int reconnect_editor(sl_t *sl, sl_key_t key, void *context,
   return demo_client_reconnect(state->remote);
 }
 
+static int web_submit(void *context, const char *text, int steer,
+                      sl_queue_request_id_t *request_id) {
+  struct chat_state *state = context;
+  int result;
+  size_t index;
+  if (is_shell_command(text) || !strcmp(text, "/quit"))
+    return SL_ERROR_UNSUPPORTED;
+  if (state->remote) {
+    sl_queue_request_t request;
+    memset(&request, 0, sizeof(request));
+    request.operation = SL_QUEUE_OFFER;
+    request.text = text;
+    request.mode =
+        steer ? SL_PROMPT_QUEUE_MODE_STEER : SL_PROMPT_QUEUE_MODE_QUEUED;
+    return sl_queue_backend_request(state->sl, &request, request_id);
+  }
+  if (is_local_command(text)) {
+    int handled;
+    return handle_command(state, text, &handled) == 0 ? SL_OK : SL_ERROR;
+  }
+  index = sl_prompt_queue_count(state->sl);
+  {
+    int stopped = 0;
+    (void)sl_get_prompt_queue_stopped(state->sl, &stopped);
+    if (stopped && !state->busy && text[0] != '/' && text[0] != '!')
+      index = 0;
+    result = sl_prompt_queue_insert(state->sl, index, text, 0, NULL);
+    if (result == SL_OK && stopped && index == 0 && text[0] != '/' &&
+        text[0] != '!')
+      result = sl_prompt_queue_resume(state->sl);
+  }
+  if (result == SL_OK && steer)
+    result =
+        sl_prompt_queue_set_mode(state->sl, index, SL_PROMPT_QUEUE_MODE_STEER);
+  if (result == SL_OK && sync_queue_readiness(state, 0))
+    result = SL_ERROR_IO;
+  /* The queue accepts immediately; only its visual projection is delayed. */
+  return result;
+}
+static int web_control(void *context, const char *action, const char *id,
+                       const char *revision) {
+  struct chat_state *state = context;
+  if (!strcmp(action, "cancel")) {
+    if (state->remote)
+      return demo_client_cancel(state->remote);
+    return sl_prompt_queue_stop(state->sl) == SL_OK && !cancel_operation(state)
+               ? SL_OK
+               : SL_ERROR;
+  }
+  if (strcmp(action, "approve") && strcmp(action, "reject"))
+    return SL_ERROR_INVALID;
+  if (state->remote) {
+    sl_queue_request_t request;
+    memset(&request, 0, sizeof(request));
+    request.operation =
+        !strcmp(action, "approve") ? SL_QUEUE_APPROVE : SL_QUEUE_WITHDRAW;
+    request.item_id = id;
+    request.item_revision = revision;
+    return sl_queue_backend_request(state->sl, &request, NULL);
+  } else {
+    char *end;
+    unsigned long value;
+    errno = 0;
+    value = strtoul(id, &end, 10);
+    if (errno || !*id || *end || !value)
+      return SL_ERROR_INVALID;
+    return !strcmp(action, "approve")
+               ? sl_prompt_queue_approve(state->sl, value)
+               : sl_prompt_queue_reject(state->sl, value);
+  }
+}
+static int web_image(void *context, sl_t *source,
+                     const sl_image_paste_event_t *event) {
+  struct chat_state *state = context;
+  return demo_client_image_event(state->remote, source, event);
+}
+static void web_result(void *context, const sl_queue_result_t *result) {
+  struct chat_state *state = context;
+  demo_web_result(state->web, result);
+}
+static volatile sig_atomic_t web_quit;
+static void stop_web(int signum) {
+  (void)signum;
+  web_quit = 1;
+}
+static int run_web_only(struct chat_state *state) {
+  (void)signal(SIGINT, stop_web);
+  (void)signal(SIGTERM, stop_web);
+  while (!web_quit && !state->exit_requested && !state->demo_failed) {
+    struct pollfd fds[DEMO_WWW_FDS + 1];
+    int count, timeout, result;
+    approval_demo_idle(state->sl, state);
+    if (state->demo_failed)
+      break;
+    count =
+        demo_www_descriptors(demo_web_listener(state->web), fds, DEMO_WWW_FDS);
+    if (count < 0)
+      return -1;
+    fds[count].fd = state->watch_fd;
+    fds[count].events = POLLIN;
+    fds[count].revents = 0;
+    /* The bounded tick also drives optional host approval-demo injection. */
+    timeout = demo_web_timeout(state->web, 100);
+    result = poll(fds, (nfds_t)(count + 1), timeout);
+    if (result < 0 && errno != EINTR)
+      return -1;
+    if (result > 0 && fds[count].revents) {
+      sl_watch_event_t event;
+      memset(&event, 0, sizeof(event));
+      event.fd = state->watch_fd;
+      event.events = SL_WATCH_READ;
+      if (operation_watch(state->sl, &event, state) != SL_OK)
+        return -1;
+    }
+  }
+  return state->demo_failed ? -1 : 0;
+}
+
 int main(int argc, char **argv) {
   static const char *const status_elements[] = {"streaming demo", "ctx 36%",
                                                 "demo/project", "queue demo"};
@@ -998,7 +1175,11 @@ int main(int argc, char **argv) {
   state.reconnect_fd = -1;
   state.watch_fd = -1;
   state.worker_pid = -1;
+  state.null_fd = -1;
+  state.web_only = argc == 2 && !strcmp(argv[1], "--web-only");
   interactive = isatty(STDIN_FILENO) && isatty(STDOUT_FILENO);
+  if (state.web_only)
+    interactive = 1;
   state.interactive = interactive;
   exit_code = 0;
   if (argc == 3) {
@@ -1023,10 +1204,18 @@ int main(int argc, char **argv) {
       return 1;
     }
     state.sl = sl_create_with_config(&config);
+  } else if (state.web_only) {
+    sl_config_t config;
+    state.null_fd = open("/dev/null", O_RDWR);
+    if (state.null_fd < 0)
+      return 1;
+    sl_config_init(&config);
+    config.input_fd = config.output_fd = state.null_fd;
+    state.sl = sl_create_with_config(&config);
   } else if (argc == 1)
     state.sl = sl_create();
   else {
-    fprintf(stderr, "usage: %s [127.0.0.1 PORT]\n", argv[0]);
+    fprintf(stderr, "usage: %s [127.0.0.1 PORT | --web-only]\n", argv[0]);
     return 1;
   }
   if (!state.sl) {
@@ -1090,6 +1279,33 @@ int main(int argc, char **argv) {
     return 1;
   }
   state.columns = mdf_terminal_width(STDOUT_FILENO, 80);
+  {
+    demo_web_ops_t ops;
+    int enabled;
+    memset(&ops, 0, sizeof(ops));
+    ops.submit = web_submit;
+    ops.control = web_control;
+    if (state.remote)
+      ops.image = web_image;
+    state.web = demo_web_open(state.sl, &ops, &state, 8080, &enabled);
+    if ((enabled && !state.web) || (state.web_only && !enabled)) {
+      fprintf(stderr, "web listener: %s\n",
+              enabled ? strerror(errno) : "--web-only requires SOFTLINE_WEB=1");
+      exit_code = 1;
+      goto cleanup;
+    }
+    if (state.web && !state.web_only &&
+        demo_www_attach(demo_web_listener(state.web), state.sl) != SL_OK) {
+      report_failure(&state, "web watches");
+      exit_code = 1;
+      goto cleanup;
+    }
+    if (state.web)
+      fprintf(stderr, "WEB http://127.0.0.1:%u\n",
+              (unsigned int)demo_web_port(state.web));
+    if (state.web && state.remote)
+      demo_client_results(state.remote, web_result, &state);
+  }
   if ((interactive &&
        ((!state.remote && sl_set_prompt_queue(state.sl, 1, 64, 3) != SL_OK) ||
         sl_set_prompt_queue_profile(
@@ -1122,6 +1338,11 @@ int main(int argc, char **argv) {
   if (interactive) {
     (void)signal(SIGINT, keep_chat_on_interrupt);
     if (set_busy(&state, 0) != 0 || setup_approval_demo(&state) != 0) {
+      exit_code = 1;
+      goto cleanup;
+    }
+    if (state.web &&
+        sl_set_idle_callback(state.sl, approval_demo_idle, &state) != SL_OK) {
       exit_code = 1;
       goto cleanup;
     }
@@ -1183,6 +1404,10 @@ int main(int argc, char **argv) {
       exit_code = 1;
       goto cleanup;
     }
+  }
+  if (state.web_only) {
+    exit_code = run_web_only(&state) ? 1 : 0;
+    goto cleanup;
   }
   for (;;) {
     source = SL_PROMPT_SOURCE_NONE;
@@ -1312,6 +1537,9 @@ int main(int argc, char **argv) {
   }
 
 cleanup:
+  demo_client_results(state.remote, NULL, NULL);
+  demo_web_close(state.web);
+  state.web = NULL;
   if (state.reconnect_watch)
     (void)sl_watch_remove(state.sl, state.reconnect_watch);
   if (state.reconnect_fd >= 0)
@@ -1328,5 +1556,7 @@ cleanup:
     sl_destroy(state.sl);
   }
   demo_client_destroy(state.remote);
+  if (state.null_fd >= 0)
+    close(state.null_fd);
   return exit_code;
 }

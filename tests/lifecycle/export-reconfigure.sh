@@ -15,7 +15,7 @@ work=$(mktemp -d "$root/build/export-reconfigure.XXXXXX")
 trap 'rm -rf "$work"' EXIT
 mkdir "$work/source"
 cp "$root/"{CMakeLists.txt,LICENSE,README.md} "$work/source/"
-cp -r "$root/"{src,include,cmake,scripts,vendor} "$work/source/"
+cp -r "$root/"{src,include,cmake,scripts,vendor,web,docs} "$work/source/"
 case "$toolchain" in "$root/"*) toolchain="$work/source/${toolchain#$root/}" ;; esac
 cat > "$work/launcher" <<'SH'
 #!/bin/sh

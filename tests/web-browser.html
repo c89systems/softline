@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en" data-theme="default"><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Softline browser checks</title><link rel="stylesheet" href="/softline.css">
+<style>body{overflow:auto;padding:30px}#checks{max-width:900px;margin:auto}.pass{color:#8c8}.fail{color:#f88}.fixture{border:1px solid var(--line);margin:15px 0;padding:20px}</style>
+<main id="checks"><h1>Softline browser checks</h1><p>These checks execute in this browser. A green result is separate from native/source checks.</p><ol id="results"></ol><div id="fixtures"></div></main>
+<script type="module">
+import { MarkdownStream } from '/markdown.js';
+const results=document.querySelector('#results'), fixtures=document.querySelector('#fixtures');
+let failures=0;
+function assert(value,message){if(!value)throw new Error(message)}
+function render(text,width=1){const root=document.createElement('div');root.className='fixture body';fixtures.append(root);const parser=new MarkdownStream(root);for(let i=0;i<text.length;i+=width)parser.write(text.slice(i,i+width));parser.end();return root}
+function check(name,fn){const row=document.createElement('li');try{fn();row.className='pass';row.textContent=`PASS ${name}`}catch(error){++failures;row.className='fail';row.textContent=`FAIL ${name}: ${error.message}`}results.append(row)}
+for(const width of [1,2,7,64]){
+  check(`incremental Markdown (${width}-character input)`,()=>{
+    const root=render('# Heading\n\nHello **world** and `code`.\n\n- one\n- two\n\n> quoted\n',width);
+    assert(root.querySelector('h1')?.textContent==='Heading','heading');assert(root.querySelector('strong')?.textContent==='world','bold');assert(root.querySelector('code')?.textContent==='code','inline code');assert(root.querySelectorAll('li').length===2,'list');assert(root.querySelector('blockquote'),'quote');
+  });
+  check(`chart fences (${width}-character input)`,()=>{
+    for(const kind of ['mdf-bar-chart','mdf-horizontal-bar-chart','mdf-vertical-bar-chart','mdf-tile-chart']){
+      const root=render('```'+kind+',sort=desc,colored_bars=on\nLabel,Value\n"small, part",10\nlarge,30\n```\n',width);
+      assert(root.querySelector('.mdf-chart svg'),'graphic chart');assert(root.querySelector('.chart-legend')?.textContent.startsWith('large 30'),'descending sort');
+      assert(!root.querySelector('pre:not([hidden])'),'ordinary fence hidden');
+      if(kind==='mdf-tile-chart')assert(root.querySelectorAll('svg path').length===2,'actual pie sectors');
+    }
+  });
+}
+check('append without replacing existing Markdown nodes',()=>{const root=document.createElement('div');fixtures.append(root);const parser=new MarkdownStream(root);parser.write('Hello **world**\n\n');const first=root.firstChild;parser.write('Another paragraph\n\n');assert(root.firstChild===first,'existing node was replaced');assert(root.textContent.includes('Another paragraph'),'new text visible before end');parser.end()});
+check('Unicode byte deltas',()=>{const bytes=new TextEncoder().encode('€ café 👩🏽‍💻\n\n'),decoder=new TextDecoder(),root=document.createElement('div'),parser=new MarkdownStream(root);fixtures.append(root);for(const byte of bytes)parser.write(decoder.decode(new Uint8Array([byte]),{stream:true}));parser.write(decoder.decode());parser.end();assert(root.textContent.includes('€ café 👩🏽‍💻'),'Unicode changed')});
+check('unsafe links and literal HTML',()=>{window.softlineInjected=false;const root=render('[bad](javascript:alert(1))\n\n<script>window.softlineInjected=true;<\/script>\n\n![bad](data:text/html,unsafe)\n');assert(!root.querySelector('script'),'script DOM');assert(!root.querySelector('[href^="javascript:"]'),'unsafe URL');assert(!root.querySelector('[src^="data:"]'),'unsafe image URL');assert(!window.softlineInjected,'HTML executed')});
+check('zero-value pie',()=>{const root=render('```mdf-tile-chart\nnone,0\n```\n');assert(root.querySelector('circle.chart-empty'),'empty pie');assert(!root.innerHTML.includes('NaN'),'invalid numeric geometry')});
+check('fractional bar scaling',()=>{const root=render('```mdf-bar-chart\nsmall,0.25\nlarge,0.5\n```\n');const bars=root.querySelectorAll('svg rect');assert(Number(bars[1]?.getAttribute('width'))===340,'largest fractional value should fill the scale')});
+check('negative first value is not a header',()=>{const root=render('```mdf-bar-chart\nbad,-1\n```\n');assert(!root.querySelector('.mdf-chart'),'negative value accepted as a header');assert(root.querySelector('pre:not([hidden])'),'fallback missing')});
+check('quoted CSV and ascending order',()=>{const root=render('```mdf-bar-chart,sort=asc\n"two ""quotes""",2\n"one\nline",1\n```\n');assert(root.querySelector('.chart-legend')?.textContent.startsWith('one\nline 1'),'CSV quoting/sort')});
+check('invalid chart remains readable code',()=>{const root=render('```mdf-tile-chart\na,1\nb,-2\n```\n');assert(!root.querySelector('.mdf-chart'),'invalid chart accepted');assert(root.querySelector('pre:not([hidden])')?.textContent.includes('b,-2'),'source missing')});
+check('chart row bound',()=>{const root=render('```mdf-bar-chart\n'+Array.from({length:257},(_,i)=>`row${i},1`).join('\n')+'\n```\n',64);assert(!root.querySelector('.mdf-chart'),'row limit not enforced');assert(root.querySelector('pre:not([hidden])'),'fallback missing')});
+check('bounded unfinished constructs keep source text',()=>{const root=render('['+'a'.repeat(100000),64);assert(root.textContent.includes('a'.repeat(10000)),'fallback lost text')});
+document.title=failures?`FAIL (${failures}) softline browser checks`:'PASS softline browser checks';
+document.documentElement.dataset.checks=failures?'failed':'passed';
+</script></html>

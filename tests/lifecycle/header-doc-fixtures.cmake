@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.24)
 set(work "${ROOT}/build/host-tests/header-doc-fixture")
 file(REMOVE_RECURSE "${work}")
-foreach(relative include/softline/softline.h cmake/softline_version.h.in
+foreach(relative include/softline/softline.h include/softline/www.h cmake/softline_version.h.in
     cmake/softline.exports lua/softline_lua.c lua/README.md README.md CMakeLists.txt)
   get_filename_component(directory "${work}/${relative}" DIRECTORY)
   file(MAKE_DIRECTORY "${directory}")

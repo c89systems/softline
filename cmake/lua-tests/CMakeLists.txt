@@ -22,6 +22,7 @@ endif()
 set_tests_properties(lua_runtime PROPERTIES ENVIRONMENT
   "SOFTLINE_TOOLCHAIN_ROOT=${runtime_root};SOFTLINE_EXPECTED_LIBRARY_ROOT=${library_root}")
 add_test(NAME lua_smoke COMMAND "${SOFTLINE_LUA_EXECUTABLE}" "${root}/tests/lua_smoke.lua")
+add_test(NAME lua_image_source COMMAND "${SOFTLINE_LUA_EXECUTABLE}" "${root}/tests/lua_image_source.lua")
 if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Linux")
   set(image_fixtures "${root}/build/debug/tests/test_clipboard_image"
     "${root}/build/debug/tests/clipboard_fixture")

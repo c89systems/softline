@@ -1,0 +1,90 @@
+#ifndef SOFTLINE_DEMO_COMPLETION_RESOLVE_H
+#define SOFTLINE_DEMO_COMPLETION_RESOLVE_H
+#include <dirent.h>
+#include <softline/softline.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+
+/* Only this directory is read. Commit a selection before Tab resolves children.
+ */
+static int demo_complete_files(const char *prefix, sl_completion_emit_t emit,
+                               void *context) {
+  size_t prefix_length = strlen(prefix);
+  DIR *directory;
+  struct dirent *entry;
+  int status = SL_OK;
+  if (prefix_length > 1 && prefix[prefix_length - 1] != '/')
+    return SL_OK;
+  directory = opendir(prefix_length > 1 ? prefix + 1 : ".");
+  if (!directory)
+    return SL_ERROR_IO;
+  while ((entry = readdir(directory)) != NULL) {
+    struct stat info;
+    char *candidate;
+    size_t length = strlen(entry->d_name);
+    if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..") ||
+        !strcmp(entry->d_name, ".git"))
+      continue;
+    if (prefix_length > (size_t)-1 - length - 2) {
+      status = SL_ERROR_NOMEM;
+      break;
+    }
+    candidate = malloc(prefix_length + length + 2);
+    if (!candidate) {
+      status = SL_ERROR_NOMEM;
+      break;
+    }
+    memcpy(candidate, prefix, prefix_length);
+    memcpy(candidate + prefix_length, entry->d_name, length + 1);
+    if (lstat(candidate + 1, &info) != 0) {
+      free(candidate);
+      continue;
+    }
+    if (S_ISDIR(info.st_mode)) {
+      length += prefix_length;
+      candidate[length++] = '/';
+      candidate[length] = '\0';
+    }
+    status = emit(candidate, context);
+    free(candidate);
+    if (status != SL_OK)
+      break;
+  }
+  closedir(directory);
+  return status;
+}
+
+/* Both initial and continuation callbacks use the same host resolver. Emit
+ * full strings including the trigger; matching spaces continue phrase ghosts.
+ * Directory children are resolved on demand after committing the selection. */
+static int demo_resolve(sl_t *sl, const char *prefix, sl_completion_emit_t emit,
+                        void *context, void *userdata) {
+  static const char *const simple[] = {"/quit", "hello world", "hello there",
+                                       "verification", "next steps"};
+  static const char *const chat[] = {
+      "hello world", "hello there", "/status", "/approve",     "/steer",
+      "/resume",     "/shell",      "/quit",   "verification", "next steps"};
+  const char *const *items = userdata ? chat : simple;
+  size_t i, count = userdata ? sizeof(chat) / sizeof(chat[0])
+                             : sizeof(simple) / sizeof(simple[0]);
+  (void)sl;
+  if (prefix[0] == '@')
+    return demo_complete_files(prefix, emit, context);
+  if (prefix[1]) {
+    int status;
+    if (!userdata || strcmp(prefix, "/approve"))
+      return SL_OK;
+    status = emit("/approve on", context);
+    return status == SL_OK ? emit("/approve off", context) : status;
+  }
+  for (i = 0; i < count; ++i)
+    if (items[i][0] == prefix[0]) {
+      int status = emit(items[i], context);
+      if (status != SL_OK)
+        return status;
+    }
+  return SL_OK;
+}
+
+#endif

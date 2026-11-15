@@ -16,6 +16,8 @@
 #include <unistd.h>
 
 struct demo_client {
+  demo_result_fn result;
+  void *result_context;
   sl_t *editor;
   sl_queue_backend_t backend;
   demo_link_t link;
@@ -30,6 +32,8 @@ struct demo_client {
   int approvals, idle_announced, input_empty;
   int state;
   sl_image_paste_id_t image_id, image_terminal_id;
+  sl_t *image_editor;
+  unsigned long image_wire_id, image_serial;
   size_t image_sent;
   int image_wait, image_paused, image_ended, image_end_sent,
       image_terminal_kind;
@@ -53,21 +57,37 @@ static int wake(demo_client_t *c) {
 }
 static void image_clear(demo_client_t *c) {
   c->image_id = 0;
+  c->image_editor = NULL;
+  c->image_wire_id = 0;
   c->image_sent = 0;
   c->image_wait = c->image_paused = c->image_ended = c->image_end_sent = 0;
 }
-static int image_callback(void *context, const sl_image_paste_event_t *e) {
-  demo_client_t *c = context;
+static int image_terminal_queue(demo_client_t *c) {
+  demo_packet_t packet = {0};
+  if (!c->image_terminal_id)
+    return SL_OK;
+  demo_put_number(&packet, (unsigned long)c->image_terminal_kind);
+  demo_put_number(&packet, c->image_terminal_id);
+  if (demo_link_queue(&c->link, &packet)) {
+    demo_packet_free(&packet);
+    return SL_ERROR_FULL;
+  }
+  demo_packet_free(&packet);
+  c->image_terminal_id = 0;
+  return SL_OK;
+}
+int demo_client_image_event(demo_client_t *c, sl_t *editor,
+                            const sl_image_paste_event_t *e) {
   demo_packet_t p = {0};
   if (e->operation == SL_IMAGE_PASTE_ABORT ||
       e->operation == SL_IMAGE_PASTE_DONE) {
-    c->image_event = e->operation == SL_IMAGE_PASTE_DONE ? DEMO_IMAGE_FINISHED
-                                                         : DEMO_IMAGE_FAILED;
-    (void)snprintf(c->image_reason, sizeof(c->image_reason), "%s",
-                   e->reason ? e->reason : "");
-    if (e->id == c->image_id) {
+    if (editor == c->image_editor && e->id == c->image_id) {
+      c->image_event = e->operation == SL_IMAGE_PASTE_DONE ? DEMO_IMAGE_FINISHED
+                                                           : DEMO_IMAGE_FAILED;
+      (void)snprintf(c->image_reason, sizeof(c->image_reason), "%s",
+                     e->reason ? e->reason : "");
       if (c->connected) {
-        c->image_terminal_id = e->id;
+        c->image_terminal_id = c->image_wire_id;
         c->image_terminal_kind = e->operation == SL_IMAGE_PASTE_DONE
                                      ? DEMO_IMAGE_DONE
                                      : DEMO_IMAGE_ABORT;
@@ -79,15 +99,22 @@ static int image_callback(void *context, const sl_image_paste_event_t *e) {
   if (!c->connected || c->state != DEMO_READY)
     return SL_ERROR_IO;
   if (e->operation == SL_IMAGE_PASTE_BEGIN) {
-    if (c->image_id || c->image_terminal_id ||
+    if (c->image_id || c->image_serial == ULONG_MAX ||
         c->link.count >= DEMO_OUT_MAX - 2)
       return SL_ERROR_FULL;
+    /* Preserve wire order when the next selected image arrives before the
+     * owner loop has serviced the previous DONE/ABORT wakeup. Copy only. */
+    if (image_terminal_queue(c) != SL_OK)
+      return SL_ERROR_FULL;
     c->image_id = e->id;
+    c->image_editor = editor;
+    c->image_wire_id = ++c->image_serial;
     c->image_wait = 1;
     demo_put_number(&p, DEMO_IMAGE_BEGIN);
-    demo_put_number(&p, e->id);
+    demo_put_number(&p, c->image_wire_id);
     demo_put_string(&p, e->media_type);
-  } else if (e->operation == SL_IMAGE_PASTE_DATA && e->id == c->image_id) {
+  } else if (e->operation == SL_IMAGE_PASTE_DATA && e->id == c->image_id &&
+             editor == c->image_editor) {
     if (e->offset != c->image_sent)
       return SL_ERROR_INVALID;
     if (c->image_wait || c->link.count >= DEMO_OUT_MAX - 2) {
@@ -95,10 +122,11 @@ static int image_callback(void *context, const sl_image_paste_event_t *e) {
       return SL_ERROR_NOT_READY;
     }
     demo_put_number(&p, DEMO_IMAGE_DATA);
-    demo_put_number(&p, e->id);
+    demo_put_number(&p, c->image_wire_id);
     demo_put_number(&p, (unsigned long)e->offset);
     demo_put_image_bytes(&p, e->data, e->length);
-  } else if (e->operation == SL_IMAGE_PASTE_END && e->id == c->image_id) {
+  } else if (e->operation == SL_IMAGE_PASTE_END && e->id == c->image_id &&
+             editor == c->image_editor) {
     if (e->offset != c->image_sent)
       return SL_ERROR_INVALID;
     c->image_ended = 1;
@@ -117,6 +145,10 @@ static int image_callback(void *context, const sl_image_paste_event_t *e) {
     c->image_event = DEMO_IMAGE_STARTED;
   /* No editor calls or socket/file I/O inside Softline's callback. */
   return wake(c);
+}
+static int image_callback(void *context, const sl_image_paste_event_t *e) {
+  demo_client_t *c = context;
+  return demo_client_image_event(c, c->editor, e);
 }
 int demo_client_image_config(demo_client_t *c, sl_config_t *config) {
   size_t limit;
@@ -145,18 +177,14 @@ static int image_service(demo_client_t *c) {
   if (!c->connected)
     return SL_OK;
   if (c->image_terminal_id && c->link.count < DEMO_OUT_MAX) {
-    demo_put_number(&p, (unsigned long)c->image_terminal_kind);
-    demo_put_number(&p, c->image_terminal_id);
-    if (demo_link_queue(&c->link, &p)) {
-      demo_packet_free(&p);
+    if (image_terminal_queue(c) != SL_OK) {
       return SL_ERROR_IO;
     }
-    c->image_terminal_id = 0;
   }
   if (c->image_id && !c->image_wait && c->image_ended && !c->image_end_sent &&
       c->link.count < DEMO_OUT_MAX) {
     demo_put_number(&p, DEMO_IMAGE_END);
-    demo_put_number(&p, c->image_id);
+    demo_put_number(&p, c->image_wire_id);
     demo_put_number(&p, (unsigned long)c->image_sent);
     if (demo_link_queue(&c->link, &p)) {
       demo_packet_free(&p);
@@ -167,7 +195,7 @@ static int image_service(demo_client_t *c) {
   if (c->image_id && c->image_paused && !c->image_wait &&
       c->link.count < DEMO_OUT_MAX - 2) {
     c->image_paused = 0;
-    (void)c->editor->image_paste_resume(c->editor, c->image_id);
+    (void)c->image_editor->image_paste_resume(c->image_editor, c->image_id);
   }
   return SL_OK;
 }
@@ -185,8 +213,9 @@ static int image_receive(demo_client_t *c, unsigned long kind,
   if (p->failed || p->offset != p->length || !id ||
       (kind == DEMO_IMAGE_RESULT && ((!path && !reason) || (path && reason))))
     return -1;
-  if (id != c->image_id)
+  if (id != c->image_wire_id || !c->image_editor)
     return 0; /* Late replies cannot affect a cancelled or subsequent paste. */
+  id = c->image_id;
   if (kind == DEMO_IMAGE_READY) {
     if (!c->image_wait || offset != c->image_sent)
       return -1;
@@ -194,18 +223,20 @@ static int image_receive(demo_client_t *c, unsigned long kind,
   } else if (!path) {
     size_t i;
     if (c->image_ended)
-      (void)c->editor->image_paste_complete(c->editor, id, NULL, reason);
+      (void)c->image_editor->image_paste_complete(c->image_editor, id, NULL,
+                                                  reason);
     else
-      (void)c->editor->image_paste_cancel(c->editor, id);
+      (void)c->image_editor->image_paste_cancel(c->image_editor, id);
     /* Preserve the backend diagnostic for the host, without presenting it. */
     for (i = 0; i + 1 < sizeof(c->image_reason) && reason[i]; ++i) {
       unsigned char ch = (unsigned char)reason[i];
       c->image_reason[i] = ch >= 32 && ch < 127 ? (char)ch : '?';
     }
     c->image_reason[i] = 0;
-  } else if (!c->image_end_sent || c->editor->image_paste_complete(
-                                       c->editor, id, path, NULL) != SL_OK) {
-    (void)c->editor->image_paste_cancel(c->editor, id);
+  } else if (!c->image_end_sent ||
+             c->image_editor->image_paste_complete(c->image_editor, id, path,
+                                                   NULL) != SL_OK) {
+    (void)c->image_editor->image_paste_cancel(c->image_editor, id);
   }
   return 0;
 }
@@ -222,8 +253,8 @@ static int close_transport(demo_client_t *c) {
   c->socket_watch = 0;
   c->connected = c->connecting = 0;
   demo_link_close(&c->link);
-  if (c->editor && c->image_id)
-    (void)c->editor->image_paste_cancel(c->editor, c->image_id);
+  if (c->image_editor && c->image_id)
+    (void)c->image_editor->image_paste_cancel(c->image_editor, c->image_id);
   image_clear(c);
   c->image_terminal_id = 0;
   if (c->editor) {
@@ -306,6 +337,8 @@ static int receive(demo_client_t *c, demo_packet_t *p) {
     if (p->failed || p->offset != p->length)
       return -1;
     status = sl_queue_backend_result(c->editor, &r);
+    if (status == SL_OK && c->result)
+      c->result(c->result_context, &r);
     if (status == SL_OK)
       resolve(c);
   } else if (kind == DEMO_CHANGE) {
@@ -483,6 +516,13 @@ void demo_client_options(demo_client_t *c, unsigned int delay_us, int approvals,
   c->approvals = approvals;
   c->interval_ms = interval_ms;
   c->seed = seed;
+}
+void demo_client_results(demo_client_t *c, demo_result_fn callback,
+                         void *context) {
+  if (c) {
+    c->result = callback;
+    c->result_context = context;
+  }
 }
 int demo_client_idle(demo_client_t *c) {
   sl_queue_backend_info_t info;

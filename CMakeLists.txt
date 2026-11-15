@@ -130,10 +130,21 @@ endif()
 add_library(sl_lib_obj OBJECT src/softline.c src/softline_surface.c
   src/softline_clipboard.c src/softline_history.c src/softline_edit.c
   src/softline_queue_backend.c src/softline_terminal.c src/softline_pty.c
-  src/softline_completion.c src/softline_image.c)
+  src/softline_completion.c src/softline_image.c src/softline_www.c)
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+set(_sl_web_assets "${CMAKE_CURRENT_BINARY_DIR}/softline_www_assets.h")
+add_custom_command(OUTPUT "${_sl_web_assets}"
+  COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/scripts/embed-web-assets.py"
+    "${CMAKE_CURRENT_SOURCE_DIR}" "${_sl_web_assets}"
+  DEPENDS scripts/embed-web-assets.py web/index.html web/softline.css web/softline.js
+    web/markdown.js vendor/streaming-markdown/smd.js vendor/streaming-markdown/LICENSE
+    vendor/jetbrains-mono/JetBrainsMono-Regular.woff2 vendor/jetbrains-mono/OFL.txt
+  VERBATIM)
+add_custom_target(sl_web_assets DEPENDS "${_sl_web_assets}")
+add_dependencies(sl_lib_obj sl_web_assets)
 set_target_properties(sl_lib_obj PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(sl_lib_obj
-  PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
+  PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_BINARY_DIR}
   PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
@@ -330,6 +341,11 @@ if(SL_INSTALL)
     install(FILES LICENSE README.md
       DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/doc/softline
     )
+    install(FILES docs/web-frontend.md DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/doc/softline)
+    install(FILES vendor/streaming-markdown/LICENSE vendor/streaming-markdown/README.softline
+      DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/doc/softline/streaming-markdown)
+    install(FILES vendor/jetbrains-mono/OFL.txt vendor/jetbrains-mono/README.softline
+      DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/doc/softline/jetbrains-mono)
 
     install(FILES
       ${CMAKE_CURRENT_BINARY_DIR}/softline-package-metadata.json

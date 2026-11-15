@@ -45,6 +45,10 @@ typedef struct softline_lua_handle {
   char image_native_error[SOFTLINE_LUA_IDLE_ERROR_LEN];
   sl_image_paste_id_t image_id;
   int image_error_pending;
+  sl_image_paste_event_t *source_event;
+  sl_image_paste_wait_t *source_wait;
+  int source_call;
+  char source_error[SOFTLINE_LUA_IDLE_ERROR_LEN];
   int policy_callback_active;
   int idle_callback_active;
   int idle_callback_failed;
@@ -190,6 +194,8 @@ static int softline_lua_image_callback(void *context,
   h->image_event = NULL;
   return status;
 }
+
+#include "softline_image_source_lua.h"
 
 static sl_image_paste_id_t softline_lua_image_id(lua_State *L) {
   lua_Integer id = luaL_checkinteger(L, 2);
@@ -658,7 +664,7 @@ static int softline_lua_new(lua_State *L) {
   sl_config_init(&config);
   softline_lua_config(L, 1, &config, &rooted_template, &backend,
                       &backend_context);
-  handle = (softline_lua_handle_t *)lua_newuserdatauv(L, sizeof(*handle), 4);
+  handle = (softline_lua_handle_t *)lua_newuserdatauv(L, sizeof(*handle), 6);
   memset(handle, 0, sizeof(*handle));
   handle->L = L;
   handle->history_callback_active = 0;
@@ -751,6 +757,10 @@ static int softline_lua_gc(lua_State *L) {
   }
   lua_pushnil(L);
   lua_setiuservalue(L, 1, 4);
+  lua_pushnil(L);
+  lua_setiuservalue(L, 1, 5);
+  lua_pushnil(L);
+  lua_setiuservalue(L, 1, 6);
   lua_pushnil(L);
   lua_setiuservalue(L, 1, 2);
   lua_pushnil(L);
@@ -1549,6 +1559,11 @@ static int softline_lua_queue_stopped(lua_State *L) {
     return softline_lua_status(L, status);
   lua_pushboolean(L, stopped);
   return 1;
+}
+
+static int softline_lua_queue_stop(lua_State *L) {
+  softline_lua_handle_t *handle = softline_lua_check(L, 1);
+  return softline_lua_status(L, sl_prompt_queue_stop(handle->sl));
 }
 
 static int softline_lua_queue_resume(lua_State *L) {
@@ -2355,6 +2370,7 @@ static int softline_lua_output_stream_end(lua_State *L) {
 
 static const luaL_Reg softline_lua_methods[] = {
     {"image_paste_start", softline_lua_image_start},
+    {"image_paste_start_source", softline_lua_image_start_source},
     {"image_paste_prepare", softline_lua_image_prepare},
     {"image_paste_pump", softline_lua_image_pump},
     {"image_paste_resume", softline_lua_image_resume},
@@ -2401,6 +2417,7 @@ static const luaL_Reg softline_lua_methods[] = {
     {"set_queue_policy", softline_lua_set_queue_policy},
     {"queue_set_executable", softline_lua_queue_set_executable},
     {"queue_stopped", softline_lua_queue_stopped},
+    {"queue_stop", softline_lua_queue_stop},
     {"queue_resume", softline_lua_queue_resume},
     {"queue_approve", softline_lua_queue_approve},
     {"queue_reject", softline_lua_queue_reject},

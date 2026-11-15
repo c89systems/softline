@@ -198,6 +198,12 @@ Not currently implemented:
 
 ## Examples
 
+The opt-in [web frontend](docs/web-frontend.md) ships with the library and uses
+your host's HTTP/WebSocket routes. `make run-chat-web` runs local ANSI and web
+views together; `make run-chat-web-only` serves only the browser. Queue-server
+and remote-client Make targets also enable their example web listener. The
+library opens no sockets and starts no HTTP server.
+
 The native local queue remains the default. For a separate-process queue owner,
 start `make run-chat-queue-server` in one terminal and `make run-chat-remote` in
 another. All C chat themes accept `CHAT_QUEUE=local|remote`, for example

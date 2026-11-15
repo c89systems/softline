@@ -9162,6 +9162,29 @@ static int sl_get_prompt_queue_stopped_method(const sl_t *self, int *out) {
   return SL_OK;
 }
 
+static int sl_prompt_queue_stop_method(sl_t *self) {
+  sl_impl_t *impl = sl_impl(self);
+  if (impl && impl->backend) {
+    sl_queue_request_t request;
+    memset(&request, 0, sizeof(request));
+    request.operation = SL_QUEUE_STOP;
+    return sl_queue_backend_request(self, &request, NULL);
+  }
+  if (sl_prompt_queue_require_enabled(self, impl) != SL_OK)
+    return SL_ERROR_INVALID;
+  impl->prompt_queue.stopped = 1;
+  {
+    int i;
+    for (i = 0; i < impl->prompt_queue.len; ++i)
+      impl->prompt_queue.items[i].info.stopped = 1;
+    impl->prompt_queue.editing.info.stopped = 1;
+  }
+  sl_prompt_queue_sync_queued_turns_delivery(impl);
+  impl->request_queue_dispatch = 0;
+  sl_prompt_queue_schedule(impl);
+  return SL_OK;
+}
+
 static int sl_prompt_queue_resume_method(sl_t *self) {
   sl_impl_t *impl = sl_impl(self);
   if (impl && impl->backend) {
@@ -9715,6 +9738,7 @@ static sl_t *sl_create_with_config_impl(const sl_config_t *config) {
   }
   self->readline = sl_readline_method;
   self->image_paste_start = sl_image_start;
+  self->image_paste_start_source = sl_image_start_source;
   self->image_paste_prepare = sl_image_prepare;
   self->image_paste_pump = sl_image_pump;
   self->image_paste_resume = sl_image_resume;
@@ -9810,6 +9834,7 @@ static sl_t *sl_create_with_config_impl(const sl_config_t *config) {
   self->prompt_queue_set_executable = sl_prompt_queue_set_executable_method;
   self->get_prompt_queue_stopped = sl_get_prompt_queue_stopped_method;
   self->prompt_queue_resume = sl_prompt_queue_resume_method;
+  self->prompt_queue_stop = sl_prompt_queue_stop_method;
   self->queue_backend_request = sl_queue_backend_request_impl;
   self->queue_backend_result = sl_queue_backend_result_impl;
   self->queue_backend_update = sl_queue_backend_update_impl;
@@ -10220,6 +10245,12 @@ int sl_get_prompt_queue_stopped(const sl_t *self, int *out) {
   if (!self || !self->get_prompt_queue_stopped)
     return SL_ERROR_INVALID;
   return self->get_prompt_queue_stopped(self, out);
+}
+
+int sl_prompt_queue_stop(sl_t *self) {
+  if (!self || !self->prompt_queue_stop)
+    return SL_ERROR_INVALID;
+  return self->prompt_queue_stop(self);
 }
 
 int sl_prompt_queue_resume(sl_t *self) {

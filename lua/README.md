@@ -277,7 +277,8 @@ live scroll regions, status lines, and spinners are off; the theme is
   seam, but not older managed commands or its own execution hold. Legacy
   approval suggestions do not hold ordinary user prompts. This does not change FIFO
   approval decisions. Non-TTY input retains its existing direct behavior.
-- `sl:queue_stopped()` exposes the backlog stop caused by cancellation.
+- `sl:queue_stop()` pauses the backlog without changing the current draft.
+  `sl:queue_stopped()` exposes the stop caused by this operation or cancellation.
   Fresh managed submissions can execute without releasing the old backlog;
   passive enqueues and edits inherit the stop. `sl:queue_resume()` explicitly
   resumes that backlog, preserving execution and approval holds and manual
@@ -992,8 +993,23 @@ abort the upload; the exception is available through `sl:last_error()`.
 
 - `sl:image_paste_start()` returns a transfer ID or nil, status. Native Ctrl-V
   starts the same image-only handover. File clipboard lists are not uploads.
+- `sl:image_paste_start_source(source)` adopts a host-owned image source through
+  the same handover, limits and cancellation. `source` is a table with `context`
+  and `next(context)`, `prepare(context)`, `close(context)` functions. `next`
+  returns a BEGIN/DATA/END event table, nil to wait, or nil plus a failure
+  reason. DATA contains a binary `data` string (at most 16 KiB) and byte
+  `offset`; BEGIN supplies `media_type` and optional `filename`. `prepare`
+  returns the same readiness table as `sl:image_paste_prepare()`. Adoption
+  failure leaves ownership with the caller. After adoption, close runs exactly
+  once. Source callbacks run on the calling coroutine and may not reenter the
+  editor or yield. Source/event strings remain retained across backpressure;
+  next-callback exceptions become transfer failures. Prepare errors return
+  nil/status so the host can cancel; close exceptions are contained and
+  ownership is still released.
+  This API has no background VM
+  calls or worker thread.
 - `sl:image_paste_prepare()` returns `{fds={{fd=..., events=...}, ...},
-  timeout_ms=...}` for an external owner loop. Descriptors belong to Softline.
+  timeout_ms=...}` for an external owner loop. Descriptors belong to the source.
 - `sl:image_paste_pump()` advances bounded work without waiting. Native editing
   automatically prepares and pumps while continuing to handle terminal input.
 - `sl:image_paste_resume(id)` permits retry of the same paused chunk.

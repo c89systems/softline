@@ -1,0 +1,349 @@
+import { MarkdownStream } from './markdown.js';
+
+function randomId() {
+  return Array.from(crypto.getRandomValues(new Uint32Array(4)), value => value.toString(16).padStart(8, '0')).join('');
+}
+const $ = id => document.getElementById(id);
+const prompt = $('prompt'), scroll = $('scroll'), messages = $('messages');
+const state = { socket: null, online: false, follow: true, messages: new Map(),
+  queue: new Map(), completions: [], active: 0, query: 0, seq: '', upload: null,
+  view: randomId(), generation: 0, imageLimit: 32 * 1024 * 1024,
+  queueDelay: 500, queueTimer: null, pending: new Map(), failed: [], epoch: null,
+  images: true, attachments: [], requestSeq: 0 };
+const icon = () => $('copy-icon').content.cloneNode(true);
+let toastTimer, completionTimer;
+function toast(text) { $('toast').textContent = text; $('toast').hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => { $('toast').hidden = true; }, 3500); }
+function preference(id, fallback) {
+  let value = fallback;
+  try { value = localStorage.getItem(`softline.${id}`) || fallback; } catch {}
+  if (![...$(id).options].some(option => option.value === value)) value = fallback;
+  $(id).value = value; document.documentElement.dataset[id] = value;
+  $(id).addEventListener('change', () => {
+    document.documentElement.dataset[id] = $(id).value;
+    try { localStorage.setItem(`softline.${id}`, $(id).value); } catch {}
+  });
+}
+preference('theme', 'default'); preference('font', 'sans');
+function send(action, fields = {}) {
+  if (state.online && state.socket?.readyState === WebSocket.OPEN) {
+    try { state.socket.send(new URLSearchParams({ action, view: state.view, ...fields }).toString()); return true; } catch {}
+  }
+  toast('Disconnected. Your draft is kept.'); return false;
+}
+function resizePrompt() {
+  prompt.style.height = 'auto'; prompt.style.height = `${Math.min(prompt.scrollHeight, 200)}px`;
+  $('send').disabled = !state.online || !prompt.value.trim() || !!state.attachments.length;
+}
+function follow() { if (state.follow) scroll.scrollTop = scroll.scrollHeight; }
+scroll.addEventListener('scroll', () => {
+  state.follow = scroll.scrollHeight - scroll.clientHeight - scroll.scrollTop < 65;
+  $('latest').hidden = state.follow;
+}, { passive: true });
+$('latest').addEventListener('click', () => { state.follow = true; follow(); $('latest').hidden = true; });
+new ResizeObserver(() => follow()).observe(messages);
+function started() { $('chat').classList.remove('welcome-state'); }
+function message(id, role = 'assistant') {
+  if (state.messages.has(id)) return state.messages.get(id);
+  if (role !== 'note') started();
+  const article = document.createElement('article'), body = document.createElement('div');
+  article.className = `message ${['user', 'assistant', 'note'].includes(role) ? role : 'assistant'}`;
+  article.dataset.message = id; body.className = 'body'; article.append(body);
+  const result = { article, body, role, decoder: new TextDecoder(), stream: role === 'user' ? null : new MarkdownStream(body) };
+  state.messages.set(id, result); messages.append(article);
+  if (role !== 'user') {
+    const tools = document.createElement('div'), copy = document.createElement('button');
+    tools.className = 'message-tools'; copy.type = 'button'; copy.className = 'copy';
+    copy.title = 'Copy response'; copy.setAttribute('aria-label', 'Copy response'); copy.append(icon());
+    copy.addEventListener('click', async () => {
+      try { await navigator.clipboard.writeText(body.innerText); copy.classList.add('copied'); copy.title = 'Copied'; setTimeout(() => { copy.classList.remove('copied'); copy.title = 'Copy response'; }, 1500); }
+      catch { toast('Copy was unavailable. Select the response text to copy it.'); }
+    });
+    tools.append(copy); article.append(tools);
+  }
+  follow(); return result;
+}
+function queue() {
+  clearTimeout(state.queueTimer);
+  $('queue').replaceChildren();
+  let due = Infinity;
+  for (const item of state.queue.values()) {
+    if (item.held !== '1' && item.visibleAt > performance.now()) { due = Math.min(due, item.visibleAt); continue; }
+    const row = document.createElement('div'), label = document.createElement('b'), text = document.createElement('span');
+    row.className = 'queue-item'; label.className = 'queue-badge';
+    label.textContent = item.held === '1' ? 'A' : item.mode === 'steer' ? 'S' : item.mode === 'pending' ? 'P' : 'Q';
+    text.textContent = item.text; row.append(label, text);
+    if (item.held === '1') for (const action of ['approve', 'reject']) {
+      const button = document.createElement('button'); button.textContent = action === 'approve' ? 'Approve' : 'Reject';
+      button.addEventListener('click', () => send(action, { id: item.id, revision: item.revision })); row.append(button);
+    }
+    $('queue').append(row);
+  }
+  $('queue').hidden = !$('queue').childElementCount;
+  if (Number.isFinite(due)) state.queueTimer = setTimeout(queue, Math.max(0, due - performance.now()));
+}
+function completionQuery(all = false) {
+  const request = ++state.query;
+  state.queryText = prompt.value;
+  const cursor = new TextEncoder().encode(prompt.value.slice(0, prompt.selectionStart)).length;
+  if (send('complete', { text: prompt.value, cursor, request, all: all ? '1' : '0' })) {
+    state.completions = []; state.active = 0;
+    if (all) showCompletions(true);
+  }
+}
+function hideCompletions() { ++state.query; clearTimeout(completionTimer); $('completions').hidden = true; $('plus').setAttribute('aria-expanded', 'false'); }
+function bytePosition(value, at) { return new TextDecoder().decode(new TextEncoder().encode(value).slice(0, at)).length; }
+function choose(item) {
+  if (item.image) { $('image-input').click(); hideCompletions(); return; }
+  if (item.recover) {
+    const before = prompt.value;
+    prompt.setRangeText((before ? '\n' : '') + item.text, prompt.selectionStart, prompt.selectionEnd, 'end');
+    state.failed = state.failed.filter(candidate => candidate !== item.source);
+    adjustAnchor(before, prompt.value); hideCompletions(); resizePrompt(); prompt.focus(); return;
+  }
+  const start = bytePosition(prompt.value, Number(item.start || 0));
+  const end = bytePosition(prompt.value, Number(item.end || item.start || 0));
+  const before = prompt.value; prompt.setRangeText(item.value, start, end, 'end');
+  adjustAnchor(before, prompt.value); hideCompletions(); resizePrompt(); prompt.focus();
+  if (item.continue === '1') completionQuery();
+}
+function showCompletions(all = false) {
+  const list = [...state.completions];
+  if (all && state.images) list.unshift({ image: true, label: 'Add images', description: 'PNG or JPEG · also drop images here' });
+  if (all) for (const item of state.failed) list.unshift({ recover: true, source: item, text: item.text, label: 'Recover unsent prompt', description: item.text.slice(0, 60) });
+  state.list = list; $('completions').replaceChildren();
+  list.forEach((item, index) => {
+    const button = document.createElement('button'), symbol = document.createElement('span'), label = document.createElement('span'), description = document.createElement('span');
+    button.className = `completion${index === state.active ? ' active' : ''}`; button.type = 'button'; button.setAttribute('role', 'option'); button.setAttribute('aria-selected', String(index === state.active));
+    symbol.className = 'completion-icon'; symbol.textContent = item.image ? '▧' : item.label?.startsWith('/') ? '/' : '↳';
+    label.textContent = item.label || item.value; description.className = 'description'; description.textContent = item.description || '';
+    button.append(symbol, label, description); button.addEventListener('click', () => choose(item)); $('completions').append(button);
+  });
+  $('completions').hidden = !list.length; $('plus').setAttribute('aria-expanded', String(!!list.length));
+}
+$('plus').addEventListener('click', () => { state.menuAll = true; completionQuery(true); });
+document.addEventListener('click', event => { if (!event.target.closest('#completions,#plus')) hideCompletions(); });
+let beforeInput = '';
+prompt.addEventListener('beforeinput', () => { beforeInput = prompt.value; });
+function adjustAnchor(before, after) {
+  if (!state.attachments.length) return;
+  let start = 0, tail = 0;
+  while (start < before.length && start < after.length && before[start] === after[start]) ++start;
+  while (tail < before.length - start && tail < after.length - start && before[before.length - 1 - tail] === after[after.length - 1 - tail]) ++tail;
+  const removed = before.length - tail - start, inserted = after.length - tail - start;
+  for (const job of state.attachments) {
+    if (removed && start <= job.anchor && job.anchor < start + removed) {
+      job.cancelled = true;
+      if (job === state.upload) cancelUpload('Image insertion point was removed.');
+    } else if (start < job.anchor) job.anchor += inserted - removed;
+  }
+}
+prompt.addEventListener('input', () => {
+  adjustAnchor(beforeInput, prompt.value); beforeInput = prompt.value;
+  resizePrompt(); clearTimeout(completionTimer);
+  ++state.query;
+  state.menuAll = false;
+  if (/(^|\s)[/@][^\s]*$/u.test(prompt.value.slice(0, prompt.selectionStart))) completionTimer = setTimeout(() => completionQuery(), 60);
+  else hideCompletions();
+});
+prompt.addEventListener('keydown', event => {
+  if (event.isComposing) return;
+  if (event.key === 'Escape') { const hadMenu = !$('completions').hidden; hideCompletions(); if (state.attachments.length) cancelUploads('Image uploads cancelled.'); else if (!hadMenu && state.busy) send('cancel'); return; }
+  if (event.ctrlKey && event.key.toLowerCase() === 'c' && state.attachments.length && prompt.selectionStart === prompt.selectionEnd) { event.preventDefault(); cancelUploads('Image uploads cancelled.'); return; }
+  if (!$('completions').hidden && ['ArrowDown', 'ArrowUp', 'Tab'].includes(event.key)) {
+    event.preventDefault(); state.active = (state.active + (event.key === 'ArrowUp' ? -1 : 1) + state.list.length) % state.list.length;
+    showCompletions(state.menuAll); $('completions').children[state.active]?.scrollIntoView({ block: 'nearest' }); return;
+  }
+  if (event.key === 'Enter' && !event.shiftKey) {
+    event.preventDefault();
+    if (!$('completions').hidden && !event.altKey) { choose(state.list[state.active]); return; }
+    submit(event.altKey);
+  }
+});
+function submit(steer = false) {
+  if (state.attachments.length || !prompt.value.trim()) return;
+  if (state.pending.size >= 32) { toast('Wait for the host to confirm pending prompts. Your draft is kept.'); return; }
+  if (new TextEncoder().encode(prompt.value).length > 128 * 1024) { toast('The prompt exceeds 128 KiB. Your draft is kept.'); return; }
+  const request = randomId(), action = steer ? 'steer' : 'send', fields = { text: prompt.value, request, request_seq: ++state.requestSeq };
+  if (send(action, fields)) {
+    state.pending.set(request, { action, fields, text: fields.text });
+    prompt.value = ''; beforeInput = ''; hideCompletions(); started(); state.follow = true; resizePrompt();
+  }
+}
+$('composer').addEventListener('submit', event => { event.preventDefault(); submit(); });
+function credit(kind) {
+  const upload = state.upload;
+  if (!upload) return;
+  if (upload.waiter) { upload.waiter.resolve(kind); upload.waiter = null; }
+  else upload.credit = kind;
+}
+function waitCredit(upload) {
+  if (upload.cancelled || state.upload !== upload) return Promise.reject(new Error('Image upload cancelled.'));
+  if (upload.credit) { const kind = upload.credit; upload.credit = null; return Promise.resolve(kind); }
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => { upload.waiter = null; reject(new Error('Image upload timed out.')); }, 30000);
+    upload.waiter = { resolve: value => { clearTimeout(timeout); resolve(value); }, reject: error => { clearTimeout(timeout); reject(error); } };
+  });
+}
+function cancelUpload(reason) {
+  const upload = state.upload;
+  if (!upload) return;
+  send('image_cancel', { id: upload.id }); upload.cancelled = true;
+  upload.waiter?.reject(new Error(reason)); upload.reader?.cancel().catch(() => {});
+  state.upload = null; upload.chip.remove(); URL.revokeObjectURL(upload.url);
+  state.attachments = state.attachments.filter(job => job !== upload);
+  $('uploads').hidden = !$('uploads').childElementCount; resizePrompt(); toast(reason);
+}
+function cancelUploads(reason) {
+  for (const job of state.attachments) job.cancelled = true;
+  state.attachments = []; uploadChain = Promise.resolve();
+  if (state.upload) cancelUpload(reason); else toast(reason);
+  resizePrompt();
+}
+async function uploadFile(upload) {
+  const { file } = upload;
+  if (upload.cancelled) return;
+  if (file.size > state.imageLimit) throw new Error(`Image exceeds ${state.imageLimit / 1048576} MiB.`);
+  const prefix = new Uint8Array(await file.slice(0, 8).arrayBuffer());
+  const png = [137,80,78,71,13,10,26,10].every((b, i) => prefix[i] === b);
+  const jpeg = prefix[0] === 255 && prefix[1] === 216 && prefix[2] === 255;
+  if (!png && !jpeg) throw new Error('Only PNG and JPEG images are supported.');
+  if (upload.cancelled) return;
+  upload.url = URL.createObjectURL(file);
+  state.upload = upload;
+  const chip = document.createElement('div'), image = document.createElement('img'), label = document.createElement('span'), cancel = document.createElement('button');
+  upload.chip = chip; chip.className = 'upload'; image.src = upload.url; image.alt = file.name || 'Image';
+  label.textContent = 'Uploading image…'; cancel.type = 'button'; cancel.textContent = '×'; cancel.setAttribute('aria-label', 'Cancel image upload');
+  cancel.addEventListener('click', () => cancelUpload('Image upload cancelled.')); chip.append(image, label, cancel);
+  $('uploads').append(chip); $('uploads').hidden = false; resizePrompt();
+  if (!send('image_begin', { id: upload.id, media_type: png ? 'image/png' : 'image/jpeg', filename: file.name, size: file.size })) throw new Error('Disconnected.');
+  await waitCredit(upload);
+  upload.reader = file.stream().getReader();
+  for (;;) {
+    const { value, done } = await upload.reader.read();
+    if (state.upload !== upload || upload.cancelled) throw new Error('Image upload cancelled.');
+    if (done) break;
+    for (let at = 0; at < value.byteLength; at += 8192) {
+      if (state.upload !== upload || upload.cancelled || !state.online) throw new Error('Image upload cancelled.');
+      state.socket.send(value.subarray(at, Math.min(at + 8192, value.byteLength)));
+      await waitCredit(upload);
+    }
+  }
+  label.textContent = 'Storing image…'; send('image_end', { id: upload.id });
+  const result = await waitCredit(upload);
+  if (typeof result !== 'object' || !result.path?.startsWith('/') || /[\u0000-\u001f\u007f]/u.test(result.path)) throw new Error('Server did not acknowledge a valid image path.');
+  if (state.upload !== upload) throw new Error('Image upload cancelled.');
+  const insertion = (upload.anchor && !/\s$/u.test(prompt.value.slice(0, upload.anchor)) ? ' ' : '') + result.path +
+    (upload.anchor < prompt.value.length && !/^\s/u.test(prompt.value.slice(upload.anchor)) ? ' ' : '');
+  prompt.setRangeText(insertion, upload.anchor, upload.anchor, 'preserve');
+  for (const job of state.attachments) if (job !== upload && job.anchor >= upload.anchor) job.anchor += insertion.length;
+  state.upload = null; URL.revokeObjectURL(upload.url); chip.remove();
+  $('uploads').hidden = !$('uploads').childElementCount; resizePrompt(); prompt.focus();
+}
+let uploadChain = Promise.resolve();
+function addImages(files) {
+  if (!state.images) { toast('This host does not accept images.'); return; }
+  for (const file of files) {
+    if (state.attachments.length >= 16) { toast('Attach at most 16 images at a time.'); break; }
+    const job = { file, id: randomId(), anchor: prompt.selectionStart };
+    state.attachments.push(job); resizePrompt();
+    uploadChain = uploadChain.then(() => uploadFile(job)).catch(error => {
+      if (state.upload === job) cancelUpload(error.message); else if (!job.cancelled) toast(error.message);
+    }).finally(() => { state.attachments = state.attachments.filter(item => item !== job); resizePrompt(); });
+  }
+}
+$('image-input').addEventListener('change', () => { addImages($('image-input').files); $('image-input').value = ''; });
+$('composer').addEventListener('dragover', event => { event.preventDefault(); $('composer').classList.add('dragging'); });
+$('composer').addEventListener('dragleave', event => { if (!$('composer').contains(event.relatedTarget)) $('composer').classList.remove('dragging'); });
+$('composer').addEventListener('drop', event => { event.preventDefault(); $('composer').classList.remove('dragging'); addImages(event.dataTransfer.files); });
+prompt.addEventListener('paste', event => { const files = [...(event.clipboardData?.files || [])]; if (files.length) { event.preventDefault(); addImages(files); } });
+function receive(event) {
+  const e = JSON.parse(event.data);
+  if (e.seq) state.seq = e.seq;
+  if (e.view && e.view !== state.view) return;
+  switch (e.type) {
+    case 'reset':
+      for (const m of state.messages.values()) m.stream?.end();
+      state.messages.clear(); messages.replaceChildren(); state.queue.clear(); state.stagingQueue = null; queue();
+      if (e.text) toast(e.text); break;
+    case 'begin': message(e.id, e.role); break;
+    case 'delta': {
+      const m = message(e.id, e.role);
+      const text = e.encoding === 'base64'
+        ? m.decoder.decode(Uint8Array.from(atob(e.data || ''), c => c.charCodeAt(0)), { stream: true })
+        : e.text || '';
+      if (m.stream) m.stream.write(text); else m.body.append(document.createTextNode(text));
+      follow(); break;
+    }
+    case 'end': {
+      const m = state.messages.get(e.id);
+      if (m) {
+        const tail = m.decoder.decode();
+        if (m.stream) { m.stream.write(tail); m.stream.end(); }
+        else if (tail) m.body.append(document.createTextNode(tail));
+      }
+      follow(); break;
+    }
+    case 'queue_begin': state.stagingQueue = new Map(); break;
+    case 'queue_item': {
+      const old = state.queue.get(e.id);
+      state.stagingQueue?.set(e.id, { ...e, text: e.text || '', decoder: new TextDecoder(), visibleAt: old?.visibleAt ?? (!$('queue').hidden || e.held === '1' ? 0 : performance.now() + state.queueDelay) }); break;
+    }
+    case 'queue_text': {
+      const item = state.stagingQueue?.get(e.id);
+      if (item) item.text += e.encoding === 'base64' ? item.decoder.decode(Uint8Array.from(atob(e.data || ''), c => c.charCodeAt(0)), { stream: true }) : e.text || '';
+      break;
+    }
+    case 'queue_end':
+      if (state.stagingQueue) { for (const item of state.stagingQueue.values()) item.text += item.decoder.decode(); state.queue = state.stagingQueue; state.stagingQueue = null; queue(); } break;
+    case 'status': state.busy = e.busy === '1'; $('activity').textContent = e.text || ''; $('activity').hidden = !e.text; break;
+    case 'limits': if (Number(e.image_bytes) > 0) state.imageLimit = Number(e.image_bytes); break;
+    case 'complete':
+      if (Number(e.request) !== state.query || state.queryText !== prompt.value) break;
+      if (e.value !== undefined) state.completions.push(e);
+      showCompletions(state.menuAll); break;
+    case 'draft': {
+      const before = prompt.value; prompt.value = e.text || ''; adjustAnchor(before, prompt.value); resizePrompt(); prompt.focus(); break;
+    }
+    case 'image_credit': if (e.id === state.upload?.id) credit('ready'); break;
+    case 'image_done': if (e.id === state.upload?.id) credit({ path: e.path }); break;
+    case 'image_error': if (e.id === state.upload?.id) cancelUpload(e.text || 'Image upload failed.'); break;
+    case 'session':
+      if (!state.epoch || state.epoch === e.id) for (const item of state.pending.values()) send(item.action, item.fields);
+      else if (state.epoch && state.pending.size) {
+        state.failed.push(...state.pending.values()); state.failed = state.failed.slice(-16); state.pending.clear();
+        toast('The host restarted. Unconfirmed prompts are available under +; they were not sent again.');
+      }
+      state.epoch = e.id; break;
+    case 'accepted': state.pending.delete(e.request); break;
+    case 'error':
+      if (state.pending.has(e.request)) { state.failed.push(state.pending.get(e.request)); state.failed = state.failed.slice(-16); state.pending.delete(e.request); }
+      toast(e.text || 'The action failed. Unsent prompts can be recovered under +.'); break;
+  }
+}
+function connect() {
+  const generation = ++state.generation;
+  const url = new URL('./events', location.href); url.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  url.searchParams.set('after', state.seq); url.searchParams.set('view', state.view);
+  const socket = state.socket = new WebSocket(url);
+  socket.addEventListener('open', () => { state.online = true; $('connection').textContent = 'Connected'; resizePrompt(); });
+  socket.addEventListener('message', event => { try { receive(event); } catch { toast('Invalid conversation event. Reconnecting…'); socket.close(); } });
+  socket.addEventListener('close', () => {
+    if (generation !== state.generation) return;
+    state.online = false; $('connection').textContent = 'Reconnecting'; resizePrompt();
+    if (state.attachments.length) cancelUploads('Disconnected. Image uploads cancelled; draft kept.');
+    setTimeout(connect, 1000);
+  });
+}
+try {
+  const response = await fetch('./config.json');
+  if (!response.ok) throw new Error('The web handler is not enabled.');
+  const config = await response.json(); document.title = config.title || 'softline';
+  state.images = config.images === '1';
+  if (Number(config.image_bytes) > 0) state.imageLimit = Number(config.image_bytes);
+  if (Number(config.queue_delay) >= 0) state.queueDelay = Number(config.queue_delay);
+  $('welcome-text').replaceChildren(); const welcome = new MarkdownStream($('welcome-text')); welcome.write(config.welcome || 'Welcome to softline'); welcome.end();
+  // This is host-supplied branding, separate from model Markdown.
+  $('banner').innerHTML = config.banner || '';
+  connect();
+} catch (error) { $('connection').textContent = 'Unavailable'; toast(error.message); }
+resizePrompt();

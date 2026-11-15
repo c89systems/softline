@@ -1,0 +1,778 @@
+#if defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)
+#define _DARWIN_C_SOURCE 1
+#endif
+#define _POSIX_C_SOURCE 200809L
+#include "web_chat.h"
+#include <arpa/inet.h>
+#include <dirent.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <poll.h>
+#include <signal.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/resource.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/time.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#if defined(__APPLE__)
+#include <util.h>
+#else
+#include <pty.h>
+#endif
+#define CHECK(c)                                                               \
+  do {                                                                         \
+    if (!(c)) {                                                                \
+      fprintf(stderr, "www mock line %d: %s\n", __LINE__, #c);                 \
+      goto cleanup;                                                            \
+    }                                                                          \
+  } while (0)
+typedef struct {
+  demo_web_chat_t *web;
+  sl_t *sl;
+  int submissions;
+  struct rlimit file_limit;
+  char *large;
+  unsigned int large_revision;
+} app_t;
+static volatile sig_atomic_t done;
+static int terminal_fd = -1;
+static void stop(int n) {
+  (void)n;
+  done = 1;
+}
+static void snapshot(void *context, demo_web_chat_t *web) {
+  app_t *app = context;
+  unsigned int i;
+  char revision[32];
+  if (!app->large)
+    return;
+  (void)snprintf(revision, sizeof(revision), "large-%u", app->large_revision);
+  demo_web_queue_begin(web);
+  for (i = 0; i < 64; ++i) {
+    char id[32];
+    (void)snprintf(id, sizeof(id), "large-item-%u", i);
+    demo_web_queue_entry(web, id, revision, app->large, 0, 0);
+  }
+  demo_web_queue_end(web);
+}
+static int submit(void *context, const char *text, int steer,
+                  sl_queue_request_id_t *request_id) {
+  app_t *app = context;
+  char id[32];
+  if (!strcmp(text, "deferred rejection")) {
+    *request_id = 77;
+    return SL_OK;
+  }
+  ++app->submissions;
+  if (strcmp(sl_buffer(app->sl), "independent ANSI draft"))
+    return SL_ERROR;
+  (void)snprintf(id, sizeof(id), "item%d", app->submissions);
+  demo_web_message(app->web, "user", text);
+  demo_web_response(app->web, "# Reply\n\n", 9);
+  demo_web_response(app->web, "\342", 1);
+  demo_web_response(app->web, "\202\254\n", 3);
+  demo_web_response_end(app->web);
+  {
+    size_t index = sl_prompt_queue_count(app->sl);
+    int result = sl_prompt_queue_append(app->sl, text, 0, NULL);
+    return result == SL_OK && steer
+               ? sl_prompt_queue_set_mode(app->sl, index,
+                                          SL_PROMPT_QUEUE_MODE_STEER)
+               : result;
+  }
+}
+static int control(void *context, const char *action, const char *id,
+                   const char *revision) {
+  app_t *app = context;
+  sl_queue_result_t result;
+  (void)id;
+  (void)revision;
+  if (!strcmp(action, "large-queue")) {
+    app->large = malloc(128u * 1024u + 1);
+    if (!app->large)
+      return SL_ERROR_NOMEM;
+    memset(app->large, 'x', 128u * 1024u);
+    app->large[128u * 1024u] = 0;
+    ++app->large_revision;
+    snapshot(app, app->web);
+    ++app->large_revision;
+    snapshot(app, app->web);
+    return SL_OK;
+  }
+  if (!strcmp(action, "queue-history")) {
+    demo_web_queue_begin(app->web);
+    demo_web_queue_entry(app->web, "obsolete-approval", "old", "old approval",
+                         0, 1);
+    demo_web_queue_end(app->web);
+    demo_web_queue_begin(app->web);
+    demo_web_queue_end(app->web);
+    demo_web_message(app->web, "note", "replay boundary");
+    return SL_OK;
+  }
+  if (!strcmp(action, "limit")) {
+    struct rlimit limit;
+    if (getrlimit(RLIMIT_FSIZE, &app->file_limit))
+      return SL_ERROR;
+    limit = app->file_limit;
+    limit.rlim_cur = 0;
+    signal(SIGXFSZ, SIG_IGN);
+    return setrlimit(RLIMIT_FSIZE, &limit) ? SL_ERROR : SL_OK;
+  }
+  if (!strcmp(action, "unlimit"))
+    return setrlimit(RLIMIT_FSIZE, &app->file_limit) ? SL_ERROR : SL_OK;
+  if (strcmp(action, "release"))
+    return SL_ERROR_INVALID;
+  memset(&result, 0, sizeof(result));
+  result.request_id = 77;
+  result.status = SL_QUEUE_REJECTED;
+  result.reason = "fixture rejection";
+  demo_web_result(app->web, &result);
+  return SL_OK;
+}
+static void child_server(int output, const char *directory) {
+  app_t app;
+  demo_web_ops_t ops;
+  sl_config_t config;
+  unsigned short port;
+  int enabled, fd;
+  memset(&app, 0, sizeof(app));
+  memset(&ops, 0, sizeof(ops));
+  ops.submit = submit;
+  ops.control = control;
+  ops.snapshot = snapshot;
+  if (chdir(directory) || setenv("SOFTLINE_WEB", "1", 1) ||
+      setenv("SOFTLINE_WEB_PORT", "0", 1))
+    _exit(2);
+  unsetenv("SOFTLINE_CHAT_IMAGE_DIR");
+  unsetenv("SOFTLINE_CHAT_IMAGE_MAX_BYTES");
+  fd = open("/dev/null", O_RDWR);
+  sl_config_init(&config);
+  config.input_fd = config.output_fd = fd;
+  config.prompt_queue = 1;
+  app.sl = sl_create_with_config(&config);
+  if (!app.sl || sl_set_buffer(app.sl, "independent ANSI draft") != SL_OK)
+    _exit(2);
+  app.web = demo_web_open(NULL, &ops, &app, 0, &enabled);
+  if (!app.web || !enabled)
+    _exit(2);
+  port = demo_web_port(app.web);
+  if (write(output, &port, sizeof(port)) != (ssize_t)sizeof(port))
+    _exit(2);
+  close(output);
+  signal(SIGTERM, stop);
+  signal(SIGPIPE, SIG_IGN);
+  while (!done)
+    if (demo_www_poll(demo_web_listener(app.web), 10) || demo_web_tick(app.web))
+      break;
+  demo_web_close(app.web);
+  free(app.large);
+  sl_destroy(app.sl);
+  close(fd);
+  _exit(0);
+}
+static int connect_to(unsigned short port) {
+  struct sockaddr_in address;
+  struct timeval timeout;
+  int fd = socket(AF_INET, SOCK_STREAM, 0);
+  if (fd < 0)
+    return -1;
+  memset(&address, 0, sizeof(address));
+  address.sin_family = AF_INET;
+  address.sin_addr.s_addr = htonl(0x7f000001UL);
+  address.sin_port = htons(port);
+  timeout.tv_sec = 3;
+  timeout.tv_usec = 0;
+  (void)setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+  (void)setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+  if (connect(fd, (struct sockaddr *)&address, sizeof(address))) {
+    close(fd);
+    return -1;
+  }
+  return fd;
+}
+static int write_all(int fd, const void *data, size_t n) {
+  const unsigned char *p = data;
+  while (n) {
+    ssize_t k = write(fd, p, n);
+    if (k < 0 && errno == EINTR)
+      continue;
+    if (k <= 0)
+      return -1;
+    p += k;
+    n -= (size_t)k;
+  }
+  return 0;
+}
+static int read_all(int fd, void *data, size_t n) {
+  unsigned char *p = data;
+  while (n) {
+    struct pollfd waits[2];
+    ssize_t k;
+    waits[0].fd = fd;
+    waits[0].events = POLLIN;
+    waits[0].revents = 0;
+    waits[1].fd = terminal_fd;
+    waits[1].events = POLLIN;
+    waits[1].revents = 0;
+    if (poll(waits, 2, 3000) <= 0)
+      return -1;
+    if (waits[1].revents & POLLIN) {
+      char discard[4096];
+      (void)read(terminal_fd, discard, sizeof(discard));
+    }
+    if (!waits[0].revents)
+      continue;
+    k = read(fd, p, n);
+    if (k < 0 && errno == EINTR)
+      continue;
+    if (k <= 0)
+      return -1;
+    p += k;
+    n -= (size_t)k;
+  }
+  return 0;
+}
+static int ws_open(unsigned short port) {
+  static const char request[] =
+      "GET /events HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: "
+      "websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: "
+      "13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n";
+  int fd = connect_to(port);
+  char header[1024];
+  size_t at = 0, i;
+  if (fd < 0)
+    return -1;
+  for (i = 0; i < sizeof(request) - 1; ++i)
+    if (write_all(fd, request + i, 1))
+      goto fail;
+  while (at + 1 < sizeof(header)) {
+    if (read_all(fd, header + at, 1))
+      goto fail;
+    header[++at] = 0;
+    if (strstr(header, "\r\n\r\n"))
+      break;
+  }
+  if (!strstr(header, "101 Switching Protocols") ||
+      !strstr(header, "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="))
+    goto fail;
+  return fd;
+fail:
+  close(fd);
+  return -1;
+}
+static int ws_send(int fd, int opcode, int final, const void *data, size_t n) {
+  unsigned char header[8], *copy = malloc(n ? n : 1);
+  size_t i, length = n < 126 ? 2 : 4;
+  int result;
+  if (!copy || n > 65535) {
+    free(copy);
+    return -1;
+  }
+  header[0] = (unsigned char)(opcode | (final ? 128 : 0));
+  header[1] = (unsigned char)(128 | (n < 126 ? n : 126));
+  if (length == 4) {
+    header[2] = (unsigned char)(n >> 8);
+    header[3] = (unsigned char)n;
+  }
+  for (i = 0; i < 4; ++i)
+    header[length + i] = (unsigned char)(i + 1);
+  for (i = 0; i < n; ++i)
+    copy[i] = ((const unsigned char *)data)[i] ^ header[length + i % 4];
+  result = write_all(fd, header, length + 4) || write_all(fd, copy, n);
+  free(copy);
+  return result ? -1 : 0;
+}
+static int ws_text(int fd, const char *text) {
+  return ws_send(fd, 1, 1, text, strlen(text));
+}
+static int ws_read(int fd, char *data, size_t cap, int *opcode) {
+  unsigned char h[8];
+  uint64_t n;
+  size_t i;
+  if (read_all(fd, h, 2) || !(h[0] & 128) || (h[1] & 128))
+    return -1;
+  *opcode = h[0] & 15;
+  n = h[1] & 127;
+  if (n == 126) {
+    if (read_all(fd, h, 2))
+      return -1;
+    n = (uint64_t)h[0] << 8 | h[1];
+  } else if (n == 127) {
+    if (read_all(fd, h, 8))
+      return -1;
+    n = 0;
+    for (i = 0; i < 8; ++i)
+      n = (n << 8) | h[i];
+  }
+  if (n >= cap || read_all(fd, data, (size_t)n))
+    return -1;
+  data[n] = 0;
+  return (int)n;
+}
+static int until(int fd, char *data, size_t cap, const char *needle) {
+  int i, opcode;
+  for (i = 0; i < 200; ++i) {
+    if (ws_read(fd, data, cap, &opcode) < 0)
+      return -1;
+    if (opcode == 1 && strstr(data, needle))
+      return 0;
+  }
+  return -1;
+}
+int main(int argc, char **argv) {
+  char root[4096], *data = malloc(SL_WWW_FRAME_MAX + 1),
+                   *http = malloc(512 * 1024), path[4096] = {0};
+  int pipes[2] = {-1, -1}, fd = -1, one = -1, two = -1, status, opcode,
+      failed = 1;
+  pid_t child = -1, owner = -1;
+  int slave = -1, dual;
+  unsigned short queue_port = 0;
+  unsigned short port;
+  size_t used;
+  static const unsigned char png[16] = {137, 80,  78, 71, 13, 10, 26, 10,
+                                        0,   255, 1,  2,  3,  4,  5,  6};
+  (void)signal(SIGPIPE, SIG_IGN);
+  CHECK((argc == 2 || argc == 4 || argc == 5) && data && http);
+  dual = argc >= 4 && (!strcmp(argv[3], "dual") || !strcmp(argv[3], "remote"));
+  CHECK(snprintf(root, sizeof(root), "%s/www-mock-XXXXXX", argv[1]) <
+            (int)sizeof(root) &&
+        mkdtemp(root));
+  CHECK(pipe(pipes) == 0);
+  if (argc == 5) {
+    char line[1024];
+    unsigned int parsed = 0;
+    size_t at = 0;
+    owner = fork();
+    CHECK(owner >= 0);
+    if (!owner) {
+      if (chdir(root) || dup2(pipes[1], STDOUT_FILENO) < 0)
+        _exit(2);
+      close(pipes[0]);
+      setenv("SOFTLINE_WEB", "0", 1);
+      execl(argv[4], argv[4], "0", (char *)NULL);
+      _exit(2);
+    }
+    close(pipes[1]);
+    pipes[1] = -1;
+    while (!parsed) {
+      char c;
+      CHECK(read_all(pipes[0], &c, 1) == 0);
+      if (c == '\n') {
+        line[at] = 0;
+        (void)sscanf(line, "LISTEN 127.0.0.1 %u", &parsed);
+        at = 0;
+      } else if (at + 1 < sizeof(line))
+        line[at++] = c;
+    }
+    CHECK(parsed <= 65535);
+    queue_port = (unsigned short)parsed;
+    close(pipes[0]);
+    pipes[0] = -1;
+    CHECK(pipe(pipes) == 0);
+  }
+  if (dual)
+    CHECK(openpty(&terminal_fd, &slave, NULL, NULL, NULL) == 0);
+  if (dual) {
+    sl_config_t config;
+    sl_t *seed;
+    int null_fd = open("/dev/null", O_RDWR);
+    CHECK(null_fd >= 0);
+    sl_config_init(&config);
+    config.input_fd = config.output_fd = null_fd;
+    seed = sl_create_with_config(&config);
+    CHECK(seed &&
+          sl_history_open(seed, "softline.examples.chat", root) == SL_OK &&
+          sl_history_add(seed, "history seed") == SL_OK);
+    sl_destroy(seed);
+    close(null_fd);
+  }
+  child = fork();
+  CHECK(child >= 0);
+  if (!child) {
+    close(pipes[0]);
+    if (argc >= 4) {
+      if (chdir(root) || dup2(pipes[1], STDOUT_FILENO) < 0 ||
+          dup2(pipes[1], STDERR_FILENO) < 0 || setenv("SOFTLINE_WEB", "1", 1) ||
+          setenv("SOFTLINE_WEB_PORT", "0", 1) ||
+          setenv("SOFTLINE_HISTORY_DIR", root, 1) ||
+          setenv("SOFTLINE_CHAT_APPROVAL_DEMO", "0", 1) ||
+          setenv("SOFTLINE_CHAT_CHAR_MS", "0", 1))
+        _exit(2);
+      if (dual) {
+        close(terminal_fd);
+        if (dup2(slave, STDIN_FILENO) < 0 || dup2(slave, STDOUT_FILENO) < 0)
+          _exit(2);
+        close(slave);
+      }
+      unsetenv("SOFTLINE_CHAT_IMAGE_DIR");
+      unsetenv("SOFTLINE_CHAT_IMAGE_MAX_BYTES");
+      if (argc == 5) {
+        char number[16];
+        (void)snprintf(number, sizeof(number), "%u", (unsigned int)queue_port);
+        execl(argv[2], argv[2], "127.0.0.1", number, (char *)NULL);
+      } else if (dual)
+        execl(argv[2], argv[2], (char *)NULL);
+      else
+        execl(argv[2], argv[2], !strcmp(argv[3], "owner") ? "0" : "--web-only",
+              (char *)NULL);
+      _exit(2);
+    }
+    child_server(pipes[1], root);
+  }
+  close(pipes[1]);
+  pipes[1] = -1;
+  if (slave >= 0) {
+    close(slave);
+    slave = -1;
+  }
+  if (argc >= 4) {
+    char line[1024];
+    unsigned int parsed = 0;
+    size_t at = 0;
+    while (!parsed) {
+      char c;
+      CHECK(read_all(pipes[0], &c, 1) == 0);
+      if (c == '\n') {
+        line[at] = 0;
+        (void)sscanf(line, "WEB http://127.0.0.1:%u", &parsed);
+        at = 0;
+      } else if (at + 1 < sizeof(line))
+        line[at++] = c;
+    }
+    CHECK(parsed <= 65535);
+    port = (unsigned short)parsed;
+  } else
+    CHECK(read_all(pipes[0], &port, sizeof(port)) == 0);
+  close(pipes[0]);
+  pipes[0] = -1;
+  fd = connect_to(port);
+  CHECK(fd >= 0);
+  CHECK(write_all(fd, "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n", 35) == 0);
+  used = 0;
+  for (;;) {
+    ssize_t n = read(fd, http + used, 512 * 1024 - used - 1);
+    if (n < 0 && errno == EINTR)
+      continue;
+    CHECK(n >= 0);
+    if (!n)
+      break;
+    used += (size_t)n;
+    CHECK(used < 512 * 1024 - 1);
+  }
+  http[used] = 0;
+  CHECK(strstr(http, "200 OK") && strstr(http, "Welcome to softline") &&
+        strstr(http, "id=\"send\""));
+  close(fd);
+  fd = -1;
+  one = ws_open(port);
+  two = ws_open(port);
+  CHECK(one >= 0 && two >= 0);
+  CHECK(until(one, data, SL_WWW_FRAME_MAX + 1, "\"type\":\"session\"") == 0);
+  if (dual)
+    CHECK(write_all(terminal_fd, "independent ANSI draft\022", 23) == 0);
+  CHECK(ws_send(one, 1, 0, "action=send&request=first&", 26) == 0);
+  {
+    const char *tail = "text=hello+world&view=test&request_seq=1";
+    CHECK(ws_send(one, 0, 1, tail, strlen(tail)) == 0);
+  }
+  CHECK(until(one, data, SL_WWW_FRAME_MAX + 1, "\"type\":\"accepted\"") == 0);
+  CHECK(until(two, data, SL_WWW_FRAME_MAX + 1, "aGVsbG8gd29ybGQ=") == 0);
+  CHECK(ws_send(one, 9, 1, "p", 1) == 0);
+  do {
+    CHECK(ws_read(one, data, SL_WWW_FRAME_MAX + 1, &opcode) >= 0);
+  } while (opcode != 10);
+  CHECK(!strcmp(data, "p"));
+  /* A repeated request is acknowledged without admitting a second prompt. */
+  CHECK(ws_text(one, "action=send&request=first&text=hello+world&view=test&"
+                     "request_seq=1") == 0);
+  CHECK(until(one, data, SL_WWW_FRAME_MAX + 1, "\"type\":\"accepted\"") == 0);
+  CHECK(
+      ws_text(
+          one,
+          "action=send&request=first&text=different&view=test&request_seq=1") ==
+      0);
+  CHECK(until(one, data, SL_WWW_FRAME_MAX + 1, "\"type\":\"error\"") == 0);
+  CHECK(ws_text(one,
+                "action=send&request=invalid&text=&view=test&request_seq=2") ==
+        0);
+  CHECK(until(one, data, SL_WWW_FRAME_MAX + 1, "\"type\":\"error\"") == 0 &&
+        strstr(data, "\"request\":\"invalid\""));
+  if (argc == 2) {
+    CHECK(ws_text(one, "action=send&request=deferred&text=deferred+rejection&"
+                       "view=test&request_seq=2") == 0);
+    CHECK(ws_send(one, 9, 1, "barrier", 7) == 0);
+    do {
+      CHECK(ws_read(one, data, SL_WWW_FRAME_MAX + 1, &opcode) >= 0);
+      CHECK(!strstr(data, "\"request\":\"deferred\""));
+    } while (opcode != 10);
+    CHECK(ws_text(one, "action=release") == 0);
+    CHECK(until(one, data, SL_WWW_FRAME_MAX + 1, "fixture rejection") == 0 &&
+          strstr(data, "\"request\":\"deferred\""));
+  }
+  CHECK(ws_text(one, "action=complete&request=7&text=%2Fst&cursor=3&all=0") ==
+        0);
+  CHECK(until(one, data, SL_WWW_FRAME_MAX + 1, "\"value\":\"/status\"") == 0);
+  CHECK(ws_text(
+            one,
+            "action=complete&request=8&text=%E2%82%AC+%2Fst&cursor=7&all=0") ==
+        0);
+  CHECK(until(one, data, SL_WWW_FRAME_MAX + 1, "\"value\":\"/status\"") == 0 &&
+        strstr(data, "\"start\":\"4\""));
+  CHECK(
+      ws_text(one, "action=complete&request=9&text=%E2%82%AC&cursor=1&all=0") ==
+      0);
+  CHECK(until(one, data, SL_WWW_FRAME_MAX + 1, "\"type\":\"error\"") == 0);
+  CHECK(ws_text(one, "action=image_begin&id=upload&media_type=image%2Fpng&"
+                     "filename=x.png&size=16") == 0);
+  CHECK(until(one, data, SL_WWW_FRAME_MAX + 1, "\"type\":\"image_credit\"") ==
+        0);
+  CHECK(ws_send(one, 2, 1, png, 1) == 0 &&
+        until(one, data, SL_WWW_FRAME_MAX + 1, "\"type\":\"image_credit\"") ==
+            0);
+  CHECK(ws_send(one, 2, 1, png + 1, 15) == 0 &&
+        until(one, data, SL_WWW_FRAME_MAX + 1, "\"type\":\"image_credit\"") ==
+            0);
+  CHECK(ws_text(one, "action=image_end&id=upload") == 0);
+  CHECK(until(one, data, SL_WWW_FRAME_MAX + 1, "\"type\":\"image_done\"") == 0);
+  {
+    char *p = strstr(data, "\"path\":\"");
+    char *end;
+    CHECK(p);
+    p += 8;
+    end = strchr(p, '"');
+    CHECK(end && (size_t)(end - p) < sizeof(path));
+    memcpy(path, p, (size_t)(end - p));
+    path[end - p] = 0;
+  }
+  fd = open(path, O_RDONLY);
+  CHECK(fd >= 0 && read_all(fd, http, sizeof(png)) == 0 &&
+        !memcmp(http, png, sizeof(png)));
+  close(fd);
+  fd = -1;
+  CHECK(ws_text(one, "action=image_begin&id=cancel&media_type=image%2Fpng&"
+                     "filename=x.png&size=16") == 0);
+  CHECK(until(one, data, SL_WWW_FRAME_MAX + 1, "\"type\":\"image_credit\"") ==
+        0);
+  CHECK(ws_text(one, "action=image_cancel&id=cancel") == 0);
+  CHECK(until(one, data, SL_WWW_FRAME_MAX + 1, "\"type\":\"image_error\"") ==
+        0);
+  CHECK(
+      ws_text(
+          one,
+          "action=image_begin&id=large&media_type=image%2Fpng&size=33554433") ==
+      0);
+  CHECK(until(one, data, SL_WWW_FRAME_MAX + 1, "\"type\":\"image_error\"") ==
+        0);
+  if (dual) {
+    char encoded[128];
+    (void)demo_www_base64((const unsigned char *)"independent ANSI draft", 22,
+                          encoded);
+    CHECK(write_all(terminal_fd, "\007\r", 2) == 0);
+    CHECK(until(one, data, SL_WWW_FRAME_MAX + 1, encoded) == 0);
+  }
+  /* A second independent source has a fresh backend wire identity. */
+  if (argc == 2) {
+    CHECK(ws_text(one, "action=limit") == 0);
+    CHECK(until(one, data, SL_WWW_FRAME_MAX + 1, "\"type\":\"accepted\"") == 0);
+    CHECK(ws_text(one, "action=image_begin&id=disk-failure&media_type=image%"
+                       "2Fpng&size=16") == 0);
+    CHECK(until(one, data, SL_WWW_FRAME_MAX + 1, "\"type\":\"image_credit\"") ==
+          0);
+    CHECK(ws_send(one, 2, 1, png, sizeof(png)) == 0);
+    CHECK(until(one, data, SL_WWW_FRAME_MAX + 1, "\"type\":\"image_error\"") ==
+          0);
+    CHECK(ws_text(one, "action=unlimit") == 0);
+    CHECK(until(one, data, SL_WWW_FRAME_MAX + 1, "\"type\":\"accepted\"") == 0);
+    CHECK(
+        ws_text(one,
+                "action=image_begin&id=retry&media_type=image%2Fpng&size=16") ==
+        0);
+    CHECK(until(one, data, SL_WWW_FRAME_MAX + 1, "\"type\":\"image_credit\"") ==
+          0);
+    CHECK(ws_text(one, "action=image_cancel&id=retry") == 0);
+    CHECK(until(one, data, SL_WWW_FRAME_MAX + 1, "\"type\":\"image_error\"") ==
+          0);
+  }
+  CHECK(ws_text(two, "action=image_begin&id=jpeg&media_type=image%2Fjpeg&"
+                     "filename=x.jpg&size=3") == 0);
+  CHECK(until(two, data, SL_WWW_FRAME_MAX + 1, "\"type\":\"image_credit\"") ==
+        0);
+  CHECK(ws_send(two, 2, 1, "\377\330\377", 3) == 0);
+  CHECK(until(two, data, SL_WWW_FRAME_MAX + 1, "\"type\":\"image_credit\"") ==
+        0);
+  CHECK(ws_text(two, "action=image_end&id=jpeg") == 0);
+  CHECK(until(two, data, SL_WWW_FRAME_MAX + 1, "\"type\":\"image_done\"") == 0);
+  CHECK(
+      ws_text(two,
+              "action=image_begin&id=invalid&media_type=image%2Fpng&size=16") ==
+      0);
+  CHECK(until(two, data, SL_WWW_FRAME_MAX + 1, "\"type\":\"image_credit\"") ==
+        0);
+  CHECK(ws_send(two, 2, 1, "bad", 3) == 0);
+  CHECK(until(two, data, SL_WWW_FRAME_MAX + 1, "\"type\":\"image_error\"") ==
+        0);
+  /* Reconnect replays retained text; a duplicate offer remains one admission.
+   */
+  if (argc == 2) {
+    CHECK(ws_text(one, "action=queue-history") == 0);
+    CHECK(until(one, data, SL_WWW_FRAME_MAX + 1, "\"type\":\"accepted\"") == 0);
+  }
+  close(two);
+  two = -1;
+  two = ws_open(port);
+  CHECK(two >= 0);
+  CHECK(until(two, data, SL_WWW_FRAME_MAX + 1, "aGVsbG8gd29ybGQ=") == 0);
+  if (argc == 2) {
+    char marker[128];
+    int iteration;
+    (void)demo_www_base64((const unsigned char *)"replay boundary",
+                          strlen("replay boundary"), marker);
+    for (iteration = 0; iteration < 200; ++iteration) {
+      CHECK(ws_read(two, data, SL_WWW_FRAME_MAX + 1, &opcode) >= 0);
+      CHECK(!strstr(data, "obsolete-approval"));
+      if (strstr(data, marker))
+        break;
+    }
+    CHECK(iteration < 200);
+  }
+  CHECK(ws_text(two, "action=send&request=first&text=hello+world&view=test&"
+                     "request_seq=1") == 0);
+  CHECK(until(two, data, SL_WWW_FRAME_MAX + 1, "\"type\":\"accepted\"") == 0);
+  /* Disconnect while DATA is outstanding, then reuse another source. */
+  CHECK(
+      ws_text(
+          one,
+          "action=image_begin&id=disconnect&media_type=image%2Fpng&size=16") ==
+      0);
+  CHECK(until(one, data, SL_WWW_FRAME_MAX + 1, "\"type\":\"image_credit\"") ==
+        0);
+  CHECK(ws_send(one, 2, 1, png, 1) == 0);
+  CHECK(until(one, data, SL_WWW_FRAME_MAX + 1, "\"type\":\"image_credit\"") ==
+        0);
+  close(one);
+  one = -1;
+  one = ws_open(port);
+  CHECK(one >= 0);
+  CHECK(until(one, data, SL_WWW_FRAME_MAX + 1, "\"type\":\"session\"") == 0);
+  {
+    int iteration;
+    for (iteration = 0; iteration < 8; ++iteration) {
+      char begin[160], end[80], expected[80];
+      (void)snprintf(
+          begin, sizeof(begin),
+          "action=image_begin&id=sequence-%d&media_type=image%%2Fjpeg&size=3",
+          iteration);
+      (void)snprintf(end, sizeof(end), "action=image_end&id=sequence-%d",
+                     iteration);
+      (void)snprintf(expected, sizeof(expected), "\"id\":\"sequence-%d\"",
+                     iteration);
+      CHECK(ws_text(one, begin) == 0);
+      CHECK(until(one, data, SL_WWW_FRAME_MAX + 1,
+                  "\"type\":\"image_credit\"") == 0);
+      CHECK(ws_send(one, 2, 1, "\377\330\377", 3) == 0);
+      CHECK(until(one, data, SL_WWW_FRAME_MAX + 1,
+                  "\"type\":\"image_credit\"") == 0);
+      CHECK(ws_text(one, end) == 0);
+      CHECK(until(one, data, SL_WWW_FRAME_MAX + 1, "\"type\":\"image_done\"") ==
+                0 &&
+            strstr(data, expected));
+    }
+  }
+  close(one);
+  one = -1;
+  close(two);
+  two = -1;
+  if (argc == 2) {
+    one = ws_open(port);
+    CHECK(one >= 0);
+    CHECK(until(one, data, SL_WWW_FRAME_MAX + 1, "\"type\":\"session\"") == 0);
+    CHECK(ws_text(one, "action=large-queue") == 0);
+    while (ws_read(one, data, SL_WWW_FRAME_MAX + 1, &opcode) >= 0) {
+    }
+    close(one);
+    one = ws_open(port);
+    CHECK(one >= 0);
+    {
+      int iteration, items = 0;
+      for (iteration = 0; iteration < 5000; ++iteration) {
+        CHECK(ws_read(one, data, SL_WWW_FRAME_MAX + 1, &opcode) >= 0);
+        if (strstr(data, "\"type\":\"queue_item\""))
+          ++items;
+        if (strstr(data, "\"type\":\"queue_end\""))
+          break;
+      }
+      CHECK(iteration < 5000 && items == 64);
+    }
+    close(one);
+    one = -1;
+  }
+  failed = 0;
+cleanup:
+  if (fd >= 0)
+    close(fd);
+  if (one >= 0)
+    close(one);
+  if (two >= 0)
+    close(two);
+  if (pipes[0] >= 0)
+    close(pipes[0]);
+  if (pipes[1] >= 0)
+    close(pipes[1]);
+  if (child > 0) {
+    int exited = 0, tries;
+    if (dual && terminal_fd >= 0) {
+      (void)write_all(terminal_fd, "\033q", 2);
+      for (tries = 0; tries < 100; ++tries) {
+        struct pollfd drain;
+        char discard[4096];
+        if (waitpid(child, &status, WNOHANG) == child) {
+          exited = 1;
+          break;
+        }
+        drain.fd = terminal_fd;
+        drain.events = POLLIN;
+        drain.revents = 0;
+        if (poll(&drain, 1, 20) > 0 && (drain.revents & POLLIN))
+          (void)read(terminal_fd, discard, sizeof(discard));
+      }
+    }
+    if (!exited) {
+      kill(child, SIGTERM);
+      waitpid(child, &status, 0);
+    }
+    if (!WIFEXITED(status) || WEXITSTATUS(status))
+      failed = 1;
+  }
+  if (owner > 0) {
+    kill(owner, SIGTERM);
+    waitpid(owner, &status, 0);
+    if (!WIFEXITED(status) || WEXITSTATUS(status))
+      failed = 1;
+  }
+  if (slave >= 0)
+    close(slave);
+  if (terminal_fd >= 0)
+    close(terminal_fd);
+  if (!failed || child > 0) {
+    DIR *d = opendir(root);
+    if (d) {
+      struct dirent *e;
+      while ((e = readdir(d)) != NULL)
+        if (strcmp(e->d_name, ".") && strcmp(e->d_name, "..")) {
+          char file[8192];
+          (void)snprintf(file, sizeof(file), "%s/%s", root, e->d_name);
+          unlink(file);
+        }
+      closedir(d);
+      rmdir(root);
+    }
+  }
+  free(data);
+  free(http);
+  return failed;
+}

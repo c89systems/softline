@@ -20,6 +20,8 @@ CHAT_DEMO_ENV = SOFTLINE_CHAT_APPROVAL_DEMO="$(CHAT_APPROVAL_DEMO)" SOFTLINE_CHA
 CHAT_QUEUE ?= local
 QUEUE_HOST ?= 127.0.0.1
 QUEUE_PORT ?= 7635
+WEB_PORT ?= 8080
+QUEUE_WEB_PORT ?= 8081
 ifeq ($(CHAT_QUEUE),local)
 CHAT_COMMAND = ./build/debug/examples/example_chat
 else ifeq ($(CHAT_QUEUE),remote)
@@ -83,10 +85,21 @@ run-chat-local: ## Run chat with the native local queue
 	@$(MAKE) run-chat CHAT_QUEUE=local
 
 run-chat-remote: ## Attach chat to the separate TCP queue owner
-	@$(MAKE) run-chat CHAT_QUEUE=remote
+	@SOFTLINE_WEB=1 SOFTLINE_WEB_PORT="$(WEB_PORT)" $(MAKE) run-chat CHAT_QUEUE=remote
 
 run-chat-queue-server: build-debug ## Run volatile queue owner from build/ (QUEUE_PORT=7635)
-	@cd "$(BUILD_DIR)" && $(CHAT_DEMO_ENV) ./debug/examples/example_queue_owner "$(QUEUE_PORT)"
+	@cd "$(BUILD_DIR)" && SOFTLINE_WEB=1 SOFTLINE_WEB_PORT="$(QUEUE_WEB_PORT)" $(CHAT_DEMO_ENV) ./debug/examples/example_queue_owner "$(QUEUE_PORT)"
+
+.PHONY: run-chat-web run-chat-web-only
+run-chat-web: build-debug ## Run local ANSI and web chat together (WEB_PORT=8080)
+	@cd "$(BUILD_DIR)" && SOFTLINE_WEB=1 SOFTLINE_WEB_PORT="$(WEB_PORT)" SOFTLINE_PROMPT_THEME="$(if $(strip $(THEME)),$(THEME),gruvbox)" $(CHAT_DEMO_ENV) ./debug/examples/example_chat
+
+run-chat-web-only: build-debug ## Run local web chat without a TUI (WEB_PORT=8080)
+	@cd "$(BUILD_DIR)" && SOFTLINE_WEB=1 SOFTLINE_WEB_PORT="$(WEB_PORT)" $(CHAT_DEMO_ENV) ./debug/examples/example_chat --web-only
+
+.PHONY: run-web-checks
+run-web-checks: build-debug ## Serve browser Markdown/chart checks; open the printed URL
+	@./build/debug/tests/www_browser_fixture ./tests/web-browser.html
 
 .PHONY: run-chat-default
 run-chat-default: build-debug ## Run C chat example with the default ANSI theme
