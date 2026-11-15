@@ -118,7 +118,7 @@ static void disconnect(owner_t *o) {
     sl_terminal_event_t event;
     memset(&event, 0, sizeof(event));
     event.operation = SL_TERMINAL_CLOSE;
-    (void)sl_pty_callback(&o->terminal->pty, &event);
+    (void)sl_terminal_session_dispatch(o->terminal->session, &event);
     o->terminal->next = o->closed_terminals;
     o->closed_terminals = o->terminal;
     o->terminal = NULL;
@@ -675,11 +675,7 @@ static void input(owner_t *o) {
         disconnect(o);
         break;
       }
-      o->terminal->pty.fd = -1;
-      o->terminal->pty.exec_fd = -1;
-      o->terminal->pty.shell = getenv("SHELL");
-      if (!o->terminal->pty.shell || !*o->terminal->pty.shell)
-        o->terminal->pty.shell = "/bin/sh";
+      o->terminal->wait.fd = -1;
       if (demo_terminal_server_input(o->terminal, &o->link, kind, &p))
         disconnect(o);
     } else if (o->terminal) {
@@ -1012,11 +1008,7 @@ int main(int argc, char **argv) {
     fds[2].fd = o->waiting_gate ? o->gate_fd : -1;
     fds[2].events = POLLIN;
     fds[2].revents = 0;
-    fds[3].fd = o->terminal && !o->terminal->eof
-                    ? (o->terminal->pty.exec_fd >= 0 ? o->terminal->pty.exec_fd
-                       : o->terminal->pty.eof_deadline ? -1
-                                                       : o->terminal->pty.fd)
-                    : -1;
+    fds[3].fd = o->terminal && !o->terminal->eof ? o->terminal->wait.fd : -1;
     fds[3].events = (o->link.count < 2 ? POLLIN : 0) |
                     (o->terminal && o->terminal->input_len ? POLLOUT : 0);
     if (!fds[3].events)
@@ -1071,7 +1063,7 @@ int main(int argc, char **argv) {
       demo_terminal_server_t **at = &o->closed_terminals;
       while (*at) {
         demo_terminal_server_t *s = *at;
-        if (sl_pty_reap(&s->pty)) {
+        if (sl_terminal_session_destroy(s->session) == SL_OK) {
           *at = s->next;
           free(s);
         } else
@@ -1097,7 +1089,8 @@ int main(int argc, char **argv) {
     delay.tv_nsec = 1000000;
     while (o->closed_terminals) {
       demo_terminal_server_t *s = o->closed_terminals;
-      if (!sl_pty_reap(&s->pty) && remaining-- > 0) {
+      if (sl_terminal_session_destroy(s->session) == SL_ERROR_NOT_READY &&
+          remaining-- > 0) {
         (void)nanosleep(&delay, NULL);
         continue;
       }

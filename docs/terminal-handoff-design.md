@@ -4,6 +4,73 @@ Status: implemented by `sl_terminal_handoff()` and the local PTY adapter
 `sl_terminal_local()`. Local C/Lua chat uses the local adapter. Remote C chat
 uses a backend PTY over the demo transport, independently of frontend rendering.
 
+`<softline/terminal.h>` exposes the server PTY as an independent receiver.
+The remote example uses this public API; it neither includes private PTY headers
+nor compiles a second PTY implementation. The client uses its existing terminal
+in raw mode; only the server needs to create a PTY.
+
+## Server session API
+
+Initialize `sl_terminal_session_config_t`, then create a receiver with
+`sl_terminal_session_create()`. Creation copies host-owned executable, argv,
+directory and environment policy without spawning. NULL argv selects an
+interactive shell; NULL environment inherits the host's environment. An optional
+terminal type overrides TERM. Explicit environment lists replace the inherited
+environment. Paths are executable paths, never shell command strings.
+
+`session->dispatch()` and `sl_terminal_session_dispatch()` implement the same
+OPEN/STEP/READ/WRITE/RESIZE/CLOSE event contract as the TUI relay. They require
+neither an editor nor terminal stdin/stdout. STEP exposes a borrowed readiness
+descriptor/deadline for the host loop. Dispatch at most 4096 bytes per READ or
+WRITE, retain unconsumed input on partial writes, and stop reading output when
+the transport or frontend has no capacity. OPEN validates rows/columns and is
+single-use; create another receiver for a new session. READ returning zero is
+output EOF; `status()` separately reports the child exit status.
+An exec/setup failure is reported as soon as its status is known, even if the
+failed child has not yet been reaped. It must never become a successful exit
+merely because process teardown is still pending.
+The example wire adapter preserves an unavailable exit status as -1 in the C
+API (wire value 256), rather than inventing exit code zero.
+
+CLOSE is idempotent, terminates the shell and foreground group, and never waits
+for peer acknowledgment or child exit. `destroy()` performs nonblocking cleanup:
+SL_ERROR_NOT_READY retains ownership with the caller, who must retry from the
+event loop until SL_OK. There is no worker or hidden child reaper. Server
+sessions install no process signal handlers and do not change host terminal
+attributes. They may run on a headless host.
+The built-in receiver owns child reaping. A host SIGCHLD handler should wake the
+owner loop and leave this child to the receiver; a process-wide waitpid(-1)
+reaper must not consume its status. Hosts requiring centralized child ownership
+can supply their own PTY adapter through the generic terminal callback contract.
+
+The transport maps these logical operations onto its own ordered messages.
+Softline supplies no socket, authentication policy or mandatory wire encoding.
+Session ownership is per frontend view; closing or losing that attachment
+terminates its session, without shell persistence or automatic reattachment.
+
+## Browser and Kore integration boundary
+
+This change supplies the native session boundary and remote TUI example. The
+xterm.js widget and Kore/WebSocket binding are a subsequent integration step.
+The binding can create one receiver per authorized WebSocket attachment, feed
+binary input through WRITE, forward RESIZE, and watch the STEP descriptor and
+deadline in Kore's event loop. The executable, argv, environment and directory
+are host policy, independent of browser input.
+
+Send READ output in bounded binary frames. A browser should return consumed-byte
+credit from xterm.js's write-completion callback; stop calling READ when that
+credit is exhausted. Retain at most one bounded output chunk when the socket
+cannot accept a frame. Likewise, retain bounded pending input across partial
+PTY writes and replenish input credit only as bytes are consumed. Control and
+close operations must remain serviceable under data backpressure. These are
+adapter semantics, not a mandatory Softline wire encoding.
+
+The existing example/test WebSocket listener can exercise this binding without
+bringing Kore or an HTTP daemon into libsoftline. The native tests separately
+exercise real PTYs, binary chunks, blocked directions, cancellation and malformed
+transport messages. Actual xterm.js/browser execution remains deferred to the
+browser-capable host.
+
 ## Behavior
 
 Alt-S requests a new terminal session without submitting the draft. The host
@@ -101,6 +168,33 @@ escape. If the terminal cannot accept the required controls, return
 the editor continuation; the host may reopen the output session when writable.
 Do not wait for terminal drainage. Cancelling a local PTY terminates its current
 foreground job group as well as the shell group before closing the master.
+
+## Raw-mode recovery
+
+Native editing and handoff protect the original terminal attributes and file
+flags before changing them. Close-on-exec duplicate descriptors keep restoration
+attached to the original terminals even if application descriptors are closed or
+reused. Restoration retries EINTR, uses TCSANOW without waiting for output to
+drain, and also runs at normal process exit. Setup and callback failures take the
+same cleanup path.
+
+While a TUI owns terminal input, temporary signal guards restore the terminal
+before default termination or job-control suspension and before invoking an
+existing application handler. Returning handlers and foreground job resumption
+reacquire the prior modes. Signal information, application masks, one-shot
+handlers, restart flags and alternate signal stacks are preserved; original
+dispositions are restored when ownership ends. Register application handlers
+before acquiring TUI input; ignored signals remain untouched. Replacing a
+guarded disposition during ownership opts that signal out of the guard; its
+replacement is preserved on release.
+
+TUI acquisition/release and signal policy belong to one process owner thread.
+Multithreaded hosts must route these signals to that thread. Independent server
+PTY receivers impose no such process-wide TUI ownership. Application callbacks
+and signal handlers must not reenter Softline. SIGKILL and SIGSTOP cannot be
+caught; fatal crashes, `_exit()`, and an unusable/removed terminal can also
+prevent restoration. An OS restoration failure is reported; recovery is never
+claimed for a terminal that cannot accept its saved attributes.
 
 ## Escape from a hung session
 

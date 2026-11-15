@@ -361,6 +361,14 @@ adapter or `sl_terminal_handoff()` with a nonblocking host adapter for another
 PTY transport, outside active editor callbacks. The host chooses the shell,
 authentication and protocol. See [the terminal adapter contract](docs/terminal-handoff-design.md).
 
+Server hosts use `<softline/terminal.h>` for a separate PTY session receiver,
+driven by their own event loop and transport. It exposes bounded byte I/O,
+readiness, resize, close and exit status without an editor, listener or worker.
+The remote example uses this public API. Native raw-mode ownership also guards
+normal exit, catchable termination signals and job-control suspension; register
+application signal handlers before acquiring TUI input. See the recovery and
+host-threading contract in the terminal adapter documentation.
+
 To bind another key, return `SL_KEY_ACTION_SUSPEND` from its callback.
 `readline()` or `next_prompt()` returns NULL with `SL_READLINE_SUSPENDED`.
 The owner can perform the existing output-session handoff, then call the editor

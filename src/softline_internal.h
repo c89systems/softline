@@ -6,6 +6,7 @@
 #include "softline_edit.h"
 #include "softline_history.h"
 #include "softline_surface.h"
+#include "softline_tty_guard.h"
 
 #include <signal.h>
 #include <stdint.h>
@@ -175,9 +176,8 @@ typedef struct sl_impl {
   int preferred_column_valid;
   int control_x_pending;
   int raw_active;
+  sl_tty_guard_t *raw_guard, *terminal_guard;
   struct termios original_termios;
-  tcflag_t original_output_oflag;
-  int output_oflag_changed;
   sl_history_t history;
   /* Sole reverse-search mode flag; readable by application key bindings. */
   int history_search_active;

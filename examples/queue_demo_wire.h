@@ -31,7 +31,7 @@ enum demo_message {
   DEMO_PTY_READY,
   DEMO_PTY_DATA,
   DEMO_PTY_RESIZE,
-  DEMO_PTY_EXIT,
+  DEMO_PTY_EXIT, /* Exit code 0..255, or 256 when unavailable. */
   DEMO_IMAGE_BEGIN,
   DEMO_IMAGE_DATA,
   DEMO_IMAGE_END,

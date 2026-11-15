@@ -1,5 +1,11 @@
 # Exact dynamic C API exported by libsoftline shared libraries.
 sl_bind_key
+sl_terminal_session_config_init
+sl_terminal_session_create
+sl_terminal_session_dispatch
+sl_terminal_session_status
+sl_terminal_session_destroy
+sl_terminal_session_adapter
 sl_image_paste_start_source
 sl_www_asset
 sl_www_binary

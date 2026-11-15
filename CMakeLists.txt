@@ -130,6 +130,8 @@ endif()
 add_library(sl_lib_obj OBJECT src/softline.c src/softline_surface.c
   src/softline_clipboard.c src/softline_history.c src/softline_edit.c
   src/softline_queue_backend.c src/softline_terminal.c src/softline_pty.c
+  src/softline_terminal_session.c
+  src/softline_tty_guard.c
   src/softline_completion.c src/softline_image.c src/softline_www.c)
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 set(_sl_web_assets "${CMAKE_CURRENT_BINARY_DIR}/softline_www_assets.h")
@@ -341,7 +343,8 @@ if(SL_INSTALL)
     install(FILES LICENSE README.md
       DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/doc/softline
     )
-    install(FILES docs/web-frontend.md DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/doc/softline)
+    install(FILES docs/web-frontend.md docs/terminal-handoff-design.md
+      DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/doc/softline)
     install(FILES vendor/streaming-markdown/LICENSE vendor/streaming-markdown/README.softline
       DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/doc/softline/streaming-markdown)
     install(FILES vendor/jetbrains-mono/OFL.txt vendor/jetbrains-mono/README.softline

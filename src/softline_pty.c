@@ -124,7 +124,12 @@ static int pty_open(sl_pty_t *p, sl_terminal_event_t *e) {
     (void)signal(SIGWINCH, SIG_DFL);
     sigemptyset(&mask);
     (void)sigprocmask(SIG_SETMASK, &mask, NULL);
-    execl(p->shell, p->shell, "-i", (char *)NULL);
+    if (p->directory && chdir(p->directory))
+      child_fail(started[1], 126);
+    if (p->arguments)
+      execve(p->shell, p->arguments, p->environment);
+    else
+      execl(p->shell, p->shell, "-i", (char *)NULL);
     child_fail(started[1], 127);
   }
   close(started[1]);

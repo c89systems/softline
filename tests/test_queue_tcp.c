@@ -960,6 +960,7 @@ static int terminal_disconnect_case(peer_t *p, unsigned short port,
   demo_put_number(&packet, DEMO_PTY_OPEN);
   demo_put_number(&packet, 12);
   demo_put_number(&packet, 80);
+  demo_put_string(&packet, "xterm-256color");
   CHECK(!demo_link_queue(&p->link, &packet) && !flush(p));
   deadline = now() + 2000;
   for (;;) {

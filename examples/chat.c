@@ -1306,6 +1306,8 @@ int main(int argc, char **argv) {
     if (state.web && state.remote)
       demo_client_results(state.remote, web_result, &state);
   }
+  if (interactive)
+    (void)signal(SIGINT, keep_chat_on_interrupt);
   if ((interactive &&
        ((!state.remote && sl_set_prompt_queue(state.sl, 1, 64, 3) != SL_OK) ||
         sl_set_prompt_queue_profile(
@@ -1336,7 +1338,6 @@ int main(int argc, char **argv) {
     goto cleanup;
   }
   if (interactive) {
-    (void)signal(SIGINT, keep_chat_on_interrupt);
     if (set_busy(&state, 0) != 0 || setup_approval_demo(&state) != 0) {
       exit_code = 1;
       goto cleanup;

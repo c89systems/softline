@@ -1164,13 +1164,19 @@ static int sl_enable_raw(sl_t *self) {
   raw.c_lflag &= ~(ECHO | ICANON | IEXTEN | ISIG);
   raw.c_cc[VMIN] = 0;
   raw.c_cc[VTIME] = 1;
-  if (tcsetattr(impl->input_fd, impl->terminal_active ? TCSANOW : TCSAFLUSH,
-                &raw) != 0) {
-    sl_set_error(self, "failed to enable terminal raw mode");
+  impl->raw_guard =
+      sl_tty_guard_begin(impl->input_fd, impl->output_fd, impl->terminal_guard);
+  if (!impl->raw_guard) {
+    sl_set_error(self, "failed to protect terminal raw mode");
     return -1;
   }
   impl->raw_active = 1;
-  impl->output_oflag_changed = 0;
+  if (sl_tty_setattr(impl->input_fd,
+                     impl->terminal_active ? TCSANOW : TCSAFLUSH, &raw) != 0) {
+    sl_disable_raw(self);
+    sl_set_error(self, "failed to enable terminal raw mode");
+    return -1;
+  }
   /* stdin and stdout often share a TTY through different descriptors. Query
    * after setting input raw mode, so that shared TTY needs no second change.
    * A separate output TTY only lends us its output flags, not its input mode.
@@ -1181,11 +1187,9 @@ static int sl_enable_raw(sl_t *self) {
       sl_disable_raw(self);
       return -1;
     }
-    impl->original_output_oflag = output.c_oflag;
-    output.c_oflag = sl_native_output_flags(output.c_oflag);
-    if (output.c_oflag != impl->original_output_oflag) {
-      impl->output_oflag_changed = 1;
-      if (tcsetattr(impl->output_fd, TCSANOW, &output) != 0) {
+    if (output.c_oflag != sl_native_output_flags(output.c_oflag)) {
+      output.c_oflag = sl_native_output_flags(output.c_oflag);
+      if (sl_tty_setattr(impl->output_fd, TCSANOW, &output) != 0) {
         sl_set_error(self, "failed to disable output kernel tab expansion");
         sl_disable_raw(self);
         return -1;
@@ -1197,17 +1201,12 @@ static int sl_enable_raw(sl_t *self) {
 
 static void sl_disable_raw(sl_t *self) {
   sl_impl_t *impl;
-  struct termios output;
   impl = sl_impl(self);
   if (!impl || !impl->raw_active)
     return;
-  (void)tcsetattr(impl->input_fd, impl->terminal_active ? TCSANOW : TCSAFLUSH,
-                  &impl->original_termios);
-  if (impl->output_oflag_changed && tcgetattr(impl->output_fd, &output) == 0) {
-    output.c_oflag = impl->original_output_oflag;
-    (void)tcsetattr(impl->output_fd, TCSANOW, &output);
-  }
-  impl->output_oflag_changed = 0;
+  if (sl_tty_guard_end(impl->raw_guard, 1, !impl->terminal_guard))
+    sl_set_error(self, "failed to restore terminal attributes");
+  impl->raw_guard = NULL;
   impl->raw_active = 0;
 }
 

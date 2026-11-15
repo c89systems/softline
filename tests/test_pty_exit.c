@@ -1,3 +1,4 @@
+#include "../src/softline_pty.h"
 #include "queue_demo_terminal.h"
 #include <errno.h>
 #include <fcntl.h>
