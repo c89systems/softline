@@ -68,8 +68,11 @@ The write callback sends one bounded JSON event through
 response for an HTTP response. The host owns origin/authentication checks,
 connection lifetime, routing, scheduling, backpressure, history, and replay.
 Softline never calls Kore or assumes a particular server or HTTP version.
-The browser Clipboard API needs HTTPS or loopback for the copy action;
-otherwise the UI offers manual text selection. Other chat actions also work
+The browser Clipboard API needs HTTPS or loopback for the copy action.
+Copy returns the original agent Markdown, including whitespace and fences.
+Incoming source chunks are retained alongside the rendered response; they are
+joined only when Copy is clicked. Copy during generation returns the complete
+UTF-8 prefix received so far. Other chat actions also work
 over ordinary HTTP, using browser-generated random request identities.
 
 Configuration strings are copied at construction. Custom asset descriptors,
@@ -109,7 +112,7 @@ and must be assigned by the host's history owner. Replies may omit `seq`.
 | `queue_begin`, `queue_end` | Atomic queue projection boundaries |
 | `queue_item` | `id`, `revision`, `mode=queued/steer/pending`, `held=0/1` |
 | `queue_text` | `id`, `encoding=base64`, `data`; bounded text chunks |
-| `status` | Host-owned `text`, `busy=0/1`; no automatic upload/status primitive |
+| `status` | Host-owned `text`, `busy=0/1`; a reserved single-line slot keeps layout stable, with long text ellipsized and available in its title |
 | `complete` | `request`, `value`, `label`, `description`, UTF-8 byte `start`/`end`; optional `continue=1` resolves children after selection |
 | `accepted`, `error` | `request`, optional `text`; optional `view` targets one draft owner |
 | `image_credit` | `id`; one more bounded binary chunk may be sent |
@@ -160,8 +163,9 @@ libmdf `mdf-bar-chart`/`mdf-horizontal-bar-chart`, `mdf-vertical-bar-chart`, and
 `mdf-tile-chart` CSV fences. Tile charts become real SVG pies. Sorting, color,
 percentage aliases, quoted CSV, zero totals, and invalid-data fallback are
 supported. Chart state is bounded to 64 Ki characters/256 rows and drawings are
-coalesced to animation frames. Completed text remains in the DOM; copy reads
-rendered text on demand. JetBrains Mono is vendored under OFL 1.1.
+coalesced to animation frames. Completed text remains in the DOM; raw source
+chunks remain available for Markdown copying. JetBrains Mono is vendored under
+OFL 1.1.
 
 Native tests cover handler validation, exact embedded assets, source-level
 HTML/CSS/control contracts, custom-source lifecycle/backpressure/timeouts,

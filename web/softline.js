@@ -48,15 +48,15 @@ function message(id, role = 'assistant') {
   const article = document.createElement('article'), body = document.createElement('div');
   article.className = `message ${['user', 'assistant', 'note'].includes(role) ? role : 'assistant'}`;
   article.dataset.message = id; body.className = 'body'; article.append(body);
-  const result = { article, body, role, decoder: new TextDecoder(), stream: role === 'user' ? null : new MarkdownStream(body) };
+  const result = { article, body, role, raw: [], decoder: new TextDecoder(), stream: role === 'user' ? null : new MarkdownStream(body) };
   state.messages.set(id, result); messages.append(article);
   if (role !== 'user') {
     const tools = document.createElement('div'), copy = document.createElement('button');
     tools.className = 'message-tools'; copy.type = 'button'; copy.className = 'copy';
     copy.title = 'Copy response'; copy.setAttribute('aria-label', 'Copy response'); copy.append(icon());
     copy.addEventListener('click', async () => {
-      try { await navigator.clipboard.writeText(body.innerText); copy.classList.add('copied'); copy.title = 'Copied'; setTimeout(() => { copy.classList.remove('copied'); copy.title = 'Copy response'; }, 1500); }
-      catch { toast('Copy was unavailable. Select the response text to copy it.'); }
+      try { await navigator.clipboard.writeText(result.raw.join('')); copy.classList.add('copied'); copy.title = 'Copied'; setTimeout(() => { copy.classList.remove('copied'); copy.title = 'Copy response'; }, 1500); }
+      catch { toast('Copy was unavailable. Use HTTPS or a loopback address to copy the original Markdown.'); }
     });
     tools.append(copy); article.append(tools);
   }
@@ -271,6 +271,7 @@ function receive(event) {
       const text = e.encoding === 'base64'
         ? m.decoder.decode(Uint8Array.from(atob(e.data || ''), c => c.charCodeAt(0)), { stream: true })
         : e.text || '';
+      m.raw.push(text);
       if (m.stream) m.stream.write(text); else m.body.append(document.createTextNode(text));
       follow(); break;
     }
@@ -278,6 +279,7 @@ function receive(event) {
       const m = state.messages.get(e.id);
       if (m) {
         const tail = m.decoder.decode();
+        if (tail) m.raw.push(tail);
         if (m.stream) { m.stream.write(tail); m.stream.end(); }
         else if (tail) m.body.append(document.createTextNode(tail));
       }
@@ -295,7 +297,7 @@ function receive(event) {
     }
     case 'queue_end':
       if (state.stagingQueue) { for (const item of state.stagingQueue.values()) item.text += item.decoder.decode(); state.queue = state.stagingQueue; state.stagingQueue = null; queue(); } break;
-    case 'status': state.busy = e.busy === '1'; $('activity').textContent = e.text || ''; $('activity').hidden = !e.text; break;
+    case 'status': state.busy = e.busy === '1'; $('activity').textContent = e.text || ''; $('activity').title = e.text || ''; break;
     case 'limits': if (Number(e.image_bytes) > 0) state.imageLimit = Number(e.image_bytes); break;
     case 'complete':
       if (Number(e.request) !== state.query || state.queryText !== prompt.value) break;

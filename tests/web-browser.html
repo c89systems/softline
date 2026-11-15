@@ -35,6 +35,51 @@ check('quoted CSV and ascending order',()=>{const root=render('```mdf-bar-chart,
 check('invalid chart remains readable code',()=>{const root=render('```mdf-tile-chart\na,1\nb,-2\n```\n');assert(!root.querySelector('.mdf-chart'),'invalid chart accepted');assert(root.querySelector('pre:not([hidden])')?.textContent.includes('b,-2'),'source missing')});
 check('chart row bound',()=>{const root=render('```mdf-bar-chart\n'+Array.from({length:257},(_,i)=>`row${i},1`).join('\n')+'\n```\n',64);assert(!root.querySelector('.mdf-chart'),'row limit not enforced');assert(root.querySelector('pre:not([hidden])'),'fallback missing')});
 check('bounded unfinished constructs keep source text',()=>{const root=render('['+'a'.repeat(100000),64);assert(root.textContent.includes('a'.repeat(10000)),'fallback lost text')});
+async function uiCheck(name,fn){const row=document.createElement('li');try{await fn();row.className='pass';row.textContent=`PASS ${name}`}catch(error){++failures;row.className='fail';row.textContent=`FAIL ${name}: ${error.message}`}results.append(row)}
+async function waitFor(fn){const until=Date.now()+5000;while(!fn()){if(Date.now()>until)throw new Error('UI fixture timed out');await new Promise(resolve=>setTimeout(resolve,10))}}
+const frame=document.createElement('iframe');frame.title='Actual Softline UI regression fixture';frame.style.cssText='width:100%;height:500px;border:1px solid var(--line)';fixtures.append(frame);
+const bootstrap=`<script>
+window.softlineTestCopied=[];
+Object.defineProperty(navigator,'clipboard',{value:{writeText:async text=>{window.softlineTestCopied.push(text)}}});
+window.WebSocket=class extends EventTarget {
+  static OPEN=1;
+  constructor(){super();this.readyState=1;this.sent=[];window.softlineTestSocket=this;setTimeout(()=>this.dispatchEvent(new Event('open')),0)}
+  send(value){this.sent.push(value)} close(){}
+};
+<\/script>`;
+frame.srcdoc=(await (await fetch('/')).text()).replace('<head>','<head>'+bootstrap);
+await uiCheck('actual frontend starts with mock host',async()=>{await waitFor(()=>frame.contentWindow.softlineTestSocket&&frame.contentDocument.querySelector('#connection')?.textContent==='Connected')});
+function event(value){const w=frame.contentWindow;w.softlineTestSocket.dispatchEvent(new w.MessageEvent('message',{data:JSON.stringify(value)}))}
+await uiCheck('thinking slot stays reserved across status changes',async()=>{
+  event({type:'begin',id:'status-fixture',role:'assistant'});
+  for(const width of [760,360]){
+    frame.style.width=`${width}px`;
+    for(const font of ['sans','mono']){
+      frame.contentDocument.documentElement.dataset.font=font;
+      await frame.contentDocument.fonts.ready;
+      const doc=frame.contentDocument,box=()=>[doc.querySelector('#composer').getBoundingClientRect().top,doc.querySelector('#scroll').clientHeight,doc.querySelector('#activity').getBoundingClientRect().height],before=box();
+      assert(before[2]>0,'empty status has no reserved height');
+      for(const text of ['Thinking…','','Reasoning about the next step','long status '.repeat(100)+'\nsecond line','']){
+        event({type:'status',text,busy:text?'1':'0'});
+        assert(JSON.stringify(box())===JSON.stringify(before),'status changed composer/scroll/slot geometry');
+        assert(doc.querySelector('#activity').textContent===text,'host text changed');
+      }
+    }
+  }
+});
+await uiCheck('copy preserves raw streamed Markdown before and after end',async()=>{
+  const id='raw-copy-fixture',source='# Heading\n\n**bold** and _italic_, `code` & <literal>\n\n```c\n  puts("€");\n```\n\n',doc=frame.contentDocument;
+  event({type:'begin',id,role:'assistant'});
+  const bytes=new TextEncoder().encode(source),cut=bytes.indexOf(0xe2)+1;
+  for(let i=0;i<cut;++i)event({type:'delta',id,encoding:'base64',data:btoa(String.fromCharCode(bytes[i]))});
+  const button=doc.querySelector(`[data-message="${id}"] .copy`);
+  button.click();await waitFor(()=>frame.contentWindow.softlineTestCopied.length===1);
+  assert(frame.contentWindow.softlineTestCopied[0]===new TextDecoder().decode(bytes.slice(0,cut-1)),'live copy must preserve received Markdown/UTF-8 boundary');
+  for(let i=cut;i<bytes.length;++i)event({type:'delta',id,encoding:'base64',data:btoa(String.fromCharCode(bytes[i]))});
+  event({type:'end',id});button.click();await waitFor(()=>frame.contentWindow.softlineTestCopied.length===2);
+  assert(frame.contentWindow.softlineTestCopied[1]===source,'final copy changed Markdown, whitespace or Unicode');
+  event({type:'reset'});assert(!doc.querySelector(`[data-message="${id}"]`),'reset retained old output');
+});
 document.title=failures?`FAIL (${failures}) softline browser checks`:'PASS softline browser checks';
 document.documentElement.dataset.checks=failures?'failed':'passed';
 </script></html>

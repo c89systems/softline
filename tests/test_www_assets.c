@@ -37,7 +37,7 @@ int main(int argc, char **argv) {
       "vendor/jetbrains-mono/JetBrainsMono-Regular.woff2"};
   sl_www_config_t cfg;
   sl_www_t *w;
-  char *html, *css, *js, *md, *at;
+  char *html, *css, *js, *md, *at, *rule_end;
   size_t i;
   int depth = 0;
   CHECK(argc == 2);
@@ -108,6 +108,16 @@ int main(int argc, char **argv) {
   }
   CHECK(!depth && strstr(css, "scrollbar-color") &&
         strstr(css, ".welcome-state #composer-area"));
+  CHECK(strstr(html, "id=\"activity\" role=\"status\"></div>"));
+  CHECK(!strstr(js, "$('activity').hidden"));
+  CHECK(!strstr(js, "body.innerText"));
+  at = strstr(css, "#activity{");
+  CHECK(at && (rule_end = strchr(at, '}')) != NULL);
+  CHECK(strstr(at, "height:29px;") && strstr(at, "height:29px;") < rule_end);
+  CHECK(strstr(at, "white-space:nowrap;") &&
+        strstr(at, "white-space:nowrap;") < rule_end);
+  CHECK(strstr(at, "overflow:hidden;") &&
+        strstr(at, "overflow:hidden;") < rule_end);
   CHECK(strstr(js, "file.stream().getReader()") &&
         strstr(js, "navigator.clipboard.writeText") &&
         !strstr(js, "file.arrayBuffer()"));
