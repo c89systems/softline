@@ -44,6 +44,7 @@ typedef struct fixture {
 static const char *launcher, *self;
 static pid_t active_supervisor, active_host;
 static int resize_notice;
+static int stop_signal, kernel_pending;
 static volatile sig_atomic_t continued;
 static void resumed(int number) {
   (void)number;
@@ -130,10 +131,28 @@ static int host(int argc, char **argv) {
   CHECK(!fcntl(1, F_SETFL, fcntl(1, F_GETFL) | O_NONBLOCK));
   if (!strcmp(argv[2], "ignore"))
     CHECK(signal(SIGTERM, SIG_IGN) != SIG_ERR);
-  if (!strcmp(argv[2], "resize") || !strcmp(argv[2], "control")) {
+  if (!strcmp(argv[2], "inherited-ignore") || !strcmp(argv[2], "keep-ignore")) {
+    struct sigaction action;
+    CHECK(!sigaction(SIGUSR1, NULL, &action) && action.sa_handler == SIG_IGN);
+  }
+  if (!strcmp(argv[2], "inherited-blocked") ||
+      !strcmp(argv[2], "keep-blocked")) {
+    sigset_t mask;
+    CHECK(!sigprocmask(SIG_SETMASK, NULL, &mask) &&
+          sigismember(&mask, SIGUSR1) == 1);
+  }
+  if (!strcmp(argv[2], "resize") || !strcmp(argv[2], "control") ||
+      !strcmp(argv[2], "inherited-ignore") ||
+      !strcmp(argv[2], "inherited-blocked")) {
     resize_notice = notify;
     CHECK(signal(!strcmp(argv[2], "resize") ? SIGWINCH : SIGUSR1, resized) !=
           SIG_ERR);
+  }
+  if (!strcmp(argv[2], "inherited-blocked")) {
+    sigset_t mask;
+    sigemptyset(&mask);
+    sigaddset(&mask, SIGUSR1);
+    CHECK(!sigprocmask(SIG_UNBLOCK, &mask, NULL));
   }
   CHECK(!setrlimit(RLIMIT_CORE, &limit));
   CHECK(!fstat(0, &input) && !fstat(1, &output));
@@ -144,6 +163,19 @@ static int host(int argc, char **argv) {
   r.output = output.st_rdev;
   r.foreground = tcgetpgrp(0) == getpgrp();
   CHECK(!exact(notify, &r, sizeof(r), 1));
+  if (!strcmp(argv[2], "keep-blocked")) {
+    double due = now() + 2;
+    sigset_t mask;
+    struct timespec delay = {0, 1000000};
+    do {
+      CHECK(!sigpending(&mask));
+      if (sigismember(&mask, SIGUSR1) == 1)
+        break;
+      nanosleep(&delay, NULL);
+    } while (now() < due);
+    CHECK(sigismember(&mask, SIGUSR1) == 1);
+    CHECK(!exact(notify, "W", 1, 1));
+  }
   if (!strcmp(argv[2], "bytes")) {
     unsigned char block[256];
     CHECK(!exact(0, block, sizeof(block), 0));
@@ -284,6 +316,20 @@ static int launch(fixture_t *f, const char *mode, int split, int missing) {
       close(f->output_slave);
     snprintf(notify, sizeof(notify), "%d", notices[1]);
     snprintf(control, sizeof(control), "%d", commands[0]);
+    if (!strcmp(mode, "inherited-ignore") || !strcmp(mode, "keep-ignore"))
+      CHECK(signal(SIGUSR1, SIG_IGN) != SIG_ERR);
+    if (!strcmp(mode, "inherited-blocked") || !strcmp(mode, "keep-blocked")) {
+      sigset_t mask;
+      sigemptyset(&mask);
+      sigaddset(&mask, SIGUSR1);
+      CHECK(!sigprocmask(SIG_BLOCK, &mask, NULL));
+    }
+    if (stop_signal) {
+      char injection[32];
+      snprintf(injection, sizeof(injection), "%d:%d", stop_signal,
+               kernel_pending);
+      CHECK(!setenv("SOFTLINE_TEST_STOP_SIGNAL", injection, 1));
+    }
     if (!strcmp(mode, "nested") || !strcmp(mode, "background")) {
       pid_t wrapper = fork();
       if (wrapper < 0)
@@ -326,9 +372,7 @@ static int restored(fixture_t *f) {
         f->output_flags);
   return 0;
 }
-static int finish(fixture_t *f, int code) {
-  int status;
-  CHECK(!wait_state(f->supervisor, &status, 0));
+static int finish_status(fixture_t *f, int status, int code) {
   active_supervisor = 0;
   CHECK(WIFEXITED(status) && WEXITSTATUS(status) == code);
   CHECK(!restored(f));
@@ -343,6 +387,54 @@ static int finish(fixture_t *f, int code) {
   if (f->output_slave >= 0) {
     close(f->output_slave);
     close(f->output_master);
+  }
+  return 0;
+}
+static int finish(fixture_t *f, int code) {
+  int status;
+  CHECK(!wait_state(f->supervisor, &status, 0));
+  return finish_status(f, status, code);
+}
+static int shutdown_races(void) {
+  static const int termination[] = {SIGHUP, SIGTERM, SIGINT, SIGQUIT};
+  size_t i;
+  for (i = 0; i < sizeof(termination) / sizeof(termination[0]); ++i) {
+    for (kernel_pending = 0; kernel_pending < 2; ++kernel_pending) {
+      fixture_t f;
+      int status;
+      stop_signal = termination[i];
+      CHECK(!launch(&f, "idle", 0, 0));
+      CHECK(!kill(f.host.pid, SIGSTOP));
+      CHECK(!wait_state(f.supervisor, &status, WUNTRACED));
+      CHECK(!WIFSTOPPED(status));
+      CHECK(!finish_status(&f, status, 128 + stop_signal));
+    }
+  }
+  stop_signal = SIGTERM;
+  for (kernel_pending = 0; kernel_pending < 2; ++kernel_pending) {
+    fixture_t f;
+    int status;
+    CHECK(!launch(&f, "ignore", 0, 0));
+    CHECK(!kill(f.host.pid, SIGSTOP));
+    CHECK(!wait_state(f.supervisor, &status, WUNTRACED));
+    CHECK(!WIFSTOPPED(status));
+    CHECK(!finish_status(&f, status, 128 + SIGTERM));
+  }
+  return 0;
+}
+static int inherited_signals(void) {
+  static const char *modes[] = {"inherited-ignore", "inherited-blocked",
+                                "keep-ignore", "keep-blocked"};
+  size_t i;
+  for (i = 0; i < sizeof(modes) / sizeof(modes[0]); ++i) {
+    fixture_t f;
+    char byte;
+    CHECK(!launch(&f, modes[i], 0, 0));
+    CHECK(!kill(f.supervisor, SIGUSR1));
+    if (strcmp(modes[i], "keep-ignore"))
+      CHECK(!exact(f.notice, &byte, 1, 0) && byte == 'W');
+    CHECK(!exact(f.control, "x", 1, 1));
+    CHECK(!finish(&f, 0));
   }
   return 0;
 }
@@ -420,10 +512,16 @@ int main(int argc, char **argv) {
     return host(argc, argv);
   if (argc == 2 && !strcmp(argv[1], "passthrough"))
     return 23;
-  CHECK(argc == 2);
+  CHECK(argc == 2 || argc == 3);
   CHECK(!atexit(cleanup));
   launcher = argv[1];
   self = argv[0];
+  if (argc == 3) {
+    if (!strcmp(argv[2], "shutdown"))
+      return shutdown_races();
+    CHECK(!strcmp(argv[2], "signals"));
+    return inherited_signals();
+  }
   for (i = 0; i < sizeof(modes) / sizeof(modes[0]); ++i) {
     CHECK(!launch(&f, modes[i], i == 3, 0));
     CHECK(!exact(f.control, "x", 1, 1));

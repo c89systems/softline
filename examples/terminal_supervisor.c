@@ -97,10 +97,8 @@ static int add_signal(int number) {
   sigfillset(&action.sa_mask);
   if (sigaction(number, NULL, &inherited[signal_count]))
     return -1;
-  /* Preserve inherited ignores, except child notifications needed for reaping.
-   */
-  if (number != SIGCHLD && inherited[signal_count].sa_handler == SIG_IGN)
-    return 0;
+  /* The child retains inherited policy. The forwarding parent must remain
+   * reachable when the application later installs a handler of its own. */
   if (sigaction(number, &action, NULL))
     return -1;
   signals[signal_count++] = number;
@@ -171,23 +169,47 @@ static int suspend_host(void) {
     return -1;
   return kill(-child, SIGCONT);
 }
+static int collect_termination(void) {
+  static const int termination[] = {SIGHUP, SIGTERM, SIGINT, SIGQUIT};
+  sigset_t queued, one;
+  size_t i;
+  if (sigpending(&queued))
+    return -1;
+  for (i = 0; i < sizeof(termination) / sizeof(termination[0]); ++i) {
+    int number = termination[i], received;
+    if (sigismember(&queued, number) != 1)
+      continue;
+    /* Only termination signals are consumed here: unlike job-control signals,
+     * they cannot be discarded by a concurrent SIGCONT. All are blocked on
+     * this single owner thread, so sigwait consumes an already queued signal.
+     */
+    sigemptyset(&one);
+    sigaddset(&one, number);
+    if (sigwait(&one, &received))
+      return -1;
+    pending[received] = 1;
+  }
+  return 0;
+}
 static int supervise(void) {
   struct pollfd wait;
   int status, terminating = 0;
   double deadline = 0;
   sigset_t blocked, awake;
+  int i;
   sigfillset(&blocked);
   awake = original_mask;
   /* The host owns the foreground group. Parent terminal operations must not
-   * stop the recovery process, and SIGCHLD must wake it even if inherited
-   * blocked. */
+   * stop the recovery process. Forwarded signals must reach the parent even
+   * when blocked at launch; the child's inherited mask remains unchanged. */
+  for (i = 0; i < signal_count; ++i)
+    sigdelset(&awake, signals[i]);
   sigaddset(&awake, SIGTTOU);
-  sigdelset(&awake, SIGCHLD);
   wait.fd = wakeup[0];
   wait.events = POLLIN;
   for (;;) {
     pid_t got;
-    int i, stop = 0, timeout = -1;
+    int stop = 0, stopped = 0, timeout = -1;
     char bytes[128];
     (void)sigprocmask(SIG_BLOCK, &blocked, NULL);
     got = waitpid(child, &status, WNOHANG | WUNTRACED);
@@ -200,13 +222,12 @@ static int supervise(void) {
         child_reaped = 1;
         return terminating ? 128 + terminating : 128 + WTERMSIG(status);
       }
-      if (WIFSTOPPED(status)) {
-        if (terminating)
-          (void)kill(-child, SIGCONT);
-        else if (suspend_host())
-          return -1;
-      }
+      stopped = WIFSTOPPED(status);
     } else if (got < 0 && errno != EINTR)
+      return -1;
+    /* Reconcile already handled and kernel-queued termination before deciding
+     * to stop the recovery parent along with the shell job. */
+    if (stopped && collect_termination())
       return -1;
     for (i = 0; i < signal_count; ++i) {
       int number = signals[i];
@@ -236,7 +257,12 @@ static int supervise(void) {
         (void)kill(-child, SIGCONT);
       }
     }
-    if (stop && !terminating)
+    if (stopped) {
+      if (terminating)
+        (void)kill(-child, SIGCONT);
+      else if (suspend_host())
+        return -1;
+    } else if (stop && !terminating)
       (void)kill(-child, SIGSTOP);
     if (terminating) {
       double remaining = deadline - milliseconds();

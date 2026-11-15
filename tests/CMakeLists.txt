@@ -14,6 +14,15 @@ if(UNIX)
   add_test(NAME softline_terminal_supervisor COMMAND test_terminal_supervisor
     "$<TARGET_FILE:softline_terminal_supervisor>")
   set_tests_properties(softline_terminal_supervisor PROPERTIES LABELS "integration;terminal;memcheck" TIMEOUT 30)
+  add_executable(terminal_supervisor_fixture terminal_supervisor_fixture.c)
+  softline_apply_warnings(terminal_supervisor_fixture)
+  softline_local_runtime(terminal_supervisor_fixture)
+  add_test(NAME softline_terminal_supervisor_shutdown COMMAND test_terminal_supervisor
+    "$<TARGET_FILE:terminal_supervisor_fixture>" shutdown)
+  add_test(NAME softline_terminal_supervisor_signals COMMAND test_terminal_supervisor
+    "$<TARGET_FILE:softline_terminal_supervisor>" signals)
+  set_tests_properties(softline_terminal_supervisor_shutdown softline_terminal_supervisor_signals
+    PROPERTIES LABELS "integration;terminal;memcheck" TIMEOUT 30)
   add_executable(test_terminal_transport test_terminal_transport.c)
   target_include_directories(test_terminal_transport PRIVATE "${PROJECT_SOURCE_DIR}/examples")
   target_link_libraries(test_terminal_transport PRIVATE queue_demo_client)

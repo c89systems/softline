@@ -197,6 +197,12 @@ without imposing termination. Exit codes pass through; signal termination uses
 128 plus the signal number. Launcher/setup/restoration failures return 125,
 and exec failures return 126/127.
 
+Already handled and kernel-queued termination requests take priority over a host
+stop observed in the same event-loop turn. The recovery parent forwards watched
+signals even when ignored or blocked at launch, so the application may install
+its own handlers or unblock them later. The application inherits the original
+dispositions and mask unchanged; the parent owns a separate forwarding policy.
+
 The launcher requires foreground startup and continuation when stdin and stdout
 are terminals. A background continuation is rejected without taking foreground
 ownership or changing the current owner's terminal settings. With non-TTY stdin
