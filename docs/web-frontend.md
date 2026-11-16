@@ -113,7 +113,9 @@ and must be assigned by the host's history owner. Replies may omit `seq`.
 | `queue_item` | `id`, `revision`, `mode=queued/steer/pending`, `held=0/1` |
 | `queue_text` | `id`, `encoding=base64`, `data`; bounded text chunks |
 | `status` | Host-owned `text`, `busy=0/1`; a reserved single-line slot keeps layout stable, with long text ellipsized and available in its title |
-| `complete` | `request`, `value`, `label`, `description`, UTF-8 byte `start`/`end`; optional `continue=1` resolves children after selection |
+| `completion_provider` | Host registration: one-character `trigger`, `scope=start/word`, `strip=0/1`, `expand=0/1`; send on each connection |
+| `complete` | `request`, raw full `candidate` including trigger; explicit `+` menu also uses canonical `value`, `label`, `description`, UTF-8 byte `start`/`end`, optional `continue=1` |
+| `complete_end` | `request`, `status=ok/error`; completes one provider snapshot, including empty results |
 | `accepted`, `error` | `request`, optional `text`; optional `view` targets one draft owner |
 | `image_credit` | `id`; one more bounded binary chunk may be sent |
 | `image_done` | `id`, absolute backend `path`; insert only into the originating draft |
@@ -122,23 +124,33 @@ and must be assigned by the host's history owner. Replies may omit `seq`.
 Browser text frames are URL-encoded actions:
 
 - `send`/`steer`: `view`, unique `request`, monotonic `request_seq`, `text`.
-- `complete`: `request`, `text`, UTF-8 byte `cursor`, `all=0/1`; an active
-  filename completion also supplies UTF-8 byte `start`/`end`, including selected
-  directory names containing spaces.
+- `complete`: `request`, `text`, UTF-8 byte `cursor`, `all=0/1`. Inline
+  completion supplies UTF-8 byte `start`/`end` and `resolve`: initially the
+  registered trigger, then an explicitly requested continuation prefix. Return
+  the entire inventory for that prefix followed by `complete_end`, even when
+  current typed text matches only a subset. `all=1` opens the explicit `+` menu.
 - `approve`/`reject`: `id`, `revision`; `cancel` stops current generation/backlog.
 - `image_begin`: unique `id`, `media_type=image/png` or `image/jpeg`, `filename`,
   exact `size`; wait for credit, send bounded binary chunks, then `image_end`.
   `image_cancel` carries the same `id` and is valid before BEGIN is delivered.
 
-The examples resolve the parent directory for `@` filename queries, then filter
-against the entire typed prefix. A partial name such as `@REA` or
-`@examples/ch` therefore keeps matching suggestions. Directory selections retain
-the trigger while resolving children; selected file values are canonical paths.
-The client commits a typed filename trigger when leaving its completion or
-submitting with Enter, the send button or Alt-Enter. Only that tracked trigger
-is removed: email addresses, pasted literal text, and at-signs belonging to the
-selected filename remain intact. Older completion replies cannot change a draft
-after its text or completion cursor changes.
+Typing uses the same completion interaction as the TUI: a dim inline ghost
+leaves the draft untouched. Tab accepts and cycles the original matching subset;
+Right/Ctrl-F at the token endpoint accepts or commits the selected candidate,
+resolves its children once, and previews without inserting a child. Enter,
+the send button and Alt-Enter submit actual draft text, never a ghost. Ordinary
+typing filters cached provider snapshots without another request. Tab resolves
+known directory ancestors lazily for a partial path such as `@examples/ch`.
+Only the explicit `+` button opens a menu, for completions, images and recovery.
+
+The C examples share one registration table between native and web editors
+(`/`, `h`, `v`, `n`, `@`), including scope and trigger stripping. Exiting an
+active filename completion removes only its introductory `@`; email addresses,
+pasted literal text and at-signs in filenames remain intact. Stale replies cannot
+reactivate a submitted draft or accept text after the user moves away.
+Provider acquisition has a three-second timeout; a failed initial provider keeps
+its trigger literal. Pending acceptance preserves subsequent editor input order
+while conversation events and host actions remain responsive.
 
 All tabs and ANSI share the accepted conversation and queue. Drafts live in
 their originating views. Browser image sources use `sl_image_paste_start_source`
@@ -184,7 +196,9 @@ HTML/CSS/control contracts, custom-source lifecycle/backpressure/timeouts,
 WebSocket framing, real local/remote/owner hosts, two live clients, independent
 ANSI drafts, and backend image storage. Logical client regressions execute the
 shipped JavaScript with DOM and transport test doubles:
-`node tests/check-web-completion.mjs`. CTest registers this check when Node is
+`node tests/check-web-completion.mjs`. The shared `completion-parity.tsv`
+inventory and key sequences also run through real native PTY readline in
+`softline_completion_parity`. CTest registers the JavaScript check when Node is
 already available; no JavaScript packages or runtime are installed. These tests
 do not prove browser layout or real browser event integration.
 `make run-web-checks` serves a browser Markdown/chart and client-interaction

@@ -1,6 +1,6 @@
 // Logical client tests: execute the shipped module with DOM/transport doubles.
 // Actual browser layout and selection integration remain in web-browser.html.
-export async function runWebCompletionTests(source) {
+export async function runWebCompletionTests(source, completionSource, promptSource, fixture) {
   const checks = [];
   function assert(value, message) { if (!value) throw new Error(message); }
   class Target {
@@ -48,6 +48,15 @@ export async function runWebCompletionTests(source) {
     set(key, value) { this.values.set(key, value); }
     toString() { return [...this.values].map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(value)}`).join('&'); }
   }
+  const rows = fixture.split('\n').filter(line => line && !line.startsWith('#')).map(line => line.split('\t'));
+  const policies = rows.filter(row => row[0] === 'provider');
+  const catalog = new Map();
+  for (const [, prefix, value] of rows.filter(row => row[0] === 'candidate')) {
+    if (!catalog.has(prefix)) catalog.set(prefix, []);
+    catalog.get(prefix).push(value);
+  }
+  const stripImports = source => source.replace(/^import[^\n]*\n/gm, '').replace(/^export /gm, '');
+  const Completion = new Function(stripImports(completionSource) + '\nreturn Completion;')();
   async function boot(options = {}) {
     const elements = new Map(), timers = new Map();
     let serial = 0, socket;
@@ -61,12 +70,27 @@ export async function runWebCompletionTests(source) {
     document.createTextNode = text => text;
     const get = document.getElementById;
     get('theme').options = [{ value: 'default' }]; get('font').options = [{ value: 'sans' }];
-    for (const id of ['completions', 'queue', 'uploads', 'latest', 'toast']) get(id).hidden = true;
+    for (const id of ['completions', 'prompt-projection', 'queue', 'uploads', 'latest', 'toast']) get(id).hidden = true;
+    function event(value) { socket.fire('message', { data: JSON.stringify(value) }); }
+    function reply(query, values, status = 'ok') {
+      const prefix = query.get('resolve'), request = query.get('request');
+      const items = values || (query.get('all') === '1' ? ['/approve', '/about', '@'] : catalog.get(prefix) || []);
+      for (const candidate of items) event({
+        type: 'complete', request, candidate, label: candidate,
+        value: candidate.startsWith('@') && !candidate.endsWith('/') && candidate !== '@' ? candidate.slice(1) : candidate,
+        start: query.get('all') === '1' ? '0' : query.get('start'),
+        end: query.get('cursor'), continue: candidate.endsWith('/') || candidate === '@' ? '1' : '0'
+      });
+      event({ type: 'complete_end', request, status });
+    }
     class Socket extends Target {
       static OPEN = 1;
       constructor() { super(); this.readyState = 1; this.sent = []; socket = this; }
-      send(frame) { this.sent.push(new Params(frame)); }
-      close() { this.readyState = 0; }
+      send(frame) {
+        const query = new Params(frame); this.sent.push(query);
+        if (query.get('action') === 'complete' && !options.manual) Promise.resolve().then(() => reply(query, undefined, options.failure ? 'error' : 'ok'));
+      }
+      close() { this.readyState = 0; this.fire('close'); }
     }
     const env = {
       document, WebSocket: Socket, TextEncoder: Encoder, TextDecoder: Decoder, URLSearchParams: Params,
@@ -78,126 +102,180 @@ export async function runWebCompletionTests(source) {
       setTimeout: (fn, delay) => { const id = ++serial; timers.set(id, { fn, delay }); return id; },
       clearTimeout: id => timers.delete(id)
     };
+    const names = Object.keys(env), values = Object.values(env);
+    env.Prompt = new Function('Completion', ...names, stripImports(promptSource) + '\nreturn Prompt;')(Completion, ...values);
     const AsyncFunction = Object.getPrototypeOf(async function() {}).constructor;
-    assert(source.startsWith("import { MarkdownStream } from './markdown.js';"), 'unexpected client module dependency');
-    await new AsyncFunction(...Object.keys(env), source.replace(/^import[^\n]+\n/, ''))(...Object.values(env));
+    await new AsyncFunction(...Object.keys(env), stripImports(source))(...Object.values(env));
     socket.fire('open');
+    for (const [, trigger, scope, strip, expand] of policies) event({ type: 'completion_provider', trigger, scope, strip, expand });
     const prompt = get('prompt');
     function input(text, inputType = 'insertText') {
-      prompt.fire('beforeinput', { inputType });
-      prompt.setRangeText(text, prompt.selectionStart, prompt.selectionEnd, 'end');
-      prompt.fire('input', { inputType, data: text });
+      const e = prompt.fire('beforeinput', { inputType, data: text, cancelable: true });
+      if (!e.defaultPrevented) {
+        prompt.setRangeText(text, prompt.selectionStart, prompt.selectionEnd, 'end');
+        prompt.fire('input', { inputType, data: text });
+      }
     }
     function key(key, fields = {}) {
-      const event = prompt.fire('keydown', { key, ...fields });
-      if (!event.defaultPrevented && (key === ' ' || (key === 'Enter' && fields.shiftKey))) input(key === ' ' ? ' ' : '\n');
+      const e = prompt.fire('keydown', { key, ...fields });
+      if (!e.defaultPrevented) {
+        if (key === ' ' || (key === 'Enter' && fields.shiftKey)) input(key === ' ' ? ' ' : '\n');
+        if (key === 'Backspace' || key === 'Delete') {
+          const start = prompt.selectionStart, end = prompt.selectionEnd, backward = key === 'Backspace';
+          prompt.fire('beforeinput', { inputType: backward ? 'deleteContentBackward' : 'deleteContentForward' });
+          prompt.setRangeText('', start === end && backward ? Math.max(0, start - 1) : start, start === end && !backward ? Math.min(prompt.value.length, end + 1) : end, 'end');
+          prompt.fire('input', { inputType: backward ? 'deleteContentBackward' : 'deleteContentForward' });
+        }
+      }
+      prompt.fire('keyup', { key, ...fields });
     }
-    function flush() {
-      for (const [id, timer] of [...timers]) if (timer.delay <= 60) { timers.delete(id); timer.fn(); }
-    }
-    function reply(value, extra = {}) {
-      const query = socket.sent.filter(frame => frame.get('action') === 'complete').at(-1);
-      assert(query, 'completion query missing');
-      socket.fire('message', { data: JSON.stringify({ type: 'complete', request: query.get('request'), label: value, value, start: '0', end: query.get('cursor'), continue: value.endsWith('/') ? '1' : '0', ...extra }) });
-    }
+    async function idle() { for (let i = 0; i < 150; ++i) await Promise.resolve(); }
+    async function type(text) { for (const c of text) { input(c); await idle(); } }
+    function queries() { return socket.sent.filter(frame => frame.get('action') === 'complete'); }
     function sent(action = 'send') { return socket.sent.filter(frame => frame.get('action') === action).at(-1)?.get('text'); }
-    return { get, prompt, input, key, flush, reply, sent, socket, form: () => get('composer').fire('submit') };
+    const ui = { get, prompt, input, type, key, idle, queries, reply, event, sent, socket,
+      form: () => get('composer').fire('submit'), ghost: () => get('completion-ghost').textContent || '',
+      timeout: delay => { for (const [id, timer] of [...timers]) if (timer.delay === delay) { timers.delete(id); timer.fn(); } } };
+    return ui;
   }
   async function check(name, fn, options) {
     const ui = await boot(options);
-    await fn(ui); checks.push(name);
+    try { await fn(ui); }
+    catch (error) { throw new Error(name + ': ' + error.message); }
+    checks.push(name);
   }
-  await check('typed filename marker is removed before send-button submission', ui => {
-    ui.input('@README.md'); ui.form(); assert(ui.sent() === 'README.md', 'file marker leaked to send payload');
+  for (const [, name, script, expected] of rows.filter(row => row[0] === 'case')) {
+    await check('native parity: ' + name, async ui => {
+      for (const token of script.match(/<[^>]+>|[^<]/gu)) {
+        const keys = { '<Enter>': 'Enter', '<Tab>': 'Tab', '<Space>': ' ', '<Right>': 'ArrowRight', '<Left>': 'ArrowLeft', '<Home>': 'Home', '<End>': 'End', '<Backspace>': 'Backspace', '<Delete>': 'Delete' };
+        if (token === '<CtrlF>') ui.key('f', { ctrlKey: true });
+        else if (keys[token]) ui.key(keys[token]);
+        else ui.input(token);
+        await ui.idle();
+        assert(ui.get('completions').hidden, 'typing or a completion key opened a popup');
+      }
+      assert(ui.sent() === expected, 'got [' + ui.sent() + '], expected [' + expected + ']');
+    });
+  }
+  await check('ghost is inline, display-only and follows typing without repeated queries', async ui => {
+    ui.input('@'); await ui.idle();
+    assert(ui.prompt.value === '@' && ui.ghost() === 'lua/', 'ghost mutated draft or was missing');
+    ui.input('l'); await ui.idle();
+    assert(ui.ghost() === 'ua/' && ui.queries().length === 1, 'provider snapshot was not reused');
+    ui.input('i'); await ui.idle();
+    assert(ui.ghost() === 'b/', 'typed prefix did not rematch cached inventory');
+    ui.key('Enter'); await ui.idle(); assert(ui.sent() === 'li', 'Enter accepted ghost');
   });
-  await check('ordinary character-by-character typing retains the correct marker range', ui => {
-    for (const character of '@README.md') ui.input(character);
-    ui.form(); assert(ui.sent() === 'README.md', 'typing shifted the marker anchor');
+  await check('committing directory previews children without a popup or insertion', async ui => {
+    await ui.type('@l'); ui.key('Tab'); await ui.idle(); ui.key('ArrowRight'); await ui.idle();
+    assert(ui.prompt.value === '@lua/' && ui.ghost() === 'source.c', 'Right inserted child or lost preview');
+    assert(ui.get('completions').hidden && ui.queries().length === 2, 'continuation opened popup or eagerly resolved descendants');
   });
-  await check('steer commits a directory marker without waiting for completion replies', ui => {
-    ui.input('@examples/'); ui.key('Enter', { altKey: true }); assert(ui.sent('steer') === 'examples/', 'file marker leaked to steer payload');
+  await check('Tab cycle stays in parent inventory and never resolves children', async ui => {
+    await ui.type('@l'); ui.key('Tab'); await ui.idle(); ui.key('Tab'); await ui.idle();
+    assert(ui.prompt.value === '@lib/' && ui.queries().length === 1, 'Tab descended or lost original prefix');
   });
-  await check('Enter commits a typed file before an asynchronous reply arrives', ui => {
-    ui.input('@README.md'); ui.key('Enter'); assert(ui.sent() === 'README.md', 'Enter retained the file marker');
+  await check('native Escape clears cycling without reverting inserted text', async ui => {
+    await ui.type('@l'); ui.key('Tab'); await ui.idle(); ui.key('Escape');
+    assert(ui.prompt.value === '@lua/', 'Escape reverted accepted text');
+    ui.key('Enter'); await ui.idle(); assert(ui.sent() === 'lua/', 'Escape retained trigger');
   });
-  await check('typing invalidates old menu ranges and late completion replies', ui => {
-    ui.input('@'); ui.flush(); ui.reply('README.md', { label: '@README.md', end: '1', continue: '0' });
-    ui.input('REA'); ui.reply('README.md', { label: '@README.md', end: '1', continue: '0' }); ui.key('Enter');
-    assert(ui.sent() === 'REA', 'stale candidate intercepted submission or used an old range');
+  await check('Enter submits immediately before root reply arrives', async ui => {
+    ui.input('@REA'); ui.key('Enter'); await ui.idle();
+    assert(ui.sent() === 'REA', 'Enter waited for or accepted an unresolved ghost');
+    ui.reply(ui.queries()[0]); await ui.idle(); assert(!ui.ghost(), 'stale result reactivated submitted draft');
+  }, { manual: true });
+  await check('pending Tab preserves fast subsequent typing and submission order', async ui => {
+    ui.input('@l'); ui.key('Tab'); ui.input('X'); ui.key('Enter');
+    assert(ui.sent() === undefined, 'submission raced completion acceptance');
+    ui.reply(ui.queries()[0]); await ui.idle(); assert(ui.sent() === 'lua/X', 'queued editor input was lost or reordered');
+  }, { manual: true });
+  await check('clicking away cancels pending acceptance', async ui => {
+    ui.input('@l'); ui.key('Tab'); ui.prompt.setSelectionRange(0, 0); ui.prompt.fire('click');
+    ui.reply(ui.queries()[0]); await ui.idle();
+    assert(ui.prompt.value === 'l', 'late acceptance overwrote moved draft');
+  }, { manual: true });
+  await check('provider timeout releases pending editor input without losing typed text', async ui => {
+    ui.input('@l'); ui.key('Tab'); ui.input('X'); ui.key('Enter'); ui.timeout(3000); await ui.idle();
+    assert(ui.sent() === '@lX', 'failed provider changed trigger or lost subsequent input');
+  }, { manual: true });
+  await check('failed root provider preserves literal trigger', async ui => {
+    await ui.type('@REA'); ui.form(); await ui.idle(); assert(ui.sent() === '@REA', 'failed provider stripped trigger');
+  }, { failure: true });
+  await check('literal pasted text does not activate any provider', async ui => {
+    ui.input('literal @mention user@example.com @README.md', 'insertFromPaste'); ui.form(); await ui.idle();
+    assert(ui.sent() === 'literal @mention user@example.com @README.md' && !ui.queries().length, 'paste was treated as completion syntax');
   });
-  await check('a bare completion marker does not submit an empty prompt', ui => {
-    ui.input('@'); ui.form(); assert(ui.sent() === undefined && ui.prompt.value === '', 'bare marker sent an empty request');
+  await check('a bare trigger does not send an empty prompt', async ui => {
+    ui.input('@'); ui.form(); await ui.idle(); assert(ui.sent() === undefined && !ui.prompt.value, 'empty prompt submitted');
   });
-  await check('space commits only the active marker and preserves literal at-signs', ui => {
-    ui.input('mail user@example.com '); ui.input('@icon@2x.png'); ui.key(' '); ui.input('please'); ui.form();
-    assert(ui.sent() === 'mail user@example.com icon@2x.png please', 'literal at-sign changed or active marker retained');
+  await check('steering strips only active trigger', async ui => {
+    await ui.type('email user@example.com @icon@2'); ui.key('Enter', { altKey: true }); await ui.idle();
+    assert(ui.sent('steer') === 'email user@example.com icon@2', 'steer changed literal at-signs');
   });
-  await check('multiple file references are committed independently', ui => {
-    ui.input('@README.md'); ui.key(' '); ui.input('@examples/chat.c'); ui.form();
-    assert(ui.sent() === 'README.md examples/chat.c', 'a previous file marker remained');
+  await check('input-method separator follows the phrase completion rule', async ui => {
+    await ui.type('@README.md'); ui.input(' '); ui.input('next'); ui.form(); await ui.idle();
+    assert(ui.sent() === 'README.md next', 'input-method separator did not commit active trigger');
   });
-  await check('new-line completion exit strips the active marker', ui => {
-    ui.input('@README.md'); ui.key('Enter', { shiftKey: true }); ui.input('next'); ui.form(); assert(ui.sent() === 'README.md\nnext', 'newline retained the marker');
+  await check('new line commits current completion and keeps ordinary text', async ui => {
+    await ui.type('@README.md'); ui.key('Enter', { shiftKey: true }); ui.input('next'); ui.form(); await ui.idle();
+    assert(ui.sent() === 'README.md\nnext', 'newline lost text or retained trigger');
   });
-  await check('input-method whitespace commits a marker without a keydown event', ui => {
-    ui.input('@README.md'); ui.input(' '); ui.input('next'); ui.form(); assert(ui.sent() === 'README.md next', 'input-method separator retained the marker');
+  await check('replacement draft cannot retain an old activation', async ui => {
+    await ui.type('@REA'); ui.prompt.setSelectionRange(0, ui.prompt.value.length); ui.input('plain user@example.com');
+    ui.form(); await ui.idle(); assert(ui.sent() === 'plain user@example.com', 'old activation changed replacement');
   });
-  await check('selected directory remains expandable but is committed on submit', ui => {
-    ui.input('@exam'); ui.flush(); ui.reply('@examples/'); ui.get('completions').children[0].click();
-    assert(ui.prompt.value === '@examples/', 'directory trigger removed before continuation'); ui.form(); assert(ui.sent() === 'examples/', 'selected directory marker leaked');
+  await check('Unicode text surrounding a completed word is preserved', async ui => {
+    ui.input('€  tail', 'insertFromPaste'); ui.prompt.setSelectionRange(2, 2);
+    await ui.type('@REA'); ui.key('Tab'); await ui.idle(); ui.form(); await ui.idle();
+    assert(ui.sent() === '€ README.md tail', 'completion changed surrounding Unicode or suffix');
   });
-  await check('selected file uses canonical path and preserves surrounding Unicode text', ui => {
-    ui.input('€  tail', 'insertFromPaste'); ui.prompt.setSelectionRange(2, 2); ui.input('@REA'); ui.flush();
-    ui.reply('README.md', { start: '4', end: '8', continue: '0' }); ui.get('completions').children[0].click(); ui.form();
-    assert(ui.sent() === '€ README.md tail', 'byte offsets changed surrounding text');
-  });
-  await check('directory names containing spaces retain their completion range', ui => {
-    ui.input('@spa'); ui.flush(); ui.reply('@space dir/'); ui.get('completions').children[0].click(); ui.input('fi'); ui.flush();
-    const query = ui.socket.sent.filter(frame => frame.get('action') === 'complete').at(-1);
-    assert(query.get('text') === '@space dir/fi' && query.get('start') === '0', 'directory range lost at internal space');
-    ui.key('Enter', { altKey: true }); assert(ui.sent('steer') === 'space dir/fi', 'spaced directory marker leaked');
-  });
-  await check('a matching filename space continues completion instead of committing it', ui => {
-    ui.input('@space'); ui.flush(); ui.reply('@space dir/'); ui.key(' '); ui.input('dir/'); ui.flush();
-    const query = ui.socket.sent.filter(frame => frame.get('action') === 'complete').at(-1);
-    assert(query.get('text') === '@space dir/', 'matching filename space ended completion');
-    ui.form(); assert(ui.sent() === 'space dir/', 'directory marker leaked after a matching space');
-  });
-  await check('literal pasted text is not rewritten as file completion', ui => {
-    ui.input('literal @mention user@example.com @README.md', 'insertFromPaste'); ui.form(); assert(ui.sent() === 'literal @mention user@example.com @README.md', 'pasted literal text changed');
-  });
-  await check('selected filenames retain their own leading at-sign', ui => {
-    ui.input('@@li'); ui.flush(); ui.reply('@literal.txt', { label: '@@literal.txt', continue: '0' }); ui.get('completions').children[0].click();
-    ui.input('x'); ui.form(); assert(ui.sent() === '@literal.txtx', 'selected literal at-sign became a trigger');
-  });
-  await check('opening the plus menu commits an existing directory marker', ui => {
-    ui.input('@examples/'); ui.get('plus').click(); ui.reply('@other/', { start: '0', end: '9', continue: '1' }); ui.get('completions').children[0].click(); ui.form();
-    assert(ui.sent() === 'other/', 'previous completion marker leaked through the plus menu');
-  });
-  await check('directory continuation leaves the all-completions menu mode', ui => {
-    ui.get('plus').click(); ui.reply('@examples/', { start: '0', end: '0', continue: '1' });
-    ui.get('completions').children[1].click(); ui.reply('examples/chat.c', { label: '@examples/chat.c', start: '0', end: '10', continue: '0' });
-    assert(ui.get('completions').children.length === 1, 'directory continuation retained unrelated plus-menu items');
-    ui.get('completions').children[0].click(); ui.form(); assert(ui.sent() === 'examples/chat.c', 'continued file path retained its trigger');
+  await check('plus is the only explicit menu and directory choice returns to inline completion', async ui => {
+    assert(ui.get('completions').hidden, 'menu visible initially');
+    ui.get('plus').click(); await ui.idle();
+    assert(!ui.get('completions').hidden, '+ did not open menu');
+    ui.get('completions').children.at(-1).click(); await ui.idle();
+    assert(ui.prompt.value === '@' && ui.get('completions').hidden && ui.ghost() === 'lua/', 'directory choice retained popup');
+    ui.key('Tab'); await ui.idle(); ui.form(); await ui.idle(); assert(ui.sent() === 'lua/', 'plus choice retained trigger');
   }, { images: true });
-  await check('nonbreaking spaces do not create a TUI-incompatible word boundary', ui => {
-    ui.input('literal\u00a0@README.md'); ui.form(); assert(ui.sent() === 'literal\u00a0@README.md', 'nonbreaking-space text was rewritten');
-  });
-  await check('replaced draft cannot retain an old completion marker', ui => {
-    ui.input('@README.md'); ui.prompt.setSelectionRange(0, ui.prompt.value.length); ui.input('plain user@example.com'); ui.form(); assert(ui.sent() === 'plain user@example.com', 'old marker affected replacement');
-  });
-  await check('leaving completion before editing earlier text preserves the cursor and path', ui => {
-    ui.input('prefix @README.md'); ui.prompt.setSelectionRange(0, 0); ui.prompt.fire('click'); ui.input('X '); ui.form();
-    assert(ui.sent() === 'X prefix README.md', 'leaving completion changed the insertion point');
-  });
-  await check('committing a file marker cannot cancel an image at the same insertion point', async ui => {
+  await check('same-position marker removal does not cancel an image upload', async ui => {
     ui.get('image-input').files = [{ name: 'test.jpg', size: 3, slice: () => ({ arrayBuffer: async () => new Uint8Array([255,216,255]).buffer }) }];
-    ui.get('image-input').fire('change');
-    for (let i = 0; i < 100 && !ui.socket.sent.some(frame => frame.get('action') === 'image_begin'); ++i) await Promise.resolve();
+    ui.get('image-input').fire('change'); await ui.idle();
     assert(ui.socket.sent.some(frame => frame.get('action') === 'image_begin'), 'image upload did not begin');
-    ui.input('@README.md'); ui.key(' ');
-    assert(!ui.socket.sent.some(frame => frame.get('action') === 'image_cancel'), 'marker normalization cancelled an image');
-    ui.key('c', { ctrlKey: true }); await Promise.resolve();
+    await ui.type('@README.md'); ui.key(' '); await ui.idle();
+    assert(!ui.socket.sent.some(frame => frame.get('action') === 'image_cancel'), 'syntax-only commit cancelled image');
+    ui.key('c', { ctrlKey: true }); await ui.idle();
+    assert(ui.socket.sent.some(frame => frame.get('action') === 'image_cancel'), 'Ctrl-C did not cancel image');
   }, { images: true });
+  await check('a complete provider snapshot can exceed 256 candidates', async ui => {
+    ui.input('@item299');
+    ui.reply(ui.queries()[0], Array.from({ length: 300 }, (_, n) => '@item' + String(n).padStart(3, '0') + '.txt'));
+    await ui.idle(); assert(ui.ghost() === '.txt', 'inventory was truncated');
+    ui.key('Tab'); await ui.idle(); ui.form(); await ui.idle();
+    assert(ui.sent() === 'item299.txt', 'candidate beyond old cutoff was lost');
+  }, { manual: true });
+  await check('invalid provider strings fail without accepting or stripping syntax', async ui => {
+    ui.input('@l'); ui.reply(ui.queries()[0], ['@lua/\u0000bad']); await ui.idle();
+    assert(!ui.ghost(), 'invalid candidate rendered');
+    ui.form(); await ui.idle(); assert(ui.sent() === '@l', 'invalid provider stripped marker');
+  }, { manual: true });
+  await check('selecting text hides the ghost and collapsing selection restores it', async ui => {
+    await ui.type('@l'); ui.prompt.setSelectionRange(1, 2); ui.prompt.fire('select');
+    assert(!ui.ghost() && ui.prompt.value === '@l', 'selection retained a display-only suggestion');
+    ui.prompt.setSelectionRange(2, 2); ui.prompt.fire('select');
+    assert(ui.ghost() === 'ua/', 'selection collapse did not rematch cached inventory');
+  });
+  await check('host output remains live while Tab waits for its provider', async ui => {
+    ui.input('@l'); ui.key('Tab');
+    ui.event({ type: 'status', busy: '1', text: 'Still streaming' });
+    assert(ui.get('activity').textContent === 'Still streaming', 'pending editor key blocked host output');
+    ui.reply(ui.queries()[0]); await ui.idle(); ui.form(); await ui.idle();
+    assert(ui.sent() === 'lua/', 'provider completion failed after live host event');
+  }, { manual: true });
+  await check('late Right completion cannot move the cursor after a click elsewhere', async ui => {
+    ui.input('@l'); ui.key('ArrowRight'); ui.prompt.setSelectionRange(0, 0); ui.prompt.fire('click');
+    ui.reply(ui.queries()[0]); await ui.idle();
+    assert(ui.prompt.value === 'l' && ui.prompt.selectionStart === 0, 'pending Right moved the new insertion point');
+  }, { manual: true });
   return checks;
 }

@@ -1,4 +1,5 @@
 import { MarkdownStream } from './markdown.js';
+import { Prompt } from './prompt.js';
 
 function randomId() {
   return Array.from(crypto.getRandomValues(new Uint32Array(4)), value => value.toString(16).padStart(8, '0')).join('');
@@ -6,13 +7,12 @@ function randomId() {
 const $ = id => document.getElementById(id);
 const prompt = $('prompt'), scroll = $('scroll'), messages = $('messages');
 const state = { socket: null, online: false, follow: true, messages: new Map(),
-  queue: new Map(), completions: [], active: 0, query: 0, seq: '', upload: null,
+  queue: new Map(), seq: '', upload: null,
   view: randomId(), generation: 0, imageLimit: 32 * 1024 * 1024,
   queueDelay: 500, queueTimer: null, pending: new Map(), failed: [], epoch: null,
-  images: true, attachments: [], requestSeq: 0, fileCompletion: null };
+  images: true, attachments: [], requestSeq: 0 };
 const icon = () => $('copy-icon').content.cloneNode(true);
-const completionSpace = /[ \t\n\r\v\f]/u;
-let toastTimer, completionTimer;
+let toastTimer;
 function toast(text) { $('toast').textContent = text; $('toast').hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => { $('toast').hidden = true; }, 3500); }
 function preference(id, fallback) {
   let value = fallback;
@@ -32,7 +32,11 @@ function send(action, fields = {}) {
   toast('Disconnected. Your draft is kept.'); return false;
 }
 function resizePrompt() {
-  prompt.style.height = 'auto'; prompt.style.height = `${Math.min(prompt.scrollHeight, 200)}px`;
+  prompt.style.height = 'auto';
+  const projection = $('prompt-projection');
+  if (prompt.clientWidth) projection.style.width = `${prompt.clientWidth}px`;
+  prompt.style.height = `${Math.min(Math.max(prompt.scrollHeight, projection.hidden ? 0 : projection.scrollHeight), 200)}px`;
+  if (prompt.clientWidth) projection.style.width = `${prompt.clientWidth}px`;
   $('send').disabled = !state.online || !prompt.value.trim() || !!state.attachments.length;
 }
 function follow() { if (state.follow) scroll.scrollTop = scroll.scrollHeight; }
@@ -82,96 +86,17 @@ function queue() {
   $('queue').hidden = !$('queue').childElementCount;
   if (Number.isFinite(due)) state.queueTimer = setTimeout(queue, Math.max(0, due - performance.now()));
 }
-function completionQuery(all = false) {
-  if (all) finishFileCompletion();
-  state.menuAll = all;
-  const request = ++state.query;
-  state.queryText = prompt.value;
-  state.queryCursor = prompt.selectionStart;
-  const cursor = new TextEncoder().encode(prompt.value.slice(0, prompt.selectionStart)).length;
-  const fields = { text: prompt.value, cursor, request, all: all ? '1' : '0' };
-  if (!all && state.fileCompletion && !state.fileCompletion.literal) {
-    fields.start = new TextEncoder().encode(prompt.value.slice(0, state.fileCompletion.start)).length;
-    fields.end = new TextEncoder().encode(prompt.value.slice(0, state.fileCompletion.end)).length;
+// Keep in-flight image insertion points attached to edits, including the
+// syntax-only removal of a completion trigger at the same insertion point.
+function adjustAnchor(before, after, syntax) {
+  if (syntax !== undefined) {
+    for (const job of state.attachments) if (job.anchor > syntax) --job.anchor;
+    return;
   }
-  if (send('complete', fields)) {
-    state.completions = []; state.active = 0;
-    if (all) showCompletions(true);
-  }
-}
-function hideCompletions() { ++state.query; clearTimeout(completionTimer); $('completions').hidden = true; $('plus').setAttribute('aria-expanded', 'false'); }
-function bytePosition(value, at) { return new TextDecoder().decode(new TextEncoder().encode(value).slice(0, at)).length; }
-function finishFileCompletion() {
-  const completion = state.fileCompletion;
-  state.fileCompletion = null;
-  if (!completion || completion.literal || prompt.value[completion.start] !== '@') return;
-  prompt.setRangeText('', completion.start, completion.start + 1, 'preserve');
-  // Committing syntax removes no user insertion point. An upload anchored
-  // exactly at the trigger stays there; later insertion points shift left.
-  for (const job of state.attachments) if (job.anchor > completion.start) --job.anchor;
-  beforeInput = prompt.value;
-  hideCompletions(); resizePrompt();
-}
-function fileCompletionAtCursor() {
-  const completion = state.fileCompletion;
-  return completion && (completion.literal || prompt.value[completion.start] === '@') &&
-    prompt.selectionStart > completion.start && prompt.selectionEnd <= completion.end;
-}
-function fileSpaceContinues(space) {
-  const completion = state.fileCompletion;
-  if (!completion || completion.literal) return false;
-  const prefix = prompt.value.slice(completion.start, prompt.selectionStart) + space;
-  return state.completions.some(item => (item.label || item.value || '').startsWith(prefix));
-}
-function leaveFileCompletion() { if (state.fileCompletion && !fileCompletionAtCursor()) finishFileCompletion(); }
-function choose(item) {
-  if (item.image) { $('image-input').click(); hideCompletions(); return; }
-  if (item.recover) {
-    const before = prompt.value;
-    prompt.setRangeText((before ? '\n' : '') + item.text, prompt.selectionStart, prompt.selectionEnd, 'end');
-    state.failed = state.failed.filter(candidate => candidate !== item.source);
-    adjustAnchor(before, prompt.value); hideCompletions(); resizePrompt(); prompt.focus(); return;
-  }
-  const start = bytePosition(prompt.value, Number(item.start || 0));
-  const end = bytePosition(prompt.value, Number(item.end || item.start || 0));
-  const before = prompt.value; prompt.setRangeText(item.value, start, end, 'end');
-  adjustAnchor(before, prompt.value); hideCompletions(); resizePrompt(); prompt.focus();
-  if ((item.label || item.value).startsWith('@')) {
-    // A selected leaf is already canonical. Its own leading @ is a filename
-    // character, not a new completion trigger while this word is being edited.
-    state.fileCompletion = { start, end: start + item.value.length, literal: item.continue !== '1' };
-  }
-  beforeInput = prompt.value;
-  if (item.continue === '1') completionQuery();
-}
-function showCompletions(all = false) {
-  const list = [...state.completions];
-  if (all && state.images) list.unshift({ image: true, label: 'Add images', description: 'PNG or JPEG · also drop images here' });
-  if (all) for (const item of state.failed) list.unshift({ recover: true, source: item, text: item.text, label: 'Recover unsent prompt', description: item.text.slice(0, 60) });
-  state.list = list; $('completions').replaceChildren();
-  list.forEach((item, index) => {
-    const button = document.createElement('button'), symbol = document.createElement('span'), label = document.createElement('span'), description = document.createElement('span');
-    button.className = `completion${index === state.active ? ' active' : ''}`; button.type = 'button'; button.setAttribute('role', 'option'); button.setAttribute('aria-selected', String(index === state.active));
-    symbol.className = 'completion-icon'; symbol.textContent = item.image ? '▧' : item.label?.startsWith('/') ? '/' : '↳';
-    label.textContent = item.label || item.value; description.className = 'description'; description.textContent = item.description || '';
-    button.append(symbol, label, description); button.addEventListener('click', () => choose(item)); $('completions').append(button);
-  });
-  $('completions').hidden = !list.length; $('plus').setAttribute('aria-expanded', String(!!list.length));
-}
-$('plus').addEventListener('click', () => { state.menuAll = true; completionQuery(true); });
-document.addEventListener('click', event => { if (!event.target.closest('#completions,#plus')) hideCompletions(); });
-let beforeInput = '';
-prompt.addEventListener('beforeinput', event => {
-  if (event.inputType === 'insertFromPaste') finishFileCompletion();
-  beforeInput = prompt.value;
-});
-function adjustAnchor(before, after) {
-  if (!state.attachments.length && !state.fileCompletion) return;
   let start = 0, tail = 0;
   while (start < before.length && start < after.length && before[start] === after[start]) ++start;
   while (tail < before.length - start && tail < after.length - start && before[before.length - 1 - tail] === after[after.length - 1 - tail]) ++tail;
   const removed = before.length - tail - start, inserted = after.length - tail - start;
-  adjustFileCompletion(start, removed, inserted, after);
   for (const job of state.attachments) {
     if (removed && start <= job.anchor && job.anchor < start + removed) {
       job.cancelled = true;
@@ -179,75 +104,33 @@ function adjustAnchor(before, after) {
     } else if (start < job.anchor) job.anchor += inserted - removed;
   }
 }
-function adjustFileCompletion(start, removed, inserted, after) {
-  const completion = state.fileCompletion;
-  if (completion) {
-    if (removed && start <= completion.start && completion.start < start + removed) state.fileCompletion = null;
-    else {
-      const delta = inserted - removed;
-      if (start <= completion.start) completion.start += delta;
-      if (start <= completion.end) completion.end += delta;
-      if (!completion.literal && after[completion.start] !== '@') state.fileCompletion = null;
-    }
-  }
-}
-prompt.addEventListener('input', event => {
-  adjustAnchor(beforeInput, prompt.value); beforeInput = prompt.value;
-  leaveFileCompletion();
-  if (state.fileCompletion && event.data && completionSpace.test(event.data)) {
-    const prefix = prompt.value.slice(state.fileCompletion.start, prompt.selectionStart);
-    if (!state.completions.some(item => (item.label || item.value || '').startsWith(prefix))) finishFileCompletion();
-  }
-  const prefix = prompt.value.slice(0, prompt.selectionStart);
-  if (!state.fileCompletion && event.inputType !== 'insertFromPaste') {
-    const match = /(^|[ \t\n\r\v\f])@[^ \t\n\r\v\f]*$/u.exec(prefix);
-    if (match) {
-      const start = match.index + match[1].length;
-      let end = prompt.selectionStart;
-      while (end < prompt.value.length && !completionSpace.test(prompt.value[end])) ++end;
-      state.fileCompletion = { start, end };
-    }
-  }
-  resizePrompt(); hideCompletions();
-  state.completions = []; state.list = [];
-  state.menuAll = false;
-  if ((state.fileCompletion && !state.fileCompletion.literal) || /(^|[ \t\n\r\v\f])\/[^ \t\n\r\v\f]*$/u.test(prefix)) completionTimer = setTimeout(() => completionQuery(), 60);
-  else hideCompletions();
-});
-function fileCursorChanged() {
-  leaveFileCompletion(); hideCompletions();
-  if (state.fileCompletion && !state.fileCompletion.literal) completionTimer = setTimeout(() => completionQuery(), 60);
-}
-prompt.addEventListener('click', fileCursorChanged);
-prompt.addEventListener('keyup', event => { if (['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) fileCursorChanged(); });
-prompt.addEventListener('keydown', event => {
-  if (event.isComposing) return;
-  if ((event.key === ' ' && !fileSpaceContinues(' ')) || (event.key === 'Enter' && event.shiftKey)) finishFileCompletion();
-  if (event.key === 'Escape') { const hadMenu = !$('completions').hidden; hideCompletions(); if (state.attachments.length) cancelUploads('Image uploads cancelled.'); else if (!hadMenu && state.busy) send('cancel'); return; }
-  if (event.ctrlKey && event.key.toLowerCase() === 'c' && state.attachments.length && prompt.selectionStart === prompt.selectionEnd) { event.preventDefault(); cancelUploads('Image uploads cancelled.'); return; }
-  if (!$('completions').hidden && ['ArrowDown', 'ArrowUp', 'Tab'].includes(event.key)) {
-    event.preventDefault(); state.active = (state.active + (event.key === 'ArrowUp' ? -1 : 1) + state.list.length) % state.list.length;
-    showCompletions(state.menuAll); $('completions').children[state.active]?.scrollIntoView({ block: 'nearest' }); return;
-  }
-  if (event.key === 'Enter' && !event.shiftKey) {
-    event.preventDefault();
-    if (!$('completions').hidden && !event.altKey) { choose(state.list[state.active]); return; }
-    submit(event.altKey);
+const editor = new Prompt({
+  document, send, mutate: adjustAnchor, resize: resizePrompt, toast, submit,
+  images: () => state.images, recovery: () => state.failed,
+  recovered: item => { state.failed = state.failed.filter(candidate => candidate !== item); },
+  imagePicker: () => $('image-input').click(),
+  cancelImages: () => {
+    if (!state.attachments.length || prompt.selectionStart !== prompt.selectionEnd) return false;
+    cancelUploads('Image uploads cancelled.'); return true;
+  },
+  cancel: () => {
+    if (state.attachments.length) cancelUploads('Image uploads cancelled.');
+    else if (state.busy) send('cancel');
   }
 });
 function submit(steer = false) {
   if (state.attachments.length) return;
-  finishFileCompletion();
+  editor.finish();
   if (!prompt.value.trim()) return;
   if (state.pending.size >= 32) { toast('Wait for the host to confirm pending prompts. Your draft is kept.'); return; }
   if (new TextEncoder().encode(prompt.value).length > 128 * 1024) { toast('The prompt exceeds 128 KiB. Your draft is kept.'); return; }
   const request = randomId(), action = steer ? 'steer' : 'send', fields = { text: prompt.value, request, request_seq: ++state.requestSeq };
   if (send(action, fields)) {
     state.pending.set(request, { action, fields, text: fields.text });
-    prompt.value = ''; beforeInput = ''; state.fileCompletion = null; hideCompletions(); started(); state.follow = true; resizePrompt();
+    prompt.value = ''; prompt.setSelectionRange(0, 0); editor.reset(); started(); state.follow = true; resizePrompt();
   }
 }
-$('composer').addEventListener('submit', event => { event.preventDefault(); submit(); });
+$('composer').addEventListener('submit', event => { event.preventDefault(); editor.enqueue(() => submit()); });
 function credit(kind) {
   const upload = state.upload;
   if (!upload) return;
@@ -310,11 +193,11 @@ async function uploadFile(upload) {
   const result = await waitCredit(upload);
   if (typeof result !== 'object' || !result.path?.startsWith('/') || /[\u0000-\u001f\u007f]/u.test(result.path)) throw new Error('Server did not acknowledge a valid image path.');
   if (state.upload !== upload) throw new Error('Image upload cancelled.');
-  finishFileCompletion();
+  editor.finish();
   const insertion = (upload.anchor && !/\s$/u.test(prompt.value.slice(0, upload.anchor)) ? ' ' : '') + result.path +
     (upload.anchor < prompt.value.length && !/^\s/u.test(prompt.value.slice(upload.anchor)) ? ' ' : '');
   prompt.setRangeText(insertion, upload.anchor, upload.anchor, 'preserve');
-  adjustFileCompletion(upload.anchor, 0, insertion.length, prompt.value); beforeInput = prompt.value;
+  editor.reset();
   for (const job of state.attachments) if (job !== upload && job.anchor >= upload.anchor) job.anchor += insertion.length;
   state.upload = null; URL.revokeObjectURL(upload.url); chip.remove();
   $('uploads').hidden = !$('uploads').childElementCount; resizePrompt(); prompt.focus();
@@ -322,7 +205,7 @@ async function uploadFile(upload) {
 let uploadChain = Promise.resolve();
 function addImages(files) {
   if (!state.images) { toast('This host does not accept images.'); return; }
-  finishFileCompletion();
+  editor.finish();
   for (const file of files) {
     if (state.attachments.length >= 16) { toast('Attach at most 16 images at a time.'); break; }
     const job = { file, id: randomId(), anchor: prompt.selectionStart };
@@ -380,13 +263,9 @@ function receive(event) {
       if (state.stagingQueue) { for (const item of state.stagingQueue.values()) item.text += item.decoder.decode(); state.queue = state.stagingQueue; state.stagingQueue = null; queue(); } break;
     case 'status': state.busy = e.busy === '1'; $('activity').textContent = e.text || ''; $('activity').title = e.text || ''; break;
     case 'limits': if (Number(e.image_bytes) > 0) state.imageLimit = Number(e.image_bytes); break;
-    case 'complete':
-      if (Number(e.request) !== state.query || state.queryText !== prompt.value || state.queryCursor !== prompt.selectionStart) break;
-      if (e.value !== undefined) state.completions.push(e);
-      showCompletions(state.menuAll); break;
+    case 'completion_provider': case 'complete': case 'complete_end': editor.receive(e); break;
     case 'draft': {
-      state.fileCompletion = null;
-      const before = prompt.value; prompt.value = e.text || ''; adjustAnchor(before, prompt.value); resizePrompt(); prompt.focus(); break;
+      const before = prompt.value; prompt.value = e.text || ''; adjustAnchor(before, prompt.value); editor.reset(); prompt.focus(); break;
     }
     case 'image_credit': if (e.id === state.upload?.id) credit('ready'); break;
     case 'image_done': if (e.id === state.upload?.id) credit({ path: e.path }); break;
@@ -409,11 +288,12 @@ function connect() {
   const url = new URL('./events', location.href); url.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
   url.searchParams.set('after', state.seq); url.searchParams.set('view', state.view);
   const socket = state.socket = new WebSocket(url);
-  socket.addEventListener('open', () => { state.online = true; $('connection').textContent = 'Connected'; resizePrompt(); });
+  socket.addEventListener('open', () => { state.online = true; $('connection').textContent = 'Connected'; editor.connected(); resizePrompt(); });
   socket.addEventListener('message', event => { try { receive(event); } catch { toast('Invalid conversation event. Reconnecting…'); socket.close(); } });
   socket.addEventListener('close', () => {
     if (generation !== state.generation) return;
     state.online = false; $('connection').textContent = 'Reconnecting'; resizePrompt();
+    editor.disconnected();
     if (state.attachments.length) cancelUploads('Disconnected. Image uploads cancelled; draft kept.');
     setTimeout(connect, 1000);
   });

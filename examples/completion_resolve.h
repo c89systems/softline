@@ -5,6 +5,24 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+typedef struct demo_completion_rule {
+  char trigger;
+  int word, strip, expand;
+} demo_completion_rule_t;
+static const demo_completion_rule_t demo_completion_rules[] = {{'/', 0, 0, 1},
+                                                               {'h', 0, 0, 0},
+                                                               {'v', 1, 0, 0},
+                                                               {'n', 1, 0, 0},
+                                                               {'@', 1, 1, 1}};
+static const demo_completion_rule_t *demo_completion_rule(char trigger) {
+  size_t i;
+  for (i = 0;
+       i < sizeof(demo_completion_rules) / sizeof(demo_completion_rules[0]);
+       ++i)
+    if (demo_completion_rules[i].trigger == trigger)
+      return demo_completion_rules + i;
+  return NULL;
+}
 
 /* Only this directory is read. Commit a selection before Tab resolves children.
  */
@@ -69,6 +87,8 @@ static int demo_resolve(sl_t *sl, const char *prefix, sl_completion_emit_t emit,
   size_t i, count = userdata ? sizeof(chat) / sizeof(chat[0])
                              : sizeof(simple) / sizeof(simple[0]);
   (void)sl;
+  if (!demo_completion_rule(prefix[0]))
+    return SL_OK;
   if (prefix[0] == '@')
     return demo_complete_files(prefix, emit, context);
   if (prefix[1]) {

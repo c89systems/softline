@@ -1,4 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { runWebCompletionTests } from './web-completion.mjs';
-const source = await readFile(new URL('../web/softline.js', import.meta.url), 'utf8');
-for (const name of await runWebCompletionTests(source)) console.log(`PASS ${name}`);
+const inputs = [];
+for (const path of ['../web/softline.js', '../web/completion.js', '../web/prompt.js', './completion-parity.tsv'])
+  inputs.push(await readFile(new URL(path, import.meta.url), 'utf8'));
+for (const name of await runWebCompletionTests(...inputs)) console.log(`PASS ${name}`);

@@ -43,8 +43,24 @@ window.softlineTestCopied=[];
 Object.defineProperty(navigator,'clipboard',{value:{writeText:async text=>{window.softlineTestCopied.push(text)}}});
 window.WebSocket=class extends EventTarget {
   static OPEN=1;
-  constructor(){super();this.readyState=1;this.sent=[];window.softlineTestSocket=this;setTimeout(()=>this.dispatchEvent(new Event('open')),0)}
-  send(value){this.sent.push(value)} close(){}
+  constructor(){super();this.readyState=1;this.sent=[];window.softlineTestSocket=this;setTimeout(()=>{
+    this.dispatchEvent(new Event('open'));
+    for(const [trigger,scope,strip,expand] of [['@','word','1','1'],['/','start','0','1'],['h','start','0','0'],['v','word','0','0'],['n','word','0','0']])
+      this.reply({type:'completion_provider',trigger,scope,strip,expand});
+  },0)}
+  reply(value){this.dispatchEvent(new MessageEvent('message',{data:JSON.stringify(value)}))}
+  send(value){
+    this.sent.push(value);const q=new URLSearchParams(value);
+    if(q.get('action')!=='complete')return;
+    const lists={'@':['@README.md','@space dir/','@@literal.txt'],'@space dir/':['@space dir/file.txt'],'/':['/approve','/status'],'/approve':['/approve on','/approve off']};
+    const candidates=q.get('all')==='1'?['/status','@']:lists[q.get('resolve')]||[];
+    queueMicrotask(()=>{
+      for(const candidate of candidates)this.reply({type:'complete',request:q.get('request'),candidate,label:candidate,
+        value:candidate.startsWith('@')&&!candidate.endsWith('/')&&candidate!=='@'?candidate.slice(1):candidate,
+        start:q.get('start')||'0',end:q.get('cursor'),continue:candidate.endsWith('/')||candidate==='@'?'1':'0'});
+      this.reply({type:'complete_end',request:q.get('request'),status:'ok'});
+    });
+  } close(){}
 };
 <\/script>`;
 frame.srcdoc=(await (await fetch('/')).text()).replace('<head>','<head>'+bootstrap);
@@ -103,16 +119,36 @@ await uiCheck('literal at-signs survive completion commit',async()=>{
   assert(lastAction('send')?.get('text')==='email user@example.com icon@2x.png','literal at-sign changed');
 });
 await uiCheck('selected directory with spaces is sent as a canonical path',async()=>{
-  inputDraft('@spa');await waitFor(()=>lastAction('complete')?.get('text')==='@spa');
-  event({type:'complete',request:lastAction('complete').get('request'),label:'@space dir/',value:'@space dir/',start:'0',end:'4',continue:'1'});
-  frame.contentDocument.querySelector('#completions button').click();sendDraft();
+  const p=inputDraft('@spa'),w=frame.contentWindow;
+  await waitFor(()=>frame.contentDocument.querySelector('#completion-ghost').textContent==='ce dir/');
+  assert(frame.contentDocument.querySelector('#completions').hidden,'typing opened a popup');
+  p.dispatchEvent(new w.KeyboardEvent('keydown',{key:'Tab',bubbles:true,cancelable:true}));
+  await waitFor(()=>p.value==='@space dir/');sendDraft();
+  await waitFor(()=>lastAction('send')?.get('text')==='space dir/');
   assert(lastAction('send')?.get('text')==='space dir/','selected directory retained trigger');
 });
 await uiCheck('selected filename keeps its own leading at-sign',async()=>{
-  inputDraft('@@li');await waitFor(()=>lastAction('complete')?.get('text')==='@@li');
-  event({type:'complete',request:lastAction('complete').get('request'),label:'@@literal.txt',value:'@literal.txt',start:'0',end:'4',continue:'0'});
-  frame.contentDocument.querySelector('#completions button').click();sendDraft();
+  const p=inputDraft('@@li'),w=frame.contentWindow;
+  await waitFor(()=>frame.contentDocument.querySelector('#completion-ghost').textContent==='teral.txt');
+  p.dispatchEvent(new w.KeyboardEvent('keydown',{key:'Tab',bubbles:true,cancelable:true}));
+  await waitFor(()=>p.value==='@@literal.txt');sendDraft();
+  await waitFor(()=>lastAction('send')?.get('text')==='@literal.txt');
   assert(lastAction('send')?.get('text')==='@literal.txt','filename at-sign was stripped twice');
+});
+await uiCheck('inline ghosts use composer font, wrap within the editor and never create a popup',async()=>{
+  for(const width of [760,360])for(const font of ['sans','mono']){
+    frame.style.width=width+'px';frame.contentDocument.documentElement.dataset.font=font;
+    await frame.contentDocument.fonts.ready;
+    const p=inputDraft('@REA'),doc=frame.contentDocument;
+    await waitFor(()=>doc.querySelector('#completion-ghost').textContent==='DME.md');
+    const overlay=doc.querySelector('#prompt-projection'),w=frame.contentWindow;
+    assert(p.value==='@REA','ghost changed actual draft');
+    assert(doc.querySelector('#completions').hidden,'automatic popup is present');
+    assert(w.getComputedStyle(p).fontFamily===w.getComputedStyle(overlay).fontFamily,'ghost font differs');
+    assert(Math.abs(p.getBoundingClientRect().left-overlay.getBoundingClientRect().left)<1,'ghost offset differs');
+    assert(Math.abs(p.clientWidth-overlay.clientWidth)<1,'ghost wrap width differs');
+    sendDraft();assert(lastAction('send')?.get('text')==='REA','Enter accepted ghost');
+  }
 });
 document.title=failures?`FAIL (${failures}) softline browser checks`:'PASS softline browser checks';
 document.documentElement.dataset.checks=failures?'failed':'passed';

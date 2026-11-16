@@ -8,6 +8,8 @@ assets = [
     ("/", "text/html; charset=utf-8", "web/index.html"),
     ("/softline.css", "text/css; charset=utf-8", "web/softline.css"),
     ("/softline.js", "text/javascript; charset=utf-8", "web/softline.js"),
+    ("/completion.js", "text/javascript; charset=utf-8", "web/completion.js"),
+    ("/prompt.js", "text/javascript; charset=utf-8", "web/prompt.js"),
     ("/markdown.js", "text/javascript; charset=utf-8", "web/markdown.js"),
     ("/smd.js", "text/javascript; charset=utf-8", "vendor/streaming-markdown/smd.js"),
     ("/JetBrainsMono-Regular.woff2", "font/woff2", "vendor/jetbrains-mono/JetBrainsMono-Regular.woff2"),

@@ -39,7 +39,10 @@
         <div id="uploads" aria-label="Image attachments" hidden></div>
         <div class="input-row">
           <button id="plus" class="icon-button" type="button" aria-label="Completions and images" aria-expanded="false" title="Completions and images">+</button>
-          <textarea id="prompt" rows="1" placeholder="Ask softline" aria-label="Message" spellcheck="true"></textarea>
+          <div class="prompt-editor">
+            <pre id="prompt-projection" aria-hidden="true" hidden><span id="projection-before"></span><span id="completion-ghost"></span><span id="projection-after"></span></pre>
+            <textarea id="prompt" rows="1" placeholder="Ask softline" aria-label="Message" aria-autocomplete="inline" spellcheck="false"></textarea>
+          </div>
           <button id="send" type="submit" aria-label="Send message" title="Send (Enter)"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5m-6 6 6-6 6 6"/></svg></button>
         </div>
       </form>

@@ -383,6 +383,15 @@ int main(int argc, char **argv) {
   CHECK(!completion_file(root, "caf\303\251.c", 0));
   CHECK(!completion_file(root, "icon@2x.png", 0));
   CHECK(!completion_file(root, "@literal.txt", 0));
+  CHECK(!completion_file(root, "many", 1));
+  {
+    size_t i;
+    for (i = 0; i < 300; ++i) {
+      char name[64];
+      snprintf(name, sizeof(name), "many/item%03lu", (unsigned long)i);
+      CHECK(!completion_file(root, name, 0));
+    }
+  }
   CHECK(pipe(pipes) == 0);
   if (argc == 5) {
     char line[1024];
@@ -514,6 +523,21 @@ int main(int argc, char **argv) {
   two = ws_open(port);
   CHECK(one >= 0 && two >= 0);
   CHECK(until(one, data, SL_WWW_FRAME_MAX + 1, "\"type\":\"session\"") == 0);
+  {
+    static const char *const triggers[] = {"/", "h", "v", "n", "@"};
+    size_t i;
+    for (i = 0; i < sizeof(triggers) / sizeof(triggers[0]); ++i) {
+      char expected[32];
+      CHECK(until(one, data, SL_WWW_FRAME_MAX + 1,
+                  "\"type\":\"completion_provider\"") == 0);
+      snprintf(expected, sizeof(expected), "\"trigger\":\"%s\"", triggers[i]);
+      CHECK(strstr(data, expected));
+      CHECK(strstr(data, i < 2 ? "\"scope\":\"start\"" : "\"scope\":\"word\""));
+      CHECK(strstr(data, i == 4 ? "\"strip\":\"1\"" : "\"strip\":\"0\""));
+      CHECK(strstr(data,
+                   i == 0 || i == 4 ? "\"expand\":\"1\"" : "\"expand\":\"0\""));
+    }
+  }
   if (dual)
     CHECK(write_all(terminal_fd, "independent ANSI draft\022", 23) == 0);
   CHECK(ws_send(one, 1, 0, "action=send&request=first&", 26) == 0);
@@ -558,6 +582,46 @@ int main(int argc, char **argv) {
   CHECK(ws_text(one, "action=complete&request=7&text=%2Fst&cursor=3&all=0") ==
         0);
   CHECK(until(one, data, SL_WWW_FRAME_MAX + 1, "\"value\":\"/status\"") == 0);
+  {
+    static const struct {
+      const char *query, *first, *second;
+    } batches[] = {
+        {"text=%40REA&cursor=4&start=0&end=4&resolve=%40", "@README.md",
+         "@examples/"},
+        {"text=%40examples%2Fch&cursor=12&start=0&end=12&resolve=%"
+         "40examples%2F",
+         "@examples/chat.c", "@examples/other.c"},
+        {"text=%2Fapprove&cursor=8&start=0&end=8&resolve=%2Fapprove",
+         "/approve on", "/approve off"},
+        {"text=%40many%2Fitem299&cursor=13&start=0&end=13&resolve=%40many%2F",
+         "@many/item000", "@many/item299"}};
+    size_t i;
+    for (i = 0; i < sizeof(batches) / sizeof(batches[0]); ++i) {
+      char query[512], ticket[64], expected[256];
+      int first = 0, second = 0;
+      snprintf(query, sizeof(query), "action=complete&request=snapshot-%lu&%s",
+               (unsigned long)i, batches[i].query);
+      snprintf(ticket, sizeof(ticket), "\"request\":\"snapshot-%lu\"",
+               (unsigned long)i);
+      CHECK(ws_text(one, query) == 0);
+      for (;;) {
+        CHECK(until(one, data, SL_WWW_FRAME_MAX + 1, ticket) == 0);
+        if (strstr(data, "\"type\":\"complete_end\"")) {
+          CHECK(strstr(data, "\"status\":\"ok\""));
+          break;
+        }
+        snprintf(expected, sizeof(expected), "\"candidate\":\"%s\"",
+                 batches[i].first);
+        if (strstr(data, expected))
+          first = 1;
+        snprintf(expected, sizeof(expected), "\"candidate\":\"%s\"",
+                 batches[i].second);
+        if (strstr(data, expected))
+          second = 1;
+      }
+      CHECK(first && second);
+    }
+  }
   CHECK(ws_text(
             one,
             "action=complete&request=8&text=%E2%82%AC+%2Fst&cursor=7&all=0") ==

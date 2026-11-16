@@ -25,6 +25,8 @@ int main(int argc, char **argv) {
   static const char *paths[] = {"/",
                                 "/softline.css",
                                 "/softline.js",
+                                "/completion.js",
+                                "/prompt.js",
                                 "/markdown.js",
                                 "/smd.js",
                                 "/JetBrainsMono-Regular.woff2"};
@@ -32,12 +34,14 @@ int main(int argc, char **argv) {
       "web/index.html",
       "web/softline.css",
       "web/softline.js",
+      "web/completion.js",
+      "web/prompt.js",
       "web/markdown.js",
       "vendor/streaming-markdown/smd.js",
       "vendor/jetbrains-mono/JetBrainsMono-Regular.woff2"};
   sl_www_config_t cfg;
   sl_www_t *w;
-  char *html, *css, *js, *md, *at, *rule_end;
+  char *html, *css, *js, *md, *prompt, *at, *rule_end;
   size_t i;
   int depth = 0;
   CHECK(argc == 2);
@@ -70,7 +74,8 @@ int main(int argc, char **argv) {
   css = asset(w, "/softline.css");
   js = asset(w, "/softline.js");
   md = asset(w, "/markdown.js");
-  CHECK(html && css && js && md);
+  prompt = asset(w, "/prompt.js");
+  CHECK(html && css && js && md && prompt);
   /* Every literal ID lookup in the shipped module names a real control. */
   for (at = js; (at = strstr(at, "$('")) != NULL; at += 3) {
     char id[128], *end = strchr(at + 3, '\'');
@@ -108,6 +113,22 @@ int main(int argc, char **argv) {
   }
   CHECK(!depth && strstr(css, "scrollbar-color") &&
         strstr(css, ".welcome-state #composer-area"));
+  CHECK(strstr(html, "aria-autocomplete=\"inline\"") &&
+        strstr(html, "id=\"prompt-projection\" aria-hidden=\"true\" hidden") &&
+        strstr(css, "#completion-ghost{color:var(--muted)}") &&
+        !strstr(js, "fileCompletion") && !strstr(js, "completionQuery"));
+  /* Literal lookups in the prompt controller must also name shipped controls.
+   */
+  for (at = prompt; (at = strstr(at, "get('")) != NULL; at += 5) {
+    char id[128], *end = strchr(at + 5, '\'');
+    size_t n;
+    CHECK(end && (n = (size_t)(end - at - 5)) < 100);
+    strcpy(id, "id=\"");
+    memcpy(id + 4, at + 5, n);
+    id[n + 4] = '"';
+    id[n + 5] = 0;
+    CHECK(strstr(html, id));
+  }
   CHECK(strstr(html, "id=\"activity\" role=\"status\"></div>"));
   CHECK(!strstr(js, "$('activity').hidden"));
   CHECK(!strstr(js, "body.innerText"));
@@ -131,6 +152,7 @@ int main(int argc, char **argv) {
   free(css);
   free(js);
   free(md);
+  free(prompt);
   sl_www_destroy(w);
   return 0;
 }

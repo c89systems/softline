@@ -280,6 +280,26 @@ static int replay(void *context, void *peer, const char *after) {
     status[1].value = w->busy ? "1" : "0";
     (void)demo_www_reply(peer, "status", status, 2);
   }
+  {
+    size_t i;
+    for (i = 0;
+         i < sizeof(demo_completion_rules) / sizeof(demo_completion_rules[0]);
+         ++i) {
+      const demo_completion_rule_t *rule = demo_completion_rules + i;
+      char trigger[2];
+      sl_www_field_t policy[4] = {{"trigger", NULL, 0},
+                                  {"scope", NULL, 0},
+                                  {"strip", NULL, 0},
+                                  {"expand", NULL, 0}};
+      trigger[0] = rule->trigger;
+      trigger[1] = 0;
+      policy[0].value = trigger;
+      policy[1].value = rule->word ? "word" : "start";
+      policy[2].value = rule->strip ? "1" : "0";
+      policy[3].value = rule->expand ? "1" : "0";
+      (void)demo_www_reply(peer, "completion_provider", policy, 4);
+    }
+  }
   return SL_OK;
 }
 typedef struct {
@@ -288,19 +308,20 @@ typedef struct {
   const char *ticket;
   char start[32], end[32];
   size_t count;
-  int all;
+  int all, resolving;
 } completion_t;
 static int completion(const char *candidate, void *context) {
   completion_t *c = context;
-  sl_www_field_t f[7] = {{"request", NULL, 0}, {"label", NULL, 0},
+  sl_www_field_t f[8] = {{"request", NULL, 0}, {"label", NULL, 0},
                          {"value", NULL, 0},   {"start", NULL, 0},
                          {"end", NULL, 0},     {"description", "", 0},
-                         {"continue", "0", 0}};
-  if (c->count >= 256 || !strcmp(candidate, "/shell") ||
-      !strcmp(candidate, "/quit") ||
-      (!c->all && strncmp(candidate, c->prefix, strlen(c->prefix))))
+                         {"continue", "0", 0}, {"candidate", NULL, 0}};
+  if (!strcmp(candidate, "/shell") || !strcmp(candidate, "/quit") ||
+      (!c->all && !c->resolving &&
+       strncmp(candidate, c->prefix, strlen(c->prefix))))
     return SL_OK;
   f[0].value = c->ticket;
+  f[7].value = candidate;
   f[1].value = f[2].value = candidate;
   if (candidate[0] == '@') {
     size_t length = strlen(candidate);
@@ -313,7 +334,7 @@ static int completion(const char *candidate, void *context) {
   f[4].value = c->end;
   ++c->count;
   return sl_www_emit(c->request->reply, c->request->reply_context, "complete",
-                     NULL, f, 7);
+                     NULL, f, 8);
 }
 static int completion_space(unsigned char c) {
   return c && strchr(" \t\n\r\v\f", c) != NULL;
@@ -335,11 +356,15 @@ static int complete(demo_web_chat_t *w, const sl_www_request_t *r) {
   start = finish = (size_t)cursor;
   if (*field(r, "start")) {
     unsigned long range_start, range_end;
+    const demo_completion_rule_t *rule;
     errno = 0;
     range_start = strtoul(field(r, "start"), &end, 10);
-    if (errno || *end || range_start >= cursor || text[range_start] != '@' ||
-        (range_start &&
-         !completion_space((unsigned char)text[range_start - 1])))
+    if (errno || *end || range_start >= cursor)
+      return SL_ERROR_INVALID;
+    rule = demo_completion_rule(text[range_start]);
+    if (!rule || (range_start &&
+                  (!rule->word ||
+                   !completion_space((unsigned char)text[range_start - 1]))))
       return SL_ERROR_INVALID;
     errno = 0;
     range_end = strtoul(field(r, "end"), &end, 10);
@@ -365,9 +390,19 @@ static int complete(demo_web_chat_t *w, const sl_www_request_t *r) {
   c.prefix = prefix;
   c.ticket = field(r, "request");
   c.all = !strcmp(field(r, "all"), "1");
+  c.resolving = *field(r, "resolve") != 0;
   (void)snprintf(c.start, sizeof(c.start), "%lu", (unsigned long)start);
   (void)snprintf(c.end, sizeof(c.end), "%lu", (unsigned long)finish);
-  if (c.all) {
+  if (c.resolving) {
+    const char *resolve = field(r, "resolve");
+    const demo_completion_rule_t *rule = demo_completion_rule(resolve[0]);
+    if (!rule || resolve[0] != prefix[0] || (resolve[1] && !rule->expand) ||
+        (resolve[1] && (strlen(resolve) > strlen(prefix) ||
+                        strncmp(prefix, resolve, strlen(resolve)))))
+      result = SL_ERROR_INVALID;
+    else
+      result = demo_resolve(w->editor, resolve, completion, &c, w);
+  } else if (c.all) {
     static const char *const triggers[] = {"/", "h", "v", "n"};
     size_t i;
     result = SL_OK;
@@ -400,10 +435,22 @@ static int complete(demo_web_chat_t *w, const sl_www_request_t *r) {
     trigger[1] = 0;
     result = demo_resolve(w->editor, trigger, completion, &c, w);
   }
-  if (!c.count && result == SL_OK) {
+  if (!c.count && result == SL_OK && !c.resolving) {
     sl_www_field_t f = {"request", NULL, 0};
     f.value = c.ticket;
     result = sl_www_emit(r->reply, r->reply_context, "complete", NULL, &f, 1);
+  }
+  {
+    sl_www_field_t done[2] = {{"request", NULL, 0}, {"status", NULL, 0}};
+    int written;
+    done[0].value = c.ticket;
+    done[1].value = result == SL_OK ? "ok" : "error";
+    written =
+        sl_www_emit(r->reply, r->reply_context, "complete_end", NULL, done, 2);
+    if (c.resolving)
+      result = written;
+    else if (written != SL_OK)
+      result = written;
   }
   free(prefix);
   return result;
