@@ -80,6 +80,40 @@ await uiCheck('copy preserves raw streamed Markdown before and after end',async(
   assert(frame.contentWindow.softlineTestCopied[1]===source,'final copy changed Markdown, whitespace or Unicode');
   event({type:'reset'});assert(!doc.querySelector(`[data-message="${id}"]`),'reset retained old output');
 });
+function inputDraft(text,inputType='insertText'){
+  const w=frame.contentWindow,p=frame.contentDocument.querySelector('#prompt');
+  p.focus();p.setSelectionRange(0,p.value.length);
+  p.dispatchEvent(new w.InputEvent('beforeinput',{bubbles:true,inputType,data:text}));
+  p.setRangeText(text,p.selectionStart,p.selectionEnd,'end');
+  p.dispatchEvent(new w.InputEvent('input',{bubbles:true,inputType,data:text}));
+  return p;
+}
+function lastAction(action){return frame.contentWindow.softlineTestSocket.sent.map(value=>new URLSearchParams(value)).filter(value=>value.get('action')===action).at(-1)}
+function sendDraft(){const w=frame.contentWindow;frame.contentDocument.querySelector('#composer').dispatchEvent(new w.Event('submit',{bubbles:true,cancelable:true}))}
+await uiCheck('send-button submission commits a typed file trigger',async()=>{
+  inputDraft('@README.md');sendDraft();assert(lastAction('send')?.get('text')==='README.md','@ reached the prompt payload');
+});
+await uiCheck('Alt-Enter commits directory completion before steering',async()=>{
+  const p=inputDraft('@examples/'),w=frame.contentWindow;
+  p.dispatchEvent(new w.KeyboardEvent('keydown',{key:'Enter',altKey:true,bubbles:true,cancelable:true}));
+  assert(lastAction('steer')?.get('text')==='examples/','directory trigger reached steer payload');
+});
+await uiCheck('literal at-signs survive completion commit',async()=>{
+  inputDraft('email user@example.com @icon@2x.png');sendDraft();
+  assert(lastAction('send')?.get('text')==='email user@example.com icon@2x.png','literal at-sign changed');
+});
+await uiCheck('selected directory with spaces is sent as a canonical path',async()=>{
+  inputDraft('@spa');await waitFor(()=>lastAction('complete')?.get('text')==='@spa');
+  event({type:'complete',request:lastAction('complete').get('request'),label:'@space dir/',value:'@space dir/',start:'0',end:'4',continue:'1'});
+  frame.contentDocument.querySelector('#completions button').click();sendDraft();
+  assert(lastAction('send')?.get('text')==='space dir/','selected directory retained trigger');
+});
+await uiCheck('selected filename keeps its own leading at-sign',async()=>{
+  inputDraft('@@li');await waitFor(()=>lastAction('complete')?.get('text')==='@@li');
+  event({type:'complete',request:lastAction('complete').get('request'),label:'@@literal.txt',value:'@literal.txt',start:'0',end:'4',continue:'0'});
+  frame.contentDocument.querySelector('#completions button').click();sendDraft();
+  assert(lastAction('send')?.get('text')==='@literal.txt','filename at-sign was stripped twice');
+});
 document.title=failures?`FAIL (${failures}) softline browser checks`:'PASS softline browser checks';
 document.documentElement.dataset.checks=failures?'failed':'passed';
 </script></html>

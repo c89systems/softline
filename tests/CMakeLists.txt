@@ -71,6 +71,14 @@ softline_apply_warnings(test_www_assets)
 softline_local_runtime(test_www_assets)
 add_test(NAME softline_www_assets COMMAND test_www_assets "${PROJECT_SOURCE_DIR}")
 set_tests_properties(softline_www_assets PROPERTIES LABELS "unit;web;memcheck" TIMEOUT 10)
+# Optional development test runner; neither the library nor native tests depend
+# on Node, a package manager, a browser installation or additional JS packages.
+find_program(SOFTLINE_NODE_EXECUTABLE NAMES node nodejs)
+if(SOFTLINE_NODE_EXECUTABLE)
+  add_test(NAME softline_www_client COMMAND "${SOFTLINE_NODE_EXECUTABLE}"
+    "${PROJECT_SOURCE_DIR}/tests/check-web-completion.mjs")
+  set_tests_properties(softline_www_client PROPERTIES LABELS "unit;web" TIMEOUT 10)
+endif()
 add_executable(test_image_source test_image_source.c)
 target_link_libraries(test_image_source PRIVATE softline)
 softline_apply_warnings(test_image_source)

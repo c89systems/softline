@@ -315,6 +315,9 @@ static int completion(const char *candidate, void *context) {
   return sl_www_emit(c->request->reply, c->request->reply_context, "complete",
                      NULL, f, 7);
 }
+static int completion_space(unsigned char c) {
+  return c && strchr(" \t\n\r\v\f", c) != NULL;
+}
 static int complete(demo_web_chat_t *w, const sl_www_request_t *r) {
   const char *text = field(r, "text");
   char *end, *prefix;
@@ -324,16 +327,34 @@ static int complete(demo_web_chat_t *w, const sl_www_request_t *r) {
   int result;
   errno = 0;
   cursor = strtoul(field(r, "cursor"), &end, 10);
-  if (errno || *end || cursor > strlen(text) ||
+  if (!*field(r, "cursor") || errno || *end || cursor > strlen(text) ||
       ((unsigned char)text[cursor] & 192) == 128)
     return SL_ERROR_INVALID;
+  if (!*field(r, "start") && *field(r, "end"))
+    return SL_ERROR_INVALID;
   start = finish = (size_t)cursor;
-  while (start && text[start - 1] != ' ' && text[start - 1] != '\t' &&
-         text[start - 1] != '\n')
-    --start;
-  while (text[finish] && text[finish] != ' ' && text[finish] != '\t' &&
-         text[finish] != '\n')
-    ++finish;
+  if (*field(r, "start")) {
+    unsigned long range_start, range_end;
+    errno = 0;
+    range_start = strtoul(field(r, "start"), &end, 10);
+    if (errno || *end || range_start >= cursor || text[range_start] != '@' ||
+        (range_start &&
+         !completion_space((unsigned char)text[range_start - 1])))
+      return SL_ERROR_INVALID;
+    errno = 0;
+    range_end = strtoul(field(r, "end"), &end, 10);
+    if (!*field(r, "end") || errno || *end || range_end < cursor ||
+        range_end > strlen(text) ||
+        ((unsigned char)text[range_end] & 192) == 128)
+      return SL_ERROR_INVALID;
+    start = (size_t)range_start;
+    finish = (size_t)range_end;
+  } else {
+    while (start && !completion_space((unsigned char)text[start - 1]))
+      --start;
+    while (text[finish] && !completion_space((unsigned char)text[finish]))
+      ++finish;
+  }
   prefix = malloc((size_t)cursor - start + 1);
   if (!prefix)
     return SL_ERROR_NOMEM;
@@ -355,7 +376,23 @@ static int complete(demo_web_chat_t *w, const sl_www_request_t *r) {
       result = demo_resolve(w->editor, triggers[i], completion, &c, w);
     if (result == SL_OK)
       result = completion("@", &c);
-  } else if (prefix[0] == '@' || !strcmp(prefix, "/approve"))
+  } else if (prefix[0] == '@') {
+    size_t length = strlen(prefix), parent = length;
+    char *directory;
+    while (parent > 1 && prefix[parent - 1] != '/')
+      --parent;
+    directory = malloc(parent + 1);
+    if (!directory) {
+      free(prefix);
+      return SL_ERROR_NOMEM;
+    }
+    memcpy(directory, prefix, parent);
+    directory[parent] = 0;
+    /* The resolver lists one directory; the callback filters its candidates
+     * against the complete typed prefix, including any partial basename. */
+    result = demo_resolve(w->editor, directory, completion, &c, w);
+    free(directory);
+  } else if (!strcmp(prefix, "/approve"))
     result = demo_resolve(w->editor, prefix, completion, &c, w);
   else {
     char trigger[2];

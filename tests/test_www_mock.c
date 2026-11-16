@@ -324,9 +324,41 @@ static int until(int fd, char *data, size_t cap, const char *needle) {
   }
   return -1;
 }
+static int completion_file(const char *root, const char *name, int directory) {
+  char path[8192];
+  int fd;
+  if (snprintf(path, sizeof(path), "%s/%s", root, name) >= (int)sizeof(path))
+    return -1;
+  if (directory)
+    return mkdir(path, 0700);
+  fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0600);
+  return fd < 0 ? -1 : close(fd);
+}
+static void remove_tree(const char *root) {
+  DIR *d = opendir(root);
+  struct dirent *entry;
+  if (!d)
+    return;
+  while ((entry = readdir(d)) != NULL) {
+    char path[8192];
+    struct stat info;
+    if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, ".."))
+      continue;
+    if (snprintf(path, sizeof(path), "%s/%s", root, entry->d_name) >=
+            (int)sizeof(path) ||
+        lstat(path, &info))
+      continue;
+    if (S_ISDIR(info.st_mode))
+      remove_tree(path);
+    else
+      unlink(path);
+  }
+  closedir(d);
+  rmdir(root);
+}
 int main(int argc, char **argv) {
-  char root[4096], *data = malloc(SL_WWW_FRAME_MAX + 1),
-                   *http = malloc(512 * 1024), path[4096] = {0};
+  char root[4096] = {0}, *data = malloc(SL_WWW_FRAME_MAX + 1),
+       *http = malloc(512 * 1024), path[4096] = {0};
   int pipes[2] = {-1, -1}, fd = -1, one = -1, two = -1, status, opcode,
       failed = 1;
   pid_t child = -1, owner = -1;
@@ -342,6 +374,15 @@ int main(int argc, char **argv) {
   CHECK(snprintf(root, sizeof(root), "%s/www-mock-XXXXXX", argv[1]) <
             (int)sizeof(root) &&
         mkdtemp(root));
+  CHECK(!completion_file(root, "README.md", 0));
+  CHECK(!completion_file(root, "examples", 1));
+  CHECK(!completion_file(root, "examples/chat.c", 0));
+  CHECK(!completion_file(root, "examples/other.c", 0));
+  CHECK(!completion_file(root, "space dir", 1));
+  CHECK(!completion_file(root, "space dir/file.txt", 0));
+  CHECK(!completion_file(root, "caf\303\251.c", 0));
+  CHECK(!completion_file(root, "icon@2x.png", 0));
+  CHECK(!completion_file(root, "@literal.txt", 0));
   CHECK(pipe(pipes) == 0);
   if (argc == 5) {
     char line[1024];
@@ -527,6 +568,76 @@ int main(int argc, char **argv) {
       ws_text(one, "action=complete&request=9&text=%E2%82%AC&cursor=1&all=0") ==
       0);
   CHECK(until(one, data, SL_WWW_FRAME_MAX + 1, "\"type\":\"error\"") == 0);
+  {
+    static const struct {
+      const char *query, *value, *start, *end;
+      int continuation;
+    } cases[] = {
+        {"text=%40REA&cursor=4", "README.md", "0", "4", 0},
+        {"text=%40exam&cursor=5", "@examples/", "0", "5", 1},
+        {"text=%40examples%2Fch&cursor=12", "examples/chat.c", "0", "12", 0},
+        {"text=%E2%82%AC+%40examples%2Fch+tail&cursor=16", "examples/chat.c",
+         "4", "16", 0},
+        {"text=%40caf%C3%A9&cursor=6", "caf\303\251.c", "0", "6", 0},
+        {"text=%40icon%40&cursor=6", "icon@2x.png", "0", "6", 0},
+        {"text=%40%40li&cursor=4", "@literal.txt", "0", "4", 0},
+        {"text=%40space+dir%2Ffi&cursor=13&start=0&end=13",
+         "space dir/file.txt", "0", "13", 0}};
+    size_t i;
+    for (i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+      char query[512], ticket[64], expected[256];
+      snprintf(query, sizeof(query),
+               "action=complete&request=file-%lu&all=0&%s", (unsigned long)i,
+               cases[i].query);
+      snprintf(ticket, sizeof(ticket), "\"request\":\"file-%lu\"",
+               (unsigned long)i);
+      CHECK(ws_text(one, query) == 0);
+      CHECK(until(one, data, SL_WWW_FRAME_MAX + 1, ticket) == 0);
+      snprintf(expected, sizeof(expected), "\"value\":\"%s\"", cases[i].value);
+      CHECK(strstr(data, expected));
+      snprintf(expected, sizeof(expected), "\"start\":\"%s\"", cases[i].start);
+      CHECK(strstr(data, expected));
+      snprintf(expected, sizeof(expected), "\"end\":\"%s\"", cases[i].end);
+      CHECK(strstr(data, expected));
+      CHECK(strstr(data, cases[i].continuation ? "\"continue\":\"1\""
+                                               : "\"continue\":\"0\""));
+    }
+    CHECK(ws_text(one, "action=complete&request=no-file&text=%40examples%"
+                       "2Fmissing&cursor=17") == 0);
+    CHECK(until(one, data, SL_WWW_FRAME_MAX + 1, "\"request\":\"no-file\"") ==
+              0 &&
+          !strstr(data, "\"value\""));
+    {
+      static const char *bad_ranges[] = {
+          "text=%40REA&cursor=4&end=4",
+          "text=%40REA&cursor=4&start=0&end=99",
+          "text=literal%40REA&cursor=11&start=7&end=11",
+          "text=%40REA&cursor=4&start=99&end=4",
+          "text=%40REA&cursor=4&start=0&end=3",
+          "text=%40REA+%E2%82%AC&cursor=4&start=0&end=6"};
+      size_t bad;
+      for (bad = 0; bad < sizeof(bad_ranges) / sizeof(bad_ranges[0]); ++bad) {
+        char query[256];
+        snprintf(query, sizeof(query), "action=complete&request=bad-range&%s",
+                 bad_ranges[bad]);
+        CHECK(ws_text(one, query) == 0);
+        CHECK(until(one, data, SL_WWW_FRAME_MAX + 1, "\"type\":\"error\"") ==
+              0);
+      }
+    }
+    CHECK(ws_text(one, "action=send&request=file-send&text=README.md&view="
+                       "completion&request_seq=1") == 0);
+    CHECK(until(one, data, SL_WWW_FRAME_MAX + 1, "\"request\":\"file-send\"") ==
+              0 &&
+          strstr(data, "\"type\":\"accepted\""));
+    CHECK(until(two, data, SL_WWW_FRAME_MAX + 1, "UkVBRE1FLm1k") == 0);
+    CHECK(ws_text(one, "action=steer&request=file-steer&text=examples%2Fchat.c&"
+                       "view=completion&request_seq=2") == 0);
+    CHECK(until(one, data, SL_WWW_FRAME_MAX + 1,
+                "\"request\":\"file-steer\"") == 0 &&
+          strstr(data, "\"type\":\"accepted\""));
+    CHECK(until(two, data, SL_WWW_FRAME_MAX + 1, "ZXhhbXBsZXMvY2hhdC5j") == 0);
+  }
   CHECK(ws_text(one, "action=image_begin&id=upload&media_type=image%2Fpng&"
                      "filename=x.png&size=16") == 0);
   CHECK(until(one, data, SL_WWW_FRAME_MAX + 1, "\"type\":\"image_credit\"") ==
@@ -758,20 +869,8 @@ cleanup:
     close(slave);
   if (terminal_fd >= 0)
     close(terminal_fd);
-  if (!failed || child > 0) {
-    DIR *d = opendir(root);
-    if (d) {
-      struct dirent *e;
-      while ((e = readdir(d)) != NULL)
-        if (strcmp(e->d_name, ".") && strcmp(e->d_name, "..")) {
-          char file[8192];
-          (void)snprintf(file, sizeof(file), "%s/%s", root, e->d_name);
-          unlink(file);
-        }
-      closedir(d);
-      rmdir(root);
-    }
-  }
+  if (*root)
+    remove_tree(root);
   free(data);
   free(http);
   return failed;
