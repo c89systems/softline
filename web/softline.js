@@ -7,7 +7,7 @@ function randomId() {
 }
 const $ = id => document.getElementById(id);
 const prompt = $('prompt'), scroll = $('scroll'), messages = $('messages');
-const previews = new ImagePreviews(document, window);
+const previews = new ImagePreviews(document, window, { notice: toast });
 const state = { socket: null, online: false, follow: true, messages: new Map(),
   queue: new Map(), seq: '', upload: null,
   view: randomId(), generation: 0, imageLimit: 32 * 1024 * 1024,
@@ -176,6 +176,7 @@ async function uploadFile(upload) {
   state.upload = upload;
   const chip = document.createElement('div'), image = document.createElement('img'), label = document.createElement('span'), cancel = document.createElement('button');
   upload.chip = chip; chip.className = 'upload'; image.src = upload.url; image.alt = file.name || 'Image';
+  previews.inspect(image, { url: upload.url, name: file.name, file, type: png ? 'image/png' : 'image/jpeg' });
   label.textContent = 'Uploading image…'; cancel.type = 'button'; cancel.textContent = '×'; cancel.setAttribute('aria-label', 'Cancel image upload');
   cancel.addEventListener('click', () => cancelUpload('Image upload cancelled.')); chip.append(image, label, cancel);
   $('uploads').append(chip); $('uploads').hidden = false; resizePrompt();
@@ -200,7 +201,7 @@ async function uploadFile(upload) {
   const insertion = (upload.anchor && !/\s$/u.test(prompt.value.slice(0, upload.anchor)) ? ' ' : '') + result.path +
     (upload.anchor < prompt.value.length && !/^\s/u.test(prompt.value.slice(upload.anchor)) ? ' ' : '');
   prompt.setRangeText(insertion, upload.anchor, upload.anchor, 'preserve');
-  previews.remember(result.path, upload.url, file.name);
+  previews.remember(result.path, upload.url, file.name, file, png ? 'image/png' : 'image/jpeg');
   upload.url = null;
   editor.reset();
   for (const job of state.attachments) if (job !== upload && job.anchor >= upload.anchor) job.anchor += insertion.length;
@@ -232,6 +233,7 @@ function receive(event) {
   switch (e.type) {
     case 'reset':
       previews.hide();
+      previews.viewer.close();
       for (const m of state.messages.values()) m.stream?.end();
       state.messages.clear(); messages.replaceChildren(); state.queue.clear(); state.stagingQueue = null; queue();
       if (e.text) toast(e.text); break;

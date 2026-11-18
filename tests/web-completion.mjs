@@ -1,13 +1,13 @@
 // Logical client tests: execute the shipped module with DOM/transport doubles.
 // Actual browser layout and selection integration remain in web-browser.html.
-export async function runWebCompletionTests(source, completionSource, promptSource, fixture, imagesSource) {
+export async function runWebCompletionTests(source, completionSource, promptSource, fixture, imagesSource, viewerSource) {
   const checks = [];
   function assert(value, message) { if (!value) throw new Error(message); }
   class Target {
     constructor() { this.listeners = new Map(); }
     addEventListener(name, fn) { const list = this.listeners.get(name) || []; list.push(fn); this.listeners.set(name, list); }
     fire(name, fields = {}) {
-      const event = { key: '', altKey: false, shiftKey: false, ctrlKey: false, isComposing: false, defaultPrevented: false, preventDefault() { this.defaultPrevented = true; }, stopImmediatePropagation() { this.stopped = true; }, ...fields };
+      const event = { target: this, key: '', altKey: false, shiftKey: false, ctrlKey: false, isComposing: false, defaultPrevented: false, preventDefault() { this.defaultPrevented = true; }, stopImmediatePropagation() { this.stopped = true; }, ...fields };
       for (const fn of this.listeners.get(name) || []) { fn(event); if (event.stopped) break; }
       return event;
     }
@@ -28,7 +28,14 @@ export async function runWebCompletionTests(source, completionSource, promptSour
     getBoundingClientRect() { return this.rect || { left: 0, top: 0, right: 400, bottom: 36, width: 400, height: 36 }; }
     getClientRects() { return this.rects || [this.getBoundingClientRect()]; }
     get childElementCount() { return this.children.length; }
-    focus() {}
+    focus() { if (this.ownerDocument) this.ownerDocument.activeElement = this; this.fire('focus'); }
+    showModal() { this.beforeModal = this.ownerDocument?.activeElement; this.open = true; }
+    close() { this.open = false; this.fire('close'); this.beforeModal?.focus(); }
+    contains(other) { return this === other || this.children.some(child => typeof child === 'object' && (child === other || child.contains?.(other))); }
+    closest(selector) {
+      if (selector.split(',').some(part => part.startsWith('#') ? part.slice(1) === this.id : part.startsWith('.') && !part.includes(' ') && (this.className || '').split(' ').includes(part.slice(1)))) return this;
+      return this.parent?.closest(selector) || null;
+    }
     scrollIntoView() {}
     remove() { if (this.parent) this.parent.children = this.parent.children.filter(child => child !== this); }
     click() { this.fire('click'); }
@@ -62,23 +69,36 @@ export async function runWebCompletionTests(source, completionSource, promptSour
   }
   const stripImports = source => source.replace(/^import[^\n]*\n/gm, '').replace(/^export /gm, '');
   const Completion = new Function(stripImports(completionSource) + '\nreturn Completion;')();
-  const { ImagePreviews, imageReferences } = new Function(stripImports(imagesSource) + '\nreturn { ImagePreviews, imageReferences };')();
+  const ImageViewer = new Function(stripImports(viewerSource) + '\nreturn ImageViewer;')();
+  const { ImagePreviews, imageReferences } = new Function('ImageViewer', stripImports(imagesSource) + '\nreturn { ImagePreviews, imageReferences };')(ImageViewer);
   async function boot(options = {}) {
     const elements = new Map(), timers = new Map();
     let serial = 0, socket, previews;
-    const document = new Target(), window = new Target(), revoked = [], blobs = [];
+    const document = new Target(), window = new Target(), revoked = [], blobs = [], copiedImages = [], clipboardCalls = [], canvases = [], decoded = [], pendingDecodes = [];
     window.innerWidth = 1024; window.innerHeight = 768;
     document.getElementById = id => {
-      if (!elements.has(id)) elements.set(id, new Element());
+      if (!elements.has(id)) { const element = new Element(); element.id = id; element.ownerDocument = document; elements.set(id, element); }
       return elements.get(id);
     };
     document.documentElement = { dataset: {} };
-    document.createElement = () => new Element();
+    document.createElement = tag => {
+      const element = new Element(); element.ownerDocument = document;
+      if (tag === 'canvas') {
+        canvases.push(element);
+        element.getContext = () => options.noCanvas ? null : { drawImage: image => { element.drawn = image; } };
+        element.toBlob = callback => {
+          if (options.canvasFailure) throw new Error('Canvas is not readable.');
+          callback(options.canvasNull ? null : new window.Blob(['pixels'], { type: 'image/png' }));
+        };
+      }
+      return element;
+    };
     document.createTextNode = text => ({
       data: text, get textContent() { return this.data; },
       remove() { if (this.parent) this.parent.children = this.parent.children.filter(child => child !== this); }
     });
     const get = document.getElementById;
+    get('image-preview').append(get('image-preview-content'));
     get('theme').options = [{ value: 'default' }]; get('font').options = [{ value: 'sans' }];
     for (const id of ['completions', 'prompt-projection', 'queue', 'uploads', 'latest', 'toast', 'image-preview']) get(id).hidden = true;
     function event(value) { socket.fire('message', { data: JSON.stringify(value) }); }
@@ -115,6 +135,26 @@ export async function runWebCompletionTests(source, completionSource, promptSour
       clearTimeout: id => timers.delete(id)
     };
     window.URL = env.URL;
+    window.setTimeout = env.setTimeout; window.clearTimeout = env.clearTimeout;
+    window.Blob = class { constructor(parts, settings) { this.parts = parts; this.type = settings.type; } };
+    window.Image = class {
+      constructor() { this.naturalWidth = 640; this.naturalHeight = 480; }
+      decode() {
+        decoded.push(this);
+        if (options.decodeFailure) return Promise.reject(new Error('Image cannot be decoded.'));
+        return options.holdDecode ? new Promise(resolve => pendingDecodes.push(resolve)) : Promise.resolve();
+      }
+    };
+    window.ClipboardItem = class {
+      constructor(data) { this.data = data; this.types = Object.keys(data); }
+      getType(type) { return Promise.resolve(this.data[type]); }
+    };
+    window.navigator = { clipboard: { write: async items => {
+      clipboardCalls.push(items);
+      if (options.clipboardFailure) throw new Error('Clipboard access denied.');
+      for (const item of items) copiedImages.push(await item.getType('image/png'));
+    } } };
+    if (options.noImageClipboard) delete window.navigator.clipboard.write;
     const names = Object.keys(env), values = Object.values(env);
     env.Prompt = new Function('Completion', ...names, stripImports(promptSource) + '\nreturn Prompt;')(Completion, ...values);
     const AsyncFunction = Object.getPrototypeOf(async function() {}).constructor;
@@ -146,11 +186,12 @@ export async function runWebCompletionTests(source, completionSource, promptSour
     async function type(text) { for (const c of text) { input(c); await idle(); } }
     function queries() { return socket.sent.filter(frame => frame.get('action') === 'complete'); }
     function sent(action = 'send') { return socket.sent.filter(frame => frame.get('action') === action).at(-1)?.get('text'); }
-    async function upload(path, name = 'test.jpg') {
+    async function upload(path, name = 'test.jpg', type = 'image/jpeg') {
       let read = false;
+      const bytes = new Uint8Array(type === 'image/png' ? [137,80,78,71,13,10,26,10] : [255,216,255]);
       get('image-input').files = [{
-        name, size: 3, slice: () => ({ arrayBuffer: async () => new Uint8Array([255,216,255]).buffer }),
-        stream: () => ({ getReader: () => ({ read: async () => read ? { done: true } : (read = true, { done: false, value: new Uint8Array([255,216,255]) }), cancel: async () => {} }) })
+        name, type, size: bytes.length, slice: () => ({ arrayBuffer: async () => bytes.buffer }),
+        stream: () => ({ getReader: () => ({ read: async () => read ? { done: true } : (read = true, { done: false, value: bytes }), cancel: async () => {} }) })
       }];
       get('image-input').fire('change'); await idle();
       const begin = socket.sent.filter(frame => frame.get('action') === 'image_begin').at(-1);
@@ -161,9 +202,10 @@ export async function runWebCompletionTests(source, completionSource, promptSour
       event({ type: 'image_credit', id }); await idle();
       assert(socket.sent.some(frame => frame.get('action') === 'image_end' && frame.get('id') === id), 'image stream did not finish');
       event({ type: 'image_done', id, path }); await idle();
-      return { id, url };
+      return { id, url, file: get('image-input').files[0] };
     }
     const ui = { get, prompt, input, type, key, idle, queries, reply, event, sent, socket, document, window, revoked, blobs, upload, previews,
+      copiedImages, clipboardCalls, canvases, decoded, finishDecode: () => pendingDecodes.shift()?.(),
       form: () => get('composer').fire('submit'), ghost: () => get('completion-ghost').textContent || '',
       timeout: delay => { for (const [id, timer] of [...timers]) if (timer.delay === delay) { timers.delete(id); timer.fn(); } } };
     return ui;
@@ -328,7 +370,7 @@ export async function runWebCompletionTests(source, completionSource, promptSour
     span.rects = [{ left: 10, top: 4, right: 200, bottom: 24 }];
     ui.prompt.fire('pointermove', { clientX: 20, clientY: 10 });
     assert(!ui.get('image-preview').hidden && ui.get('image-preview-content').src === url, 'hover did not show local upload');
-    ui.prompt.fire('pointerleave'); assert(ui.get('image-preview').hidden, 'preview remained after leaving path');
+    ui.prompt.fire('pointerleave'); ui.timeout(150); assert(ui.get('image-preview').hidden, 'preview remained after leaving path');
     ui.form(); await ui.idle(); assert(ui.sent() === imagePath, 'preview changed the actual submitted prompt');
   }, { images: true });
   await check('a wrapped draft path previews only inside the visible editor', async ui => {
@@ -438,5 +480,128 @@ export async function runWebCompletionTests(source, completionSource, promptSour
     assert(output + result.parts.map(part => part.text).join('') === source && references === 1, 'stream parser changed text or matched unrelated paths');
     checks.push('bounded image path parsing with ' + width + '-character chunks');
   }
+  await check('clicking a hover thumbnail opens an inset viewer and close releases only its own URL', async ui => {
+    const { url } = await ui.upload(imagePath, 'picture.png', 'image/png');
+    ui.previews.show(imagePath, { left: 10, top: 100, bottom: 120 });
+    ui.get('image-preview').click();
+    const pinned = ui.get('image-viewer-content').src;
+    assert(ui.get('image-viewer').open && ui.get('image-preview').hidden, 'thumbnail did not become a modal viewer');
+    assert(ui.get('image-viewer-title').textContent === 'picture.png' && pinned !== url, 'viewer did not pin the uploaded image');
+    assert(ui.prompt.value === imagePath, 'opening the image changed the draft');
+    ui.get('image-viewer-close').click();
+    assert(!ui.get('image-viewer').open && ui.revoked.includes(pinned) && !ui.revoked.includes(url), 'close leaked its image or discarded the cached preview');
+  }, { images: true });
+  await check('the hover thumbnail stays available while crossing the gap to click it', async ui => {
+    await ui.upload(imagePath);
+    ui.previews.show(imagePath, { left: 10, top: 100, bottom: 120 });
+    ui.prompt.fire('pointerleave'); ui.get('image-preview').fire('pointerenter'); ui.timeout(150);
+    assert(!ui.get('image-preview').hidden, 'hover layer vanished while entering it');
+    ui.get('image-preview').click(); assert(ui.get('image-viewer').open, 'retained thumbnail did not open');
+  }, { images: true });
+  await check('posted path keyboard activation opens the viewer and Escape restores focus', async ui => {
+    await ui.upload(imagePath);
+    ui.event({ type: 'delta', id: 'open-posted-image', role: 'user', text: imagePath });
+    ui.event({ type: 'end', id: 'open-posted-image' });
+    const reference = ui.get('messages').children.at(-1).children[0].children.find(child => child.dataset?.imagePath);
+    reference.focus(); reference.fire('keydown', { key: 'Enter' });
+    assert(ui.get('image-viewer').open && ui.document.activeElement === ui.get('image-viewer-close'), 'viewer did not take keyboard focus');
+    const cancel = ui.get('image-viewer').fire('cancel');
+    assert(cancel.defaultPrevented && !ui.get('image-viewer').open && ui.document.activeElement === reference, 'Escape did not restore focus');
+  }, { images: true });
+  await check('an uploading thumbnail can be inspected and copied after the upload is cancelled', async ui => {
+    const file = { name: 'uploading.png', type: 'image/png', size: 8,
+      slice: () => ({ arrayBuffer: async () => new Uint8Array([137,80,78,71,13,10,26,10]).buffer }) };
+    ui.get('image-input').files = [file]; ui.get('image-input').fire('change'); await ui.idle();
+    const image = ui.get('uploads').children[0].children[0], original = image.src;
+    image.click(); const pinned = ui.get('image-viewer-content').src;
+    const begin = ui.socket.sent.find(frame => frame.get('action') === 'image_begin');
+    ui.event({ type: 'image_error', id: begin.get('id'), text: 'Cancelled' }); await ui.idle();
+    assert(ui.revoked.includes(original) && !ui.revoked.includes(pinned) && ui.get('image-viewer').open, 'upload cancellation revoked the inspected image');
+    assert(await ui.previews.viewer.copy() && ui.copiedImages[0] === file, 'cancelled upload could not be copied from its retained file');
+    ui.get('image-viewer-close').click(); assert(ui.revoked.includes(pinned), 'viewer did not release its upload pin');
+  }, { images: true });
+  await check('PNG copy writes image pixels immediately in the click gesture without re-encoding', async ui => {
+    const { file } = await ui.upload(imagePath, 'image.png', 'image/png');
+    ui.previews.open(imagePath);
+    const copied = ui.previews.viewer.copy();
+    assert(ui.clipboardCalls.length === 1 && ui.clipboardCalls[0][0].data['image/png']?.then, 'clipboard write waited for preparation or used text instead of image data');
+    assert(await copied && ui.copiedImages[0] === file && !ui.canvases.length, 'PNG copy re-encoded or replaced the original pixels');
+    assert(ui.get('image-viewer-copy').dataset.copied === '1' && !ui.get('image-viewer-copy').disabled, 'copy feedback did not recover the control');
+  }, { images: true });
+  await check('JPEG copy converts to PNG and frees its temporary bitmap and URL', async ui => {
+    const { url } = await ui.upload(imagePath);
+    ui.previews.open(imagePath); const pinned = ui.get('image-viewer-content').src;
+    assert(await ui.previews.viewer.copy(), 'JPEG image was not copied');
+    assert(ui.copiedImages[0].type === 'image/png' && ui.canvases[0].drawn === ui.decoded[0], 'JPEG copy did not rasterize the original image');
+    assert(ui.canvases[0].width === 0 && ui.canvases[0].height === 0, 'JPEG conversion retained its pixel allocation');
+    assert(ui.revoked.includes(ui.decoded[0].src) && !ui.revoked.includes(url) && !ui.revoked.includes(pinned), 'JPEG conversion leaked a URL or revoked a live image');
+  }, { images: true });
+  await check('signature-validated PNG with missing file MIME retains the correct clipboard type', async ui => {
+    const { file } = await ui.upload(imagePath, 'image.png', 'image/png');
+    file.type = '';
+    ui.previews.open(imagePath); assert(await ui.previews.viewer.copy(), 'PNG with missing metadata was not copied');
+    assert(ui.copiedImages[0].type === 'image/png' && ui.copiedImages[0].parts[0] === file && !ui.canvases.length, 'PNG MIME repair materialized or converted the original file');
+  }, { images: true });
+  await check('rendered conversation images open and copy through the same viewer', async ui => {
+    const image = ui.document.createElement('img');
+    image.src = 'https://images.example/picture.jpg'; image.alt = 'Rendered picture';
+    image.closest = selector => selector === '.message .body img' ? image : null;
+    const click = ui.document.fire('click', { target: image });
+    assert(click.defaultPrevented && ui.get('image-viewer').open && ui.get('image-viewer-content').src === image.src, 'rendered message image did not open');
+    assert(await ui.previews.viewer.copy() && ui.copiedImages[0].type === 'image/png', 'rendered image could not be copied');
+    assert(ui.decoded[0].crossOrigin === 'anonymous' && ui.decoded[0].src === image.src, 'image copy bypassed ordinary browser image permissions');
+  });
+  await check('missing image clipboard support gives a visible error while keeping the viewer usable', async ui => {
+    await ui.upload(imagePath); ui.previews.open(imagePath);
+    assert(!await ui.previews.viewer.copy() && ui.get('toast').textContent.includes('Image copying is unavailable'), 'missing clipboard support was silent');
+    assert(ui.get('image-viewer').open && !ui.get('image-viewer-copy').disabled && !ui.copiedImages.length, 'unsupported clipboard damaged viewer state');
+  }, { images: true, noImageClipboard: true });
+  for (const failure of ['clipboardFailure', 'decodeFailure', 'noCanvas', 'canvasFailure', 'canvasNull']) {
+    await check('failed image copy recovers controls and resources: ' + failure, async ui => {
+      const { url } = await ui.upload(imagePath); ui.previews.open(imagePath);
+      const pinned = ui.get('image-viewer-content').src;
+      assert(!await ui.previews.viewer.copy(), 'image copy unexpectedly succeeded');
+      await ui.idle();
+      assert(ui.get('image-viewer').open && !ui.get('image-viewer-copy').disabled && !ui.copiedImages.length, 'copy failure left unusable controls or wrong clipboard data');
+      assert(ui.get('toast').textContent.includes('Could not copy'), 'copy failure was not reported');
+      assert(!ui.revoked.includes(url) && !ui.revoked.includes(pinned), 'copy failure revoked the live image');
+      for (const decoded of ui.decoded) assert(ui.revoked.includes(decoded.src), 'copy failure leaked its temporary URL');
+    }, { images: true, [failure]: true });
+  }
+  await check('switching viewer images during a pending copy cannot corrupt the new viewer', async ui => {
+    await ui.upload(imagePath); ui.previews.open(imagePath);
+    const copied = ui.previews.viewer.copy();
+    assert(ui.clipboardCalls.length === 1 && ui.get('image-viewer-copy').disabled, 'copy was not dispatched before decoding');
+    const temporary = ui.decoded[0].src;
+    ui.previews.viewer.open({ url: 'https://images.example/new.png', name: 'New image' });
+    assert(!ui.revoked.includes(temporary), 'switching images cancelled the original copy source');
+    ui.finishDecode(); assert(await copied, 'pending copy did not complete');
+    assert(ui.get('image-viewer-title').textContent === 'New image' && ui.get('image-viewer-copy').dataset.copied === '0' && !ui.get('image-viewer-copy').disabled, 'old copy completion changed the new viewer');
+    assert(ui.revoked.includes(temporary), 'completed copy retained its conversion URL');
+  }, { images: true, holdDecode: true });
+  await check('an inspected image survives preview-cache eviction until its viewer closes', async ui => {
+    const { url } = await ui.upload(imagePath, 'image.png', 'image/png'); ui.previews.open(imagePath);
+    const pinned = ui.get('image-viewer-content').src;
+    for (let i = 0; i < 64; ++i) ui.previews.remember('/evict/' + i, 'blob:evict-' + i, 'image');
+    assert(ui.revoked.includes(url) && !ui.revoked.includes(pinned), 'cache eviction revoked the viewer pin');
+    assert(await ui.previews.viewer.copy(), 'evicted image lost its retained pixel source');
+    ui.previews.viewer.close(); assert(ui.revoked.includes(pinned), 'closing an evicted image leaked its viewer URL');
+  }, { images: true });
+  await check('reset and image-load failures close the modal and release its retained URL', async ui => {
+    await ui.upload(imagePath); ui.previews.open(imagePath);
+    const first = ui.get('image-viewer-content').src;
+    ui.event({ type: 'reset' });
+    assert(!ui.get('image-viewer').open && ui.revoked.includes(first), 'host reset retained the viewer');
+    ui.previews.open(imagePath); const second = ui.get('image-viewer-content').src;
+    ui.get('image-viewer-content').fire('error');
+    assert(!ui.get('image-viewer').open && ui.revoked.includes(second) && ui.get('toast').textContent.includes('could not be loaded'), 'image failure retained a broken modal');
+  }, { images: true });
+  await check('only clicking the actual backdrop closes the viewer', async ui => {
+    await ui.upload(imagePath); ui.previews.open(imagePath);
+    ui.get('image-viewer').fire('click', { target: ui.get('image-viewer-content') });
+    assert(ui.get('image-viewer').open, 'image inspection closed the viewer');
+    ui.get('image-viewer').fire('click', { target: ui.get('image-viewer') });
+    assert(!ui.get('image-viewer').open, 'backdrop click retained the viewer');
+  }, { images: true });
   return checks;
 }

@@ -167,14 +167,27 @@ timeouts, backpressure, completion insertion, and cancellation as native Ctrl-V.
 
 After an upload is acknowledged, its temporary thumbnail disappears and the
 plain backend path remains in the draft. Hover that path to show a floating
-local image preview. The same path in a submitted user message supports hover,
-click and keyboard focus; Escape dismisses the preview. Editing and sending
-still use the original plain text. No backend file-serving endpoint is needed:
+local image preview. Click the hover thumbnail, an uploading thumbnail, a posted
+image path or a rendered conversation image to open the larger image viewer.
+The viewer fits the image within the viewport with margins, preserves its aspect
+ratio, and provides close and copy-image icons. Escape or a backdrop click closes
+it and restores focus. Posted paths also support keyboard activation. Editing
+and sending still use the original plain text. No backend file-serving endpoint is needed:
 only images uploaded in this browser tab have previews, and a reload loses them.
 The client retains at most 64 recently uploaded or previewed local blob URLs,
 releasing evicted URLs and those retained when leaving the page. Reconnect/replay
 preserves these local associations. Streamed messages match paths incrementally,
 with only an unfinished known-path prefix retained between chunks.
+
+Copy Image writes image pixels rather than the image path. PNG uploads use the
+original file; JPEG and other rendered images are converted to PNG for the
+clipboard. The upload stream and stored backend file are unchanged. The viewer
+pins its local file until closed, independently of upload cancellation or preview
+cache eviction. Browser clipboard permission is required; remote images must also
+be readable under the browser's image/CORS rules. Copy failures leave the viewer
+open with an error notice. See the [Clipboard API](https://developer.mozilla.org/en-US/docs/Web/API/Clipboard/write)
+and [WebKit clipboard activation guidance](https://webkit.org/blog/10855/async-clipboard-api/).
+
 Source ownership transfers only after successful adoption; close runs once.
 The example callback copies at most one bounded protocol chunk; file writes
 and publication run in the example host loop after the callback returns.

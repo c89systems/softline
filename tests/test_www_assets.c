@@ -28,6 +28,7 @@ int main(int argc, char **argv) {
                                 "/completion.js",
                                 "/prompt.js",
                                 "/images.js",
+                                "/image-viewer.js",
                                 "/markdown.js",
                                 "/smd.js",
                                 "/JetBrainsMono-Regular.woff2"};
@@ -38,12 +39,13 @@ int main(int argc, char **argv) {
       "web/completion.js",
       "web/prompt.js",
       "web/images.js",
+      "web/image-viewer.js",
       "web/markdown.js",
       "vendor/streaming-markdown/smd.js",
       "vendor/jetbrains-mono/JetBrainsMono-Regular.woff2"};
   sl_www_config_t cfg;
   sl_www_t *w;
-  char *html, *css, *js, *md, *prompt, *at, *rule_end;
+  char *html, *css, *js, *md, *prompt, *at, *rule_end, *modules[2];
   size_t i;
   int depth = 0;
   CHECK(argc == 2);
@@ -77,7 +79,27 @@ int main(int argc, char **argv) {
   js = asset(w, "/softline.js");
   md = asset(w, "/markdown.js");
   prompt = asset(w, "/prompt.js");
-  CHECK(html && css && js && md && prompt);
+  modules[0] = asset(w, "/images.js");
+  modules[1] = asset(w, "/image-viewer.js");
+  CHECK(html && css && js && md && prompt && modules[0] && modules[1]);
+  /* Logical DOM doubles cannot catch missing real controls. Verify the image
+   * controllers' literal bindings against the actual embedded HTML as well. */
+  for (i = 0; i < 2; ++i) {
+    const char *marker = "getElementById('";
+    size_t prefix = strlen(marker);
+    for (at = modules[i]; (at = strstr(at, marker)) != NULL;) {
+      char id[128], *end;
+      size_t n;
+      at += prefix;
+      end = strchr(at, '\'');
+      CHECK(end && (n = (size_t)(end - at)) < 100);
+      strcpy(id, "id=\"");
+      memcpy(id + 4, at, n);
+      id[n + 4] = '"';
+      id[n + 5] = 0;
+      CHECK(strstr(html, id));
+    }
+  }
   /* Every literal ID lookup in the shipped module names a real control. */
   for (at = js; (at = strstr(at, "$('")) != NULL; at += 3) {
     char id[128], *end = strchr(at + 3, '\'');
@@ -155,6 +177,8 @@ int main(int argc, char **argv) {
   free(js);
   free(md);
   free(prompt);
+  free(modules[0]);
+  free(modules[1]);
   sl_www_destroy(w);
   return 0;
 }

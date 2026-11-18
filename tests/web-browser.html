@@ -40,6 +40,7 @@ async function waitFor(fn){const until=Date.now()+5000;while(!fn()){if(Date.now(
 const frame=document.createElement('iframe');frame.title='Actual Softline UI regression fixture';frame.style.cssText='width:100%;height:500px;border:1px solid var(--line)';fixtures.append(frame);
 const bootstrap=`<script>
 window.softlineTestCopied=[];
+window.softlineTestImages=[];
 const hostFetch=window.fetch.bind(window);
 window.fetch=async(...args)=>{
   const response=await hostFetch(...args);
@@ -48,7 +49,10 @@ window.fetch=async(...args)=>{
   }
   return response;
 };
-Object.defineProperty(navigator,'clipboard',{value:{writeText:async text=>{window.softlineTestCopied.push(text)}}});
+Object.defineProperty(navigator,'clipboard',{value:{
+  writeText:async text=>{window.softlineTestCopied.push(text)},
+  write:async items=>{for(const item of items)window.softlineTestImages.push(await item.getType('image/png'))}
+}});
 window.WebSocket=class extends EventTarget {
   static OPEN=1;
   constructor(){super();this.readyState=1;this.sent=[];window.softlineTestSocket=this;setTimeout(()=>{
@@ -194,7 +198,18 @@ await uiCheck('local image path hover uses the retained upload without changing 
     await waitFor(()=>image.complete&&image.naturalWidth>0);
     assert(p.value==='long prefix '.repeat(6)+path,'hover changed the prompt');
     assert(doc.querySelector('#composer').getBoundingClientRect().height===before,'preview changed composer height');
-    p.dispatchEvent(new w.PointerEvent('pointerleave'));assert(panel.hidden,'leaving the path retained the layer');
+    panel.click();
+    const viewer=doc.querySelector('#image-viewer'),full=doc.querySelector('#image-viewer-content');
+    assert(viewer.open&&viewer.matches(':modal'),'thumbnail did not open a native modal');
+    await waitFor(()=>full.complete&&full.naturalWidth>0);
+    const box=viewer.getBoundingClientRect();
+    assert(box.left>=11&&box.top>=11&&box.right<=w.innerWidth-11&&box.bottom<=w.innerHeight-11,'viewer is flush with viewport edges');
+    assert(w.getComputedStyle(full).objectFit==='contain','full-size image does not preserve its aspect ratio');
+    const count=w.softlineTestImages.length;doc.querySelector('#image-viewer-copy').click();
+    await waitFor(()=>w.softlineTestImages.length===count+1);
+    assert(w.softlineTestImages.at(-1).type==='image/png','copy did not write image pixels');
+    doc.querySelector('#image-viewer-close').click();assert(!viewer.open,'close icon retained the modal');
+    p.dispatchEvent(new w.PointerEvent('pointerleave'));await waitFor(()=>panel.hidden);
   }
   inputDraft(path);sendDraft();
   await waitFor(()=>[...doc.querySelectorAll('.user .image-reference')].some(span=>span.textContent===path));
@@ -202,6 +217,9 @@ await uiCheck('local image path hover uses the retained upload without changing 
   reference.focus();assert(!doc.querySelector('#image-preview').hidden,'submitted path lost keyboard preview');
   w.document.dispatchEvent(new w.KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true}));
   assert(doc.querySelector('#image-preview').hidden,'Escape retained the image layer');
+  reference.click();assert(doc.querySelector('#image-viewer').open,'posted path did not open the full image');
+  doc.querySelector('#image-viewer').dispatchEvent(new w.Event('cancel',{cancelable:true}));
+  assert(!doc.querySelector('#image-viewer').open&&doc.activeElement===reference,'Escape did not close the modal or restore focus');
 });
 document.title=failures?`FAIL (${failures}) softline browser checks`:'PASS softline browser checks';
 document.documentElement.dataset.checks=failures?'failed':'passed';
