@@ -44,7 +44,9 @@ struct demo_web_chat {
     char *text;
     unsigned long sequence;
     sl_queue_request_id_t backend_request;
-    int status, steer;
+    int status, steer, edit_phase;
+    char item[128], revision[128], token[128];
+    sl_prompt_queue_mode_t mode;
   } requests[128];
   struct {
     char view[65];
@@ -59,6 +61,7 @@ struct demo_web_chat {
   } queue[WEB_QUEUE_MAX];
   size_t queue_count, queue_build;
   int queue_changed;
+  unsigned long queue_serial;
 };
 static const char *field(const sl_www_request_t *r, const char *name) {
   const char *value = sl_www_field(r, name);
@@ -272,6 +275,12 @@ static int replay(void *context, void *peer, const char *after) {
   demo_www_peer_data(peer, v);
   f.value = w->session;
   (void)demo_www_reply(peer, "session", &f, 1);
+  {
+    sl_www_field_t capabilities[2] = {{"edit", NULL, 0}, {"terminal", NULL, 0}};
+    capabilities[0].value = w->ops.edit ? "1" : "0";
+    capabilities[1].value = getenv("SOFTLINE_WEB_TERMINAL_URL");
+    (void)demo_www_reply(peer, "capabilities", capabilities, 2);
+  }
   w->queue_changed = 1;
   demo_web_queue(w);
   {
@@ -455,6 +464,26 @@ static int complete(demo_web_chat_t *w, const sl_www_request_t *r) {
   free(prefix);
   return result;
 }
+static size_t queue_target(demo_web_chat_t *w, const char *id,
+                           const char *revision) {
+  size_t i, oldest = WEB_QUEUE_MAX;
+  for (i = 0; i < 128; ++i)
+    if (w->requests[i].backend_request && w->requests[i].steer == -1 &&
+        !strcmp(w->requests[i].item, id))
+      return WEB_QUEUE_MAX;
+  demo_web_queue(w);
+  for (i = 0; i < w->queue_count; ++i) {
+    if (w->queue[i].held && oldest == WEB_QUEUE_MAX)
+      oldest = i;
+    if (!strcmp(w->queue[i].id, id)) {
+      if (strcmp(w->queue[i].revision, revision) || w->queue[i].steer == 2 ||
+          (w->queue[i].held && i != oldest))
+        break;
+      return i;
+    }
+  }
+  return WEB_QUEUE_MAX;
+}
 static int action(void *context, const sl_www_request_t *r) {
   demo_web_chat_t *w = context;
   web_view_t *v = demo_www_peer_get(r->peer);
@@ -509,18 +538,22 @@ static int action(void *context, const sl_www_request_t *r) {
     v->ended = 1;
     return service_image(v);
   }
-  if (!strcmp(a, "send") || !strcmp(a, "steer")) {
+  if (!strcmp(a, "send") || !strcmp(a, "steer") || !strcmp(a, "edit")) {
     size_t i, actor;
     const char *view = field(r, "view"), *text = field(r, "text");
     unsigned long sequence;
     char *end;
-    int steer = !strcmp(a, "steer");
+    int editing = !strcmp(a, "edit"),
+        steer = editing ? -1 : !strcmp(a, "steer");
+    size_t target = WEB_QUEUE_MAX;
     errno = 0;
     sequence = strtoul(field(r, "request_seq"), &end, 10);
     if (!*request || strlen(request) > 64 || !*field(r, "text") ||
         strlen(field(r, "text")) > DEMO_PROMPT_MAX || !*view ||
         strlen(view) > 64 || errno || *end || !sequence ||
         *field(r, "request_seq") < '0' || *field(r, "request_seq") > '9')
+      goto report;
+    if (editing && (strlen(id) > 127 || strlen(field(r, "revision")) > 127))
       goto report;
     for (actor = 0; actor < 128; ++actor)
       if (!strcmp(w->actors[actor].view, view))
@@ -539,6 +572,9 @@ static int action(void *context, const sl_www_request_t *r) {
         result = !strcmp(w->requests[i].view, view) &&
                          w->requests[i].sequence == sequence &&
                          w->requests[i].steer == steer &&
+                         (!editing || (!strcmp(w->requests[i].item, id) &&
+                                       !strcmp(w->requests[i].revision,
+                                               field(r, "revision")))) &&
                          !strcmp(w->requests[i].text, text)
                      ? w->requests[i].status
                      : SL_ERROR_CONFLICT;
@@ -548,7 +584,15 @@ static int action(void *context, const sl_www_request_t *r) {
     if (i == 128 && sequence <= w->actors[actor].high)
       result = SL_ERROR_CONFLICT;
     else if (i == 128) {
-      char *copy = malloc(strlen(text) + 1);
+      char *copy;
+      if (editing) {
+        target = queue_target(w, id, field(r, "revision"));
+        if (!w->ops.edit || target == WEB_QUEUE_MAX) {
+          result = SL_ERROR_CONFLICT;
+          goto report;
+        }
+      }
+      copy = malloc(strlen(text) + 1);
       if (!copy) {
         result = SL_ERROR_NOMEM;
         goto report;
@@ -568,11 +612,19 @@ static int action(void *context, const sl_www_request_t *r) {
       }
       w->actors[actor].high = sequence;
       w->requests[w->next_request].backend_request = 0;
-      result =
-          w->ops.submit
-              ? w->ops.submit(w->context, text, steer,
-                              &w->requests[w->next_request].backend_request)
-              : SL_ERROR_INVALID;
+      if (editing) {
+        w->requests[w->next_request].mode = w->queue[target].steer
+                                                ? SL_PROMPT_QUEUE_MODE_STEER
+                                                : SL_PROMPT_QUEUE_MODE_QUEUED;
+        result = w->ops.edit(w->context, id, field(r, "revision"), text, NULL,
+                             w->requests[w->next_request].mode,
+                             &w->requests[w->next_request].backend_request);
+      } else
+        result =
+            w->ops.submit
+                ? w->ops.submit(w->context, text, steer,
+                                &w->requests[w->next_request].backend_request)
+                : SL_ERROR_INVALID;
       if (result != SL_OK)
         w->requests[w->next_request].backend_request = 0;
       deferred = w->requests[w->next_request].backend_request != 0;
@@ -581,17 +633,30 @@ static int action(void *context, const sl_www_request_t *r) {
       (void)snprintf(w->requests[w->next_request].view, 65, "%s", view);
       w->requests[w->next_request].sequence = sequence;
       w->requests[w->next_request].steer = steer;
+      w->requests[w->next_request].edit_phase = editing && deferred ? 1 : 0;
+      (void)snprintf(w->requests[w->next_request].item, 128, "%s",
+                     editing ? id : "");
+      (void)snprintf(w->requests[w->next_request].revision, 128, "%s",
+                     editing ? field(r, "revision") : "");
       w->requests[w->next_request].text = copy;
       w->requests[w->next_request].status = result;
       w->next_request = (w->next_request + 1) % 128;
     }
-  } else if (w->ops.control)
-    result = w->ops.control(w->context, a, id, field(r, "revision"));
+  } else if (w->ops.control) {
+    if ((!strcmp(a, "approve") || !strcmp(a, "reject")) &&
+        queue_target(w, id, field(r, "revision")) == WEB_QUEUE_MAX)
+      result = SL_ERROR_CONFLICT;
+    else
+      result = w->ops.control(w->context, a, id, field(r, "revision"));
+  }
 report:
   if (!deferred) {
     sl_www_field_t f[2] = {{"request", NULL, 0}, {"text", NULL, 0}};
     f[0].value = request;
-    f[1].value = result == SL_OK ? "" : "The host rejected this action.";
+    f[1].value = result == SL_OK ? ""
+                 : !strcmp(a, "edit")
+                     ? "The entry changed or was consumed. Your edit is kept."
+                     : "The host rejected this action.";
     (void)sl_www_emit(r->reply, r->reply_context,
                       result == SL_OK ? "accepted" : "error", NULL, f, 2);
   }
@@ -642,7 +707,6 @@ demo_web_chat_t *demo_web_open(sl_t *editor, const demo_web_ops_t *ops,
   const char *on = getenv("SOFTLINE_WEB"), *port = getenv("SOFTLINE_WEB_PORT");
   demo_web_chat_t *w;
   sl_www_config_t config;
-  struct timespec now;
   unsigned long number = default_port;
   char *end;
   *enabled = on && !strcmp(on, "1");
@@ -672,10 +736,6 @@ demo_web_chat_t *demo_web_open(sl_t *editor, const demo_web_ops_t *ops,
     errno = EINVAL;
     return NULL;
   }
-  (void)clock_gettime(CLOCK_REALTIME, &now);
-  (void)snprintf(w->session, sizeof(w->session), "%lu-%lu-%lu",
-                 (unsigned long)getpid(), (unsigned long)now.tv_sec,
-                 (unsigned long)now.tv_nsec);
   sl_www_config_init(&config);
   config.enabled = 1;
   config.action = action;
@@ -705,6 +765,7 @@ demo_web_chat_t *demo_web_open(sl_t *editor, const demo_web_ops_t *ops,
     demo_web_close(w);
     return NULL;
   }
+  (void)snprintf(w->session, sizeof(w->session), "%s", demo_www_epoch(w->www));
   return w;
 }
 void demo_web_close(demo_web_chat_t *w) {
@@ -738,6 +799,28 @@ void demo_web_result(demo_web_chat_t *w, const sl_queue_result_t *result) {
       sl_www_field_t fields[3] = {
           {"request", NULL, 0}, {"view", NULL, 0}, {"text", NULL, 0}};
       int ok = result->status == SL_QUEUE_ACCEPTED;
+      if (ok && w->requests[i].edit_phase == 1) {
+        sl_queue_request_id_t next = 0;
+        int status =
+            result->edit_token && result->item_revision
+                ? w->ops.edit(w->context, w->requests[i].item,
+                              result->item_revision, w->requests[i].text,
+                              result->edit_token, w->requests[i].mode, &next)
+                : SL_ERROR;
+        if (status == SL_OK && next) {
+          (void)snprintf(w->requests[i].token, 128, "%s", result->edit_token);
+          w->requests[i].edit_phase = 2;
+          w->requests[i].backend_request = next;
+          break;
+        }
+        ok = 0;
+      }
+      if (!ok && w->requests[i].edit_phase == 2 &&
+          result->status == SL_QUEUE_REJECTED) {
+        sl_queue_request_id_t ignored = 0;
+        (void)w->ops.edit(w->context, w->requests[i].item, NULL, NULL,
+                          w->requests[i].token, w->requests[i].mode, &ignored);
+      }
       fields[0].value = w->requests[i].id;
       fields[1].value = w->requests[i].view;
       fields[2].value =
@@ -749,7 +832,8 @@ void demo_web_result(demo_web_chat_t *w, const sl_queue_result_t *result) {
               ? result->reason
               : "The backend rejected the prompt.";
       (void)demo_www_publish(w->www, ok ? "accepted" : "error", fields, 3);
-      w->requests[i].backend_request = 0;
+      if (result->status != SL_QUEUE_UNKNOWN)
+        w->requests[i].backend_request = 0;
       w->requests[i].status = ok ? SL_OK : SL_ERROR;
       break;
     }
@@ -787,7 +871,8 @@ void demo_web_queue_entry(demo_web_chat_t *w, const char *id,
     return;
   i = w->queue_build++;
   if (w->queue[i].text && !strcmp(w->queue[i].text, text) &&
-      !strcmp(w->queue[i].id, id) && !strcmp(w->queue[i].revision, revision) &&
+      !strcmp(w->queue[i].id, id) &&
+      (!*revision || !strcmp(w->queue[i].revision, revision)) &&
       w->queue[i].steer == steer && w->queue[i].held == held)
     return;
   copy = malloc(strlen(text) + 1);
@@ -797,7 +882,10 @@ void demo_web_queue_entry(demo_web_chat_t *w, const char *id,
   free(w->queue[i].text);
   w->queue[i].text = copy;
   strcpy(w->queue[i].id, id);
-  strcpy(w->queue[i].revision, revision);
+  if (*revision)
+    strcpy(w->queue[i].revision, revision);
+  else
+    (void)snprintf(w->queue[i].revision, 128, "local-%lu", ++w->queue_serial);
   w->queue[i].steer = steer;
   w->queue[i].held = held;
   w->queue_changed = 1;
@@ -868,7 +956,7 @@ void demo_web_queue(demo_web_chat_t *w) {
   if (!w->editor)
     return;
   demo_web_queue_begin(w);
-  if (sl_queue_backend_info(w->editor, &backend) == SL_OK) {
+  if (sl_queue_backend_info(w->editor, &backend) == SL_OK && backend.enabled) {
     for (i = 0; i < backend.visible_count; ++i) {
       sl_queue_entry_t e;
       if (sl_queue_backend_entry(w->editor, i, &e) == SL_OK)

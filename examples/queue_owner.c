@@ -77,6 +77,7 @@ static int web_control(void *, const char *, const char *, const char *);
 static void web_snapshot(void *, demo_web_chat_t *);
 static volatile sig_atomic_t quitting;
 static volatile sig_atomic_t producer_paused;
+static int completion_fd = -1;
 /* Optional deterministic fixture control: queue service remains live while
  * response production is paused, just like the local demo's child producer. */
 static void pause_producer(int signum) { producer_paused = signum == SIGUSR1; }
@@ -606,6 +607,44 @@ static void web_snapshot(void *context, demo_web_chat_t *web) {
   }
   demo_web_queue_end(web);
 }
+static int web_edit(void *context, const char *id, const char *revision,
+                    const char *text, const char *token,
+                    sl_prompt_queue_mode_t mode, sl_queue_request_id_t *out) {
+  owner_t *o = context;
+  sl_queue_request_t r;
+  size_t i;
+  int status;
+  (void)token;
+  (void)out;
+  if (is_shell_command(text) || !strcmp(text, "/quit"))
+    return SL_ERROR_UNSUPPORTED;
+  for (i = 0; i < o->count; ++i)
+    if (!strcmp(o->items[i].id, id) && o->items[i].value.edit_held)
+      return SL_ERROR_CONFLICT;
+  memset(&r, 0, sizeof(r));
+  r.operation = SL_QUEUE_BEGIN_EDIT;
+  r.item_id = id;
+  r.item_revision = revision;
+  status = web_request(o, &r);
+  if (status != SL_OK)
+    return status;
+  for (i = 0; i < o->count && strcmp(o->items[i].id, id); ++i) {
+  }
+  if (i == o->count)
+    return SL_ERROR_CONFLICT;
+  r.operation = SL_QUEUE_END_EDIT;
+  r.item_revision = o->items[i].revision;
+  r.edit_token = o->items[i].token;
+  r.mode = mode;
+  r.text = text;
+  status = web_request(o, &r);
+  if (status != SL_OK) {
+    r.operation = SL_QUEUE_ABORT_EDIT;
+    r.text = NULL;
+    (void)web_request(o, &r);
+  }
+  return status;
+}
 static void hello(owner_t *o, const char *name, unsigned long delay_us,
                   unsigned long request_high, int approvals,
                   unsigned long interval_ms, unsigned int seed) {
@@ -891,6 +930,10 @@ static void pump(owner_t *o, double now) {
         used = 0;
       }
       o->active = 0;
+      if (completion_fd >= 0) {
+        ssize_t notified = write(completion_fd, "\n", 1);
+        (void)notified;
+      }
       text_event(o, DEMO_OUTPUT_END, NULL);
       if (o->shell_requested)
         handoff_shell(o, NULL);
@@ -930,6 +973,15 @@ int main(int argc, char **argv) {
   o->revision = 1;
   o->delay_us = 20000;
   o->gate_fd = -1;
+  if (getenv("SOFTLINE_CHAT_TEST_COMPLETION_FD")) {
+    const char *value = getenv("SOFTLINE_CHAT_TEST_COMPLETION_FD");
+    long fd = strtol(value, &end, 10);
+    if (!*value || *end || fd < 3 || fd > INT_MAX || demo_nonblock((int)fd)) {
+      free(o);
+      return 1;
+    }
+    completion_fd = (int)fd;
+  }
   o->stall_hello_once = getenv("SOFTLINE_CHAT_TEST_STALL_HELLO") != NULL;
   o->input_empty = 1;
   (void)snprintf(o->web_client.name, sizeof(o->web_client.name), "web");
@@ -984,6 +1036,7 @@ int main(int argc, char **argv) {
     memset(&ops, 0, sizeof(ops));
     ops.submit = web_submit;
     ops.control = web_control;
+    ops.edit = web_edit;
     ops.snapshot = web_snapshot;
     o->web = demo_web_open(NULL, &ops, o, 8081, &enabled);
     if (enabled && !o->web) {

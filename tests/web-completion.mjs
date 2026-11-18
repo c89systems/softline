@@ -7,7 +7,7 @@ export async function runWebCompletionTests(source, completionSource, promptSour
     constructor() { this.listeners = new Map(); }
     addEventListener(name, fn) { const list = this.listeners.get(name) || []; list.push(fn); this.listeners.set(name, list); }
     fire(name, fields = {}) {
-      const event = { target: this, key: '', altKey: false, shiftKey: false, ctrlKey: false, isComposing: false, defaultPrevented: false, preventDefault() { this.defaultPrevented = true; }, stopImmediatePropagation() { this.stopped = true; }, ...fields };
+      const event = { target: this, key: '', altKey: false, shiftKey: false, ctrlKey: false, metaKey: false, isComposing: false, defaultPrevented: false, preventDefault() { this.defaultPrevented = true; }, stopImmediatePropagation() { this.stopped = true; }, ...fields };
       for (const fn of this.listeners.get(name) || []) { fn(event); if (event.stopped) break; }
       return event;
     }
@@ -74,7 +74,8 @@ export async function runWebCompletionTests(source, completionSource, promptSour
   async function boot(options = {}) {
     const elements = new Map(), timers = new Map();
     let serial = 0, socket, previews;
-    const document = new Target(), window = new Target(), revoked = [], blobs = [], copiedImages = [], clipboardCalls = [], canvases = [], decoded = [], pendingDecodes = [];
+    const document = new Target(), window = new Target(), revoked = [], blobs = [], copiedImages = [], clipboardCalls = [], canvases = [], decoded = [], pendingDecodes = [], opened = [];
+    window.open = (...args) => opened.push(args);
     window.innerWidth = 1024; window.innerHeight = 768;
     document.getElementById = id => {
       if (!elements.has(id)) { const element = new Element(); element.id = id; element.ownerDocument = document; elements.set(id, element); }
@@ -115,7 +116,7 @@ export async function runWebCompletionTests(source, completionSource, promptSour
     }
     class Socket extends Target {
       static OPEN = 1;
-      constructor() { super(); this.readyState = 1; this.sent = []; this.binary = []; socket = this; }
+      constructor(url) { super(); this.url = url; this.readyState = 1; this.sent = []; this.binary = []; socket = this; }
       send(frame) {
         if (typeof frame !== 'string') { this.binary.push(frame); return; }
         const query = new Params(frame); this.sent.push(query);
@@ -160,6 +161,7 @@ export async function runWebCompletionTests(source, completionSource, promptSour
     const AsyncFunction = Object.getPrototypeOf(async function() {}).constructor;
     await new AsyncFunction(...Object.keys(env), stripImports(source))(...Object.values(env));
     socket.fire('open');
+    event({ type: 'session', id: 'initial' });
     for (const [, trigger, scope, strip, expand] of policies) event({ type: 'completion_provider', trigger, scope, strip, expand });
     const prompt = get('prompt');
     function input(text, inputType = 'insertText') {
@@ -172,6 +174,14 @@ export async function runWebCompletionTests(source, completionSource, promptSour
     function key(key, fields = {}) {
       const e = prompt.fire('keydown', { key, ...fields });
       if (!e.defaultPrevented) {
+        if (['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(key) && !fields.shiftKey) {
+          const start = prompt.selectionStart, end = prompt.selectionEnd, text = prompt.value;
+          let at = start;
+          if (key === 'Home' || (fields.metaKey && key === 'ArrowLeft')) at = text.lastIndexOf('\n', start - 1) + 1;
+          else if (key === 'End' || (fields.metaKey && key === 'ArrowRight')) { const next = text.indexOf('\n', end); at = next < 0 ? text.length : next; }
+          else if (!fields.ctrlKey && !fields.altKey) at = key === 'ArrowLeft' ? start !== end ? start : Math.max(0, start - 1) : start !== end ? end : Math.min(text.length, end + 1);
+          prompt.setSelectionRange(at, at);
+        }
         if (key === ' ' || (key === 'Enter' && fields.shiftKey)) input(key === ' ' ? ' ' : '\n');
         if (key === 'Backspace' || key === 'Delete') {
           const start = prompt.selectionStart, end = prompt.selectionEnd, backward = key === 'Backspace';
@@ -181,6 +191,7 @@ export async function runWebCompletionTests(source, completionSource, promptSour
         }
       }
       prompt.fire('keyup', { key, ...fields });
+      return e;
     }
     async function idle() { for (let i = 0; i < 150; ++i) await Promise.resolve(); }
     async function type(text) { for (const c of text) { input(c); await idle(); } }
@@ -204,7 +215,8 @@ export async function runWebCompletionTests(source, completionSource, promptSour
       event({ type: 'image_done', id, path }); await idle();
       return { id, url, file: get('image-input').files[0] };
     }
-    const ui = { get, prompt, input, type, key, idle, queries, reply, event, sent, socket, document, window, revoked, blobs, upload, previews,
+    const ui = { get, prompt, input, type, key, idle, queries, reply, event, sent, socket, document, window, revoked, blobs, upload, previews, opened,
+      socketURL: () => socket.url,
       copiedImages, clipboardCalls, canvases, decoded, finishDecode: () => pendingDecodes.shift()?.(),
       form: () => get('composer').fire('submit'), ghost: () => get('completion-ghost').textContent || '',
       timeout: delay => { for (const [id, timer] of [...timers]) if (timer.delay === delay) { timers.delete(id); timer.fn(); } } };
@@ -216,6 +228,166 @@ export async function runWebCompletionTests(source, completionSource, promptSour
     catch (error) { throw new Error(name + ': ' + error.message); }
     checks.push(name);
   }
+  function queueState(ui, entries) {
+    ui.event({ type: 'queue_begin' });
+    for (const item of entries) ui.event({ type: 'queue_item', mode: 'queued', held: '1', text: 'Approval text', ...item });
+    ui.event({ type: 'queue_end' });
+  }
+  const shortcut = (ui, action, extra = {}) => ui.key({ approvals: '!', approve: '@', reject: '#', edit: 'Enter', terminal: '`' }[action],
+    { ctrlKey: true, shiftKey: action !== 'terminal', code: { approvals: 'Digit1', approve: 'Digit2', reject: 'Digit3', edit: 'Enter', terminal: 'Backquote' }[action], ...extra });
+  await check('native navigation collapses selections and preserves platform modifiers', async ui => {
+    await ui.type('abcdefghij');
+    ui.prompt.setSelectionRange(2, 7);
+    assert(!ui.key('ArrowRight').defaultPrevented && ui.prompt.selectionStart === 7, 'Right did not use native selection collapse');
+    ui.prompt.setSelectionRange(2, 7);
+    assert(!ui.key('ArrowLeft').defaultPrevented && ui.prompt.selectionStart === 2, 'Left did not use native selection collapse');
+    assert(!ui.key('ArrowLeft', { metaKey: true }).defaultPrevented && ui.prompt.selectionStart === 0, 'Cmd+Left was intercepted');
+    assert(!ui.key('ArrowRight', { ctrlKey: true }).defaultPrevented, 'native word navigation was intercepted');
+    assert(!ui.key('ArrowRight', { shiftKey: true }).defaultPrevented, 'native selection extension was intercepted');
+  });
+  for (const type of ['deleteByCut', 'deleteWordBackward', 'historyUndo']) await check(type + ' remains native during pending completion', async ui => {
+    ui.input('@l'); ui.key('Tab');
+    ui.prompt.setSelectionRange(0, 2);
+    const event = ui.prompt.fire('beforeinput', { inputType: type, cancelable: true });
+    assert(!event.defaultPrevented, 'unreplayable edit was swallowed');
+    ui.prompt.setRangeText('', 0, 2, 'end'); ui.prompt.fire('input', { inputType: type });
+    ui.reply(ui.queries()[0]); await ui.idle();
+    assert(ui.prompt.value === '' && !ui.ghost(), 'late completion overwrote native deletion');
+  }, { manual: true });
+  await check('approval shortcuts require focus, retain FIFO order and ignore repeat', async ui => {
+    queueState(ui, [{ id: 'a', revision: '1' }, { id: 'b', revision: '2' }]);
+    shortcut(ui, 'approve');
+    assert(!ui.socket.sent.some(frame => frame.get('action') === 'approve'), 'unfocused request was approved');
+    shortcut(ui, 'approvals');
+    assert(ui.document.activeElement?.dataset.id === 'a', 'oldest approval did not receive focus');
+    shortcut(ui, 'approve', { repeat: true });
+    assert(!ui.socket.sent.some(frame => frame.get('action') === 'approve'), 'key repeat approved a request');
+    shortcut(ui, 'approve');
+    const approved = ui.socket.sent.filter(frame => frame.get('action') === 'approve');
+    assert(approved.length === 1 && approved[0].get('id') === 'a' && approved[0].get('revision') === '1', 'approval lost its identity/revision');
+    shortcut(ui, 'reject');
+    assert(!ui.socket.sent.some(frame => frame.get('action') === 'reject'), 'decision retained focus for another action');
+    shortcut(ui, 'approvals'); ui.key('Escape'); shortcut(ui, 'reject');
+    assert(!ui.socket.sent.some(frame => frame.get('action') === 'reject'), 'Escape retained approval focus');
+    shortcut(ui, 'approvals'); queueState(ui, [{ id: 'a', revision: '3' }]); shortcut(ui, 'approve');
+    assert(ui.socket.sent.filter(frame => frame.get('action') === 'approve').length === 1, 'stale focus approved a changed request');
+  });
+  await check('approval focus survives unrelated queue redraws and returns to prompt after invalidation', async ui => {
+    queueState(ui, [{ id: 'a', revision: '1' }]); shortcut(ui, 'approvals');
+    queueState(ui, [{ id: 'a', revision: '1' }, { id: 'b', revision: '2' }]);
+    assert(ui.document.activeElement === ui.get('queue').children[0], 'redraw left keyboard focus on a detached row');
+    queueState(ui, [{ id: 'a', revision: 'changed' }]);
+    assert(ui.document.activeElement === ui.prompt, 'changed approval retained unsafe focus');
+  });
+  await check('Ctrl+Right remains native with an active completion', async ui => {
+    await ui.type('@l');
+    assert(!ui.key('ArrowRight', { ctrlKey: true }).defaultPrevented, 'word navigation accepted a ghost');
+    await ui.idle(); assert(ui.prompt.value === '@l', 'word navigation inserted a completion');
+  });
+  await check('paste without replayable text stays native during pending completion', async ui => {
+    ui.input('@l'); ui.key('Tab');
+    const before = ui.prompt.fire('beforeinput', { inputType: 'insertFromPaste', data: null, cancelable: true });
+    assert(!before.defaultPrevented, 'paste was cancelled without available text');
+    ui.prompt.setRangeText(' pasted', ui.prompt.selectionStart, ui.prompt.selectionEnd, 'end');
+    ui.prompt.fire('input', { inputType: 'insertFromPaste' });
+    ui.reply(ui.queries()[0]); await ui.idle();
+    assert(ui.prompt.value === 'l pasted', 'pending completion lost native pasted text');
+  }, { manual: true });
+  await check('approval buttons are Approve Edit Reject and edit preserves the independent draft', async ui => {
+    ui.event({ type: 'capabilities', edit: '1' });
+    await ui.type('independent unsent draft');
+    queueState(ui, [{ id: 'a', revision: '1' }, { id: 'b', revision: '2' }]);
+    const rows = ui.get('queue').children;
+    assert(rows[0].children.slice(2).map(button => button.textContent).join(',') === 'Approve,Edit,Reject', 'approval actions have the wrong order');
+    assert(rows[1].children.slice(2).every(button => button.disabled), 'later approval actions bypass FIFO');
+    rows[0].children[3].click();
+    assert(ui.get('queue-editor').open && ui.get('queue-edit-text').value === 'Approval text', 'Edit did not open the separate editor');
+    ui.get('queue-edit-text').value = 'changed approval'; ui.get('queue-edit-form').fire('submit');
+    const request = ui.socket.sent.filter(frame => frame.get('action') === 'edit').at(-1);
+    assert(request?.get('id') === 'a' && request.get('revision') === '1' && request.get('text') === 'changed approval', 'edit lost queue identity/revision');
+    assert(ui.prompt.value === 'independent unsent draft', 'queue edit overwrote prompt');
+    ui.event({ type: 'error', request: request.get('request'), text: 'Entry changed' });
+    assert(ui.get('queue-editor').open && ui.get('queue-edit-text').value === 'changed approval' && !ui.get('queue-edit-save').disabled, 'conflict discarded edit or prevented retry');
+    ui.get('queue-edit-form').fire('submit');
+    const retry = ui.socket.sent.filter(frame => frame.get('action') === 'edit').at(-1);
+    ui.event({ type: 'accepted', request: retry.get('request') });
+    assert(!ui.get('queue-editor').open && ui.prompt.value === 'independent unsent draft', 'successful edit lost independent draft');
+  });
+  await check('plus actions expose shortcuts and terminal is enabled only by the host', async ui => {
+    ui.get('plus').click(); await ui.idle();
+    let items = ui.get('completions').children;
+    assert(items.some(item => item.textContent.includes('Focus approvals') && item.textContent.includes('Ctrl+Shift+1')), 'approval shortcut is undiscoverable');
+    assert(items.find(item => item.textContent.includes('Open terminal')).disabled, 'unavailable terminal was enabled');
+    shortcut(ui, 'terminal'); assert(!ui.opened.length, 'terminal launched without host support');
+    ui.event({ type: 'capabilities', edit: '1', terminal: '/terminal' });
+    shortcut(ui, 'terminal'); assert(ui.opened[0]?.[0] === '/terminal' && ui.opened[0][2].includes('noopener'), 'terminal did not use the host endpoint');
+    queueState(ui, [{ id: 'a', revision: '1', held: '0' }]);
+    shortcut(ui, 'edit'); assert(ui.get('queue-editor').open, 'edit shortcut did not open newest entry');
+    ui.get('queue-edit-cancel').click();
+    ui.get('plus').click(); await ui.idle();
+    ui.get('completions').children.find(item => item.textContent.includes('Edit queued message')).click();
+    assert(ui.get('queue-editor').open, '+ action and keyboard binding differ');
+  });
+  await check('approval menu actions and reject shortcut use the same focused identity', async ui => {
+    queueState(ui, [{ id: 'a', revision: '1' }]);
+    ui.get('plus').click(); await ui.idle();
+    ui.get('completions').children.find(item => item.textContent.includes('Focus approvals')).click();
+    ui.get('plus').click(); await ui.idle();
+    ui.get('completions').children.find(item => item.textContent.includes('Approve focused request')).click();
+    assert(ui.socket.sent.some(frame => frame.get('action') === 'approve' && frame.get('id') === 'a'), 'menu approval did not dispatch');
+    shortcut(ui, 'approvals'); shortcut(ui, 'reject');
+    assert(ui.socket.sent.some(frame => frame.get('action') === 'reject' && frame.get('id') === 'a' && frame.get('revision') === '1'), 'reject shortcut lost focused identity');
+  });
+  await check('approval actions do not wait for completion and survive provider failure', async ui => {
+    queueState(ui, [{ id: 'a', revision: '1' }]);
+    ui.input('@l'); ui.key('Tab'); ui.get('plus').click();
+    ui.get('completions').children.find(item => item.textContent.includes('Focus approvals')).click();
+    shortcut(ui, 'approve');
+    assert(ui.socket.sent.some(frame => frame.get('action') === 'approve'), 'completion blocked approval');
+    ui.get('plus').click();
+    const menu = ui.queries().findLast(query => query.get('all') === '1');
+    ui.reply(menu, [], 'error');
+    assert(!ui.get('completions').hidden && ui.get('completions').textContent.includes('Focus approvals'), 'provider failure hid host actions');
+    ui.reply(ui.queries()[0]); await ui.idle();
+  }, { manual: true });
+  await check('terminal host paths cannot open an external origin', async ui => {
+    for (const terminal of ['//external.test/terminal', '/\\external.test/terminal', 'https://external.test/terminal', '/terminal\n']) {
+      ui.event({ type: 'capabilities', terminal }); shortcut(ui, 'terminal');
+    }
+    assert(!ui.opened.length, 'unvalidated terminal path opened');
+  });
+  await check('reconnect actions wait for session synchronization', async ui => {
+    await ui.type('draft'); ui.socket.close(); ui.timeout(1000);
+    ui.key('Enter'); await ui.idle();
+    assert(ui.prompt.value === 'draft', 'unsynchronized connection consumed draft');
+    ui.event({ type: 'session', id: 'initial' }); ui.key('Enter'); await ui.idle();
+    assert(ui.sent() === 'draft', 'synchronized connection could not submit');
+  });
+  await check('host epoch changes reset conversation IDs, queue and reasoning while retaining the draft', async ui => {
+    ui.event({ type: 'session', id: 'old' }); await ui.type('keep this draft');
+    ui.event({ type: 'delta', id: 'm1', role: 'user', text: 'old conversation', seq: 'old.20' });
+    queueState(ui, [{ id: 'old-approval', revision: '1' }]);
+    ui.event({ type: 'status', busy: '1', text: 'old reasoning' });
+    ui.socket.close(); ui.timeout(1000);
+    assert(ui.socketURL().searchParams.get('after') === 'old.20', 'reconnect lost epoch-bound cursor');
+    ui.event({ type: 'session', id: 'new' });
+    assert(!ui.get('messages').children.length && ui.get('queue').hidden && !ui.get('activity').textContent, 'new epoch retained old conversation state');
+    ui.event({ type: 'delta', id: 'm1', role: 'user', text: 'new conversation' });
+    assert(ui.get('messages').textContent === 'new conversation' && ui.prompt.value === 'keep this draft', 'reused message ID merged sessions or draft was lost');
+  });
+  await check('host restart invalidates an open edit target even when queue IDs are reused', async ui => {
+    ui.event({ type: 'capabilities', edit: '1' });
+    queueState(ui, [{ id: 'a', revision: '1' }]); shortcut(ui, 'edit');
+    ui.get('queue-edit-text').value = 'keep this edited text';
+    ui.event({ type: 'session', id: 'restarted' });
+    ui.event({ type: 'capabilities', edit: '1' });
+    queueState(ui, [{ id: 'a', revision: '1', text: 'unrelated new request' }]);
+    ui.get('queue-edit-form').fire('submit');
+    assert(!ui.socket.sent.some(frame => frame.get('action') === 'edit'), 'old edit was applied to a new conversation');
+    assert(ui.get('queue-editor').open && ui.get('queue-edit-text').value === 'keep this edited text' && ui.get('queue-edit-save').disabled, 'restart discarded edit text or left stale saving enabled');
+    ui.get('queue-edit-cancel').click(); shortcut(ui, 'edit');
+    assert(ui.get('queue-edit-text').value === 'unrelated new request' && !ui.get('queue-edit-save').disabled, 'new session could not start a deliberate edit');
+  });
   for (const [, name, script, expected] of rows.filter(row => row[0] === 'case')) {
     await check('native parity: ' + name, async ui => {
       for (const token of script.match(/<[^>]+>|[^<]/gu)) {

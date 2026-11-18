@@ -15,6 +15,7 @@
 #include <string.h>
 #include <strings.h>
 #include <sys/socket.h>
+#include <time.h>
 #include <unistd.h>
 
 #define PEERS 8
@@ -60,8 +61,10 @@ struct demo_www {
   record_t *head, *tail;
   size_t log_bytes, log_events;
   unsigned long sequence;
+  char epoch[96];
   int publishing_state;
 };
+const char *demo_www_epoch(const demo_www_t *w) { return w->epoch; }
 static int nonblock(int fd) {
   int flags = fcntl(fd, F_GETFL, 0);
   return flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0 ||
@@ -260,10 +263,12 @@ static int replay(void *context, void *peer, const char *after) {
   record_t *r;
   unsigned long seq = 0;
   char *end;
-  if (after && *after) {
+  if (after && !strncmp(after, w->epoch, strlen(w->epoch)) &&
+      after[strlen(w->epoch)] == '.') {
+    const char *number = after + strlen(w->epoch) + 1;
     errno = 0;
-    seq = strtoul(after, &end, 10);
-    if (errno || *end)
+    seq = strtoul(number, &end, 10);
+    if (errno || *end || *number < '0' || *number > '9')
       seq = 0;
   }
   if (!seq || (w->head && seq < w->head->seq - 1) || seq > w->sequence) {
@@ -280,7 +285,9 @@ static int replay(void *context, void *peer, const char *after) {
   p->replay_before = w->sequence;
   while (p->cursor && p->cursor->state && p->cursor->seq <= p->replay_before)
     p->cursor = p->cursor->next;
-  return w->host.replay ? w->host.replay(w->host.context, peer, after) : SL_OK;
+  return w->host.replay
+             ? w->host.replay(w->host.context, peer, seq ? after : "")
+             : SL_OK;
 }
 static int action(void *context, const sl_www_request_t *r) {
   demo_www_t *w = context;
@@ -629,12 +636,20 @@ demo_www_t *demo_www_open(const sl_www_config_t *config, unsigned short port,
   socklen_t length = sizeof(address);
   sl_www_config_t adapted;
   int reuse = 1;
+  struct timespec now;
   size_t i;
   if (!w || !config) {
     free(w);
     return NULL;
   }
   w->listener = -1;
+  if (clock_gettime(CLOCK_REALTIME, &now)) {
+    free(w);
+    return NULL;
+  }
+  (void)snprintf(w->epoch, sizeof(w->epoch), "%lu-%lu-%lu",
+                 (unsigned long)getpid(), (unsigned long)now.tv_sec,
+                 (unsigned long)now.tv_nsec);
   w->host = *config;
   w->closed = closed;
   for (i = 0; i < PEERS; ++i)
@@ -747,12 +762,12 @@ static int save_record(void *context, const void *data, size_t length) {
 }
 int demo_www_publish(demo_www_t *w, const char *type,
                      const sl_www_field_t *fields, size_t count) {
-  char seq[32];
+  char seq[128];
   if (!w)
     return SL_OK;
   if (w->sequence == ULONG_MAX)
     return SL_ERROR_FULL;
-  (void)snprintf(seq, sizeof(seq), "%lu", ++w->sequence);
+  (void)snprintf(seq, sizeof(seq), "%s.%lu", w->epoch, ++w->sequence);
   w->publishing_state =
       type && (!strncmp(type, "queue_", 6) || !strcmp(type, "status"));
   return sl_www_emit(save_record, w, type, seq, fields, count);

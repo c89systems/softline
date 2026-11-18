@@ -8,6 +8,12 @@ typedef struct demo_web_ops {
   int (*submit)(void *, const char *, int steer, sl_queue_request_id_t *);
   int (*control)(void *, const char *action, const char *id,
                  const char *revision);
+  /* Optimistic replacement. Remote adapters acquire/release an edit token
+   * during save; token==NULL begins, non-NULL commits the same identity.
+   * With a token and text==NULL, abort the acquired hold. */
+  int (*edit)(void *, const char *id, const char *revision, const char *text,
+              const char *token, sl_prompt_queue_mode_t,
+              sl_queue_request_id_t *);
   int (*image)(void *, sl_t *source, const sl_image_paste_event_t *);
   void (*snapshot)(void *, demo_web_chat_t *);
 } demo_web_ops_t;

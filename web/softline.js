@@ -12,7 +12,8 @@ const state = { socket: null, online: false, follow: true, messages: new Map(),
   queue: new Map(), seq: '', upload: null,
   view: randomId(), generation: 0, imageLimit: 32 * 1024 * 1024,
   queueDelay: 500, queueTimer: null, pending: new Map(), failed: [], epoch: null,
-  images: true, attachments: [], requestSeq: 0 };
+  images: true, attachments: [], requestSeq: 0, approval: null, edit: null,
+  editPending: null, canEdit: false, terminal: '' };
 const icon = () => $('copy-icon').content.cloneNode(true);
 let toastTimer;
 function toast(text) { $('toast').textContent = text; $('toast').hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => { $('toast').hidden = true; }, 3500); }
@@ -72,22 +73,98 @@ function message(id, role = 'assistant') {
 }
 function queue() {
   clearTimeout(state.queueTimer);
+  const restoreFocus = $('queue').contains(document.activeElement);
+  const focused = state.approval && state.queue.get(state.approval.id);
+  if (!focused || focused.revision !== state.approval.revision || focused.held !== '1') state.approval = null;
   $('queue').replaceChildren();
+  const oldest = [...state.queue.values()].find(item => item.held === '1');
+  if (state.approval?.id !== oldest?.id) state.approval = null;
   let due = Infinity;
   for (const item of state.queue.values()) {
     if (item.held !== '1' && item.visibleAt > performance.now()) { due = Math.min(due, item.visibleAt); continue; }
     const row = document.createElement('div'), label = document.createElement('b'), text = document.createElement('span');
-    row.className = 'queue-item'; label.className = 'queue-badge';
+    row.className = `queue-item${state.approval?.id === item.id ? ' approval-focused' : ''}`; label.className = 'queue-badge';
+    row.tabIndex = -1;
+    row.dataset.id = item.id;
+    row.addEventListener('keydown', event => editor.key(event));
     label.textContent = item.held === '1' ? 'A' : item.mode === 'steer' ? 'S' : item.mode === 'pending' ? 'P' : 'Q';
     text.textContent = item.text; row.append(label, text);
-    if (item.held === '1') for (const action of ['approve', 'reject']) {
-      const button = document.createElement('button'); button.textContent = action === 'approve' ? 'Approve' : 'Reject';
-      button.addEventListener('click', () => send(action, { id: item.id, revision: item.revision })); row.append(button);
+    for (const action of item.held === '1' ? ['approve', 'edit', 'reject'] : ['edit']) {
+      if (action === 'edit' && !state.canEdit) continue;
+      const button = document.createElement('button'); button.type = 'button'; button.textContent = { approve: 'Approve', edit: 'Edit', reject: 'Reject' }[action];
+      button.disabled = !state.online || item.mode === 'pending' || (item.held === '1' && oldest !== item);
+      button.addEventListener('click', () => action === 'edit' ? editQueue(item) : decide(action, item)); row.append(button);
     }
     $('queue').append(row);
   }
   $('queue').hidden = !$('queue').childElementCount;
+  if (restoreFocus) {
+    const row = state.approval && [...$('queue').children].find(item => item.dataset.id === state.approval.id);
+    (row || prompt).focus();
+  }
   if (Number.isFinite(due)) state.queueTimer = setTimeout(queue, Math.max(0, due - performance.now()));
+  editor?.showMenu();
+}
+function decide(action, item) {
+  const oldest = [...state.queue.values()].find(candidate => candidate.held === '1');
+  if (!item || item !== oldest) { toast('Focus the oldest approval first.'); return; }
+  if (send(action, { id: item.id, revision: item.revision })) { state.approval = null; queue(); prompt.focus(); }
+}
+function editQueue(item) {
+  if (!state.canEdit || !state.online || !item || item.mode === 'pending') { toast('No editable queued message is available.'); return; }
+  if (state.edit) { $('queue-editor').showModal(); $('queue-edit-text').focus(); return; }
+  state.edit = { id: item.id, revision: item.revision };
+  $('queue-edit-save').disabled = $('queue-edit-cancel').disabled = $('queue-edit-text').disabled = false;
+  $('queue-edit-text').value = item.text; $('queue-edit-error').textContent = '';
+  $('queue-editor').showModal(); $('queue-edit-text').focus();
+}
+function actionItems() {
+  const oldest = [...state.queue.values()].find(item => item.held === '1');
+  const focused = state.approval && state.queue.get(state.approval.id);
+  return [
+    { id: 'terminal', label: 'Open terminal', description: state.terminal ? 'Ctrl+`' : 'Ctrl+` · host terminal unavailable', disabled: !state.online || !state.terminal },
+    { id: 'edit', label: 'Edit queued message', description: 'Ctrl+Shift+Enter', disabled: !state.online || !state.canEdit || ![...state.queue.values()].some(item => item.mode !== 'pending') },
+    { id: 'approvals', label: 'Focus approvals', description: 'Ctrl+Shift+1', disabled: !oldest },
+    { id: 'approve', label: 'Approve focused request', description: 'Ctrl+Shift+2', disabled: !state.online || !focused },
+    { id: 'reject', label: 'Reject focused request', description: 'Ctrl+Shift+3', disabled: !state.online || !focused }
+  ];
+}
+function promptAction(action) {
+  if (action === 'approvals') {
+    const item = [...state.queue.values()].find(candidate => candidate.held === '1');
+    if (!item) { toast('No approvals are waiting.'); return; }
+    state.approval = { id: item.id, revision: item.revision }; queue();
+    [...$('queue').children].find(row => row.dataset.id === item.id)?.focus();
+  } else if (action === 'approve' || action === 'reject') {
+    decide(action, state.approval && state.queue.get(state.approval.id));
+  } else if (action === 'edit') {
+    editQueue(state.approval ? state.queue.get(state.approval.id) : [...state.queue.values()].filter(item => item.mode !== 'pending').at(-1));
+  } else if (action === 'terminal') {
+    if (state.online && state.terminal) window.open(state.terminal, '_blank', 'noopener,noreferrer');
+    else toast('The host has not enabled a browser terminal.');
+  }
+}
+$('queue-edit-cancel').addEventListener('click', () => { if (!state.editPending) $('queue-editor').close(); });
+$('queue-editor').addEventListener('cancel', event => { if (state.editPending) event.preventDefault(); });
+$('queue-editor').addEventListener('close', () => { state.edit = null; prompt.focus(); });
+$('queue-edit-form').addEventListener('submit', event => {
+  event.preventDefault();
+  if (!state.edit || state.editPending) return;
+  const text = $('queue-edit-text').value;
+  if (!text.trim() || new TextEncoder().encode(text).length > 128 * 1024) { $('queue-edit-error').textContent = 'Use nonempty text within 128 KiB.'; return; }
+  const request = randomId(), fields = { ...state.edit, text, request, request_seq: ++state.requestSeq };
+  if (send('edit', fields)) {
+    state.editPending = request; state.pending.set(request, { action: 'edit', fields, text });
+    $('queue-edit-save').disabled = $('queue-edit-cancel').disabled = $('queue-edit-text').disabled = true;
+    $('queue-edit-error').textContent = 'Saving…';
+  }
+});
+function editResult(request, error) {
+  if (request !== state.editPending) return;
+  state.editPending = null;
+  $('queue-edit-save').disabled = $('queue-edit-cancel').disabled = $('queue-edit-text').disabled = false;
+  if (error) $('queue-edit-error').textContent = error;
+  else $('queue-editor').close();
 }
 // Keep in-flight image insertion points attached to edits, including the
 // syntax-only removal of a completion trigger at the same insertion point.
@@ -109,6 +186,7 @@ function adjustAnchor(before, after, syntax) {
 }
 const editor = new Prompt({
   document, send, mutate: adjustAnchor, resize: resizePrompt, toast, submit,
+  actions: actionItems, action: promptAction,
   images: () => state.images, recovery: () => state.failed,
   recovered: item => { state.failed = state.failed.filter(candidate => candidate !== item); },
   imagePicker: () => $('image-input').click(),
@@ -117,6 +195,7 @@ const editor = new Prompt({
     cancelUploads('Image uploads cancelled.'); return true;
   },
   cancel: () => {
+    if (state.approval) { state.approval = null; queue(); prompt.focus(); return; }
     if (state.attachments.length) cancelUploads('Image uploads cancelled.');
     else if (state.busy) send('cancel');
   }
@@ -226,16 +305,20 @@ $('composer').addEventListener('dragover', event => { event.preventDefault(); $(
 $('composer').addEventListener('dragleave', event => { if (!$('composer').contains(event.relatedTarget)) $('composer').classList.remove('dragging'); });
 $('composer').addEventListener('drop', event => { event.preventDefault(); $('composer').classList.remove('dragging'); addImages(event.dataTransfer.files); });
 prompt.addEventListener('paste', event => { const files = [...(event.clipboardData?.files || [])]; if (files.length) { event.preventDefault(); addImages(files); } });
+function clearConversation() {
+  previews.hide(); previews.viewer.close();
+  for (const m of state.messages.values()) m.stream?.end();
+  state.messages.clear(); messages.replaceChildren(); state.queue.clear(); state.stagingQueue = null;
+  $('chat').classList.add('welcome-state');
+  state.approval = null; state.busy = false; $('activity').textContent = ''; queue();
+}
 function receive(event) {
   const e = JSON.parse(event.data);
   if (e.seq) state.seq = e.seq;
   if (e.view && e.view !== state.view) return;
   switch (e.type) {
     case 'reset':
-      previews.hide();
-      previews.viewer.close();
-      for (const m of state.messages.values()) m.stream?.end();
-      state.messages.clear(); messages.replaceChildren(); state.queue.clear(); state.stagingQueue = null; queue();
+      clearConversation();
       if (e.text) toast(e.text); break;
     case 'begin': message(e.id, e.role); break;
     case 'delta': {
@@ -279,14 +362,27 @@ function receive(event) {
     case 'image_done': if (e.id === state.upload?.id) credit({ path: e.path }); break;
     case 'image_error': if (e.id === state.upload?.id) cancelUpload(e.text || 'Image upload failed.'); break;
     case 'session':
+      if (state.epoch && state.epoch !== e.id) {
+        state.seq = ''; clearConversation();
+        editResult(state.editPending, 'The host restarted. This edit was not sent again.');
+        state.edit = null; $('queue-edit-save').disabled = true;
+        state.canEdit = false; state.terminal = '';
+      }
+      state.online = true; $('connection').textContent = 'Connected';
+      editor.connected(); resizePrompt(); queue();
       if (!state.epoch || state.epoch === e.id) for (const item of state.pending.values()) send(item.action, item.fields);
       else if (state.epoch && state.pending.size) {
         state.failed.push(...state.pending.values()); state.failed = state.failed.slice(-16); state.pending.clear();
         toast('The host restarted. Unconfirmed prompts are available under +; they were not sent again.');
       }
       state.epoch = e.id; break;
-    case 'accepted': state.pending.delete(e.request); break;
+    case 'capabilities':
+      state.canEdit = e.edit === '1';
+      state.terminal = typeof e.terminal === 'string' && /^\/(?!\/)/u.test(e.terminal) && !/[\\\u0000-\u0020]/u.test(e.terminal) ? e.terminal : '';
+      queue(); break;
+    case 'accepted': state.pending.delete(e.request); editResult(e.request); break;
     case 'error':
+      editResult(e.request, e.text || 'The entry changed or was consumed. Your edit is kept.');
       if (state.pending.has(e.request)) { state.failed.push(state.pending.get(e.request)); state.failed = state.failed.slice(-16); state.pending.delete(e.request); }
       toast(e.text || 'The action failed. Unsent prompts can be recovered under +.'); break;
   }
@@ -296,11 +392,11 @@ function connect() {
   const url = new URL('./events', location.href); url.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
   url.searchParams.set('after', state.seq); url.searchParams.set('view', state.view);
   const socket = state.socket = new WebSocket(url);
-  socket.addEventListener('open', () => { state.online = true; $('connection').textContent = 'Connected'; editor.connected(); resizePrompt(); });
+  socket.addEventListener('open', () => { $('connection').textContent = 'Synchronizing'; });
   socket.addEventListener('message', event => { try { receive(event); } catch { toast('Invalid conversation event. Reconnecting…'); socket.close(); } });
   socket.addEventListener('close', () => {
     if (generation !== state.generation) return;
-    state.online = false; $('connection').textContent = 'Reconnecting'; resizePrompt();
+    state.online = false; $('connection').textContent = 'Reconnecting'; resizePrompt(); queue();
     editor.disconnected();
     if (state.attachments.length) cancelUploads('Disconnected. Image uploads cancelled; draft kept.');
     setTimeout(connect, 1000);

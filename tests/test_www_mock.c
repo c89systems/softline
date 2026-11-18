@@ -18,6 +18,7 @@
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 #if defined(__APPLE__)
 #include <util.h>
@@ -49,8 +50,24 @@ static void snapshot(void *context, demo_web_chat_t *web) {
   app_t *app = context;
   unsigned int i;
   char revision[32];
-  if (!app->large)
+  if (!app->large) {
+    size_t index;
+    demo_web_queue_begin(web);
+    for (index = 0; index < sl_prompt_queue_count(app->sl); ++index) {
+      sl_prompt_queue_entry_info_t info;
+      char *text = NULL, id[32];
+      if (sl_prompt_queue_info(app->sl, index, &info) == SL_OK &&
+          sl_prompt_queue_peek(app->sl, index, &text) == SL_OK) {
+        (void)snprintf(id, sizeof(id), "%lu", info.id);
+        demo_web_queue_entry(web, id, "", text,
+                             info.mode == SL_PROMPT_QUEUE_MODE_STEER,
+                             info.held);
+        sl_free_string(app->sl, text);
+      }
+    }
+    demo_web_queue_end(web);
     return;
+  }
   (void)snprintf(revision, sizeof(revision), "large-%u", app->large_revision);
   demo_web_queue_begin(web);
   for (i = 0; i < 64; ++i) {
@@ -92,6 +109,15 @@ static int control(void *context, const char *action, const char *id,
   sl_queue_result_t result;
   (void)id;
   (void)revision;
+  if (!strcmp(action, "approval-fixture")) {
+    size_t index = sl_prompt_queue_count(app->sl);
+    if (sl_prompt_queue_append(app->sl, "first approval", 1, NULL) != SL_OK ||
+        sl_prompt_queue_set_mode(app->sl, index, SL_PROMPT_QUEUE_MODE_STEER) !=
+            SL_OK ||
+        sl_prompt_queue_append(app->sl, "later approval", 1, NULL) != SL_OK)
+      return SL_ERROR;
+    return SL_OK;
+  }
   if (!strcmp(action, "large-queue")) {
     app->large = malloc(128u * 1024u + 1);
     if (!app->large)
@@ -134,6 +160,28 @@ static int control(void *context, const char *action, const char *id,
   demo_web_result(app->web, &result);
   return SL_OK;
 }
+static int edit(void *context, const char *id, const char *revision,
+                const char *text, const char *token,
+                sl_prompt_queue_mode_t mode, sl_queue_request_id_t *out) {
+  app_t *app = context;
+  size_t index;
+  (void)revision;
+  (void)token;
+  (void)mode;
+  (void)out;
+  if (strcmp(sl_buffer(app->sl), "independent ANSI draft"))
+    return SL_ERROR;
+  for (index = 0; index < sl_prompt_queue_count(app->sl); ++index) {
+    sl_prompt_queue_entry_info_t info;
+    char current[32];
+    if (sl_prompt_queue_info(app->sl, index, &info) != SL_OK)
+      return SL_ERROR;
+    snprintf(current, sizeof(current), "%lu", info.id);
+    if (!strcmp(current, id))
+      return sl_prompt_queue_replace(app->sl, index, text);
+  }
+  return SL_ERROR_CONFLICT;
+}
 static void child_server(int output, const char *directory) {
   app_t app;
   demo_web_ops_t ops;
@@ -144,6 +192,7 @@ static void child_server(int output, const char *directory) {
   memset(&ops, 0, sizeof(ops));
   ops.submit = submit;
   ops.control = control;
+  ops.edit = edit;
   ops.snapshot = snapshot;
   if (chdir(directory) || setenv("SOFTLINE_WEB", "1", 1) ||
       setenv("SOFTLINE_WEB_PORT", "0", 1))
@@ -210,16 +259,25 @@ static int write_all(int fd, const void *data, size_t n) {
 }
 static int read_all(int fd, void *data, size_t n) {
   unsigned char *p = data;
+  struct timespec time;
+  double deadline;
+  clock_gettime(CLOCK_MONOTONIC, &time);
+  deadline = time.tv_sec * 1000.0 + time.tv_nsec / 1000000.0 + 3000;
   while (n) {
     struct pollfd waits[2];
     ssize_t k;
+    double left;
+    clock_gettime(CLOCK_MONOTONIC, &time);
+    left = deadline - time.tv_sec * 1000.0 - time.tv_nsec / 1000000.0;
+    if (left <= 0)
+      return -1;
     waits[0].fd = fd;
     waits[0].events = POLLIN;
     waits[0].revents = 0;
     waits[1].fd = terminal_fd;
     waits[1].events = POLLIN;
     waits[1].revents = 0;
-    if (poll(waits, 2, 3000) <= 0)
+    if (poll(waits, 2, (int)left + 1) <= 0)
       return -1;
     if (waits[1].revents & POLLIN) {
       char discard[4096];
@@ -237,17 +295,20 @@ static int read_all(int fd, void *data, size_t n) {
   }
   return 0;
 }
-static int ws_open(unsigned short port) {
-  static const char request[] =
-      "GET /events HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: "
-      "websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: "
-      "13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n";
+static int ws_open_after(unsigned short port, const char *after) {
+  char request[1024];
+  int size =
+      snprintf(request, sizeof(request),
+               "GET /events?after=%s HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: "
+               "websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: "
+               "13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n",
+               after);
   int fd = connect_to(port);
   char header[1024];
   size_t at = 0, i;
-  if (fd < 0)
+  if (fd < 0 || size < 0 || (size_t)size >= sizeof(request))
     return -1;
-  for (i = 0; i < sizeof(request) - 1; ++i)
+  for (i = 0; i < (size_t)size; ++i)
     if (write_all(fd, request + i, 1))
       goto fail;
   while (at + 1 < sizeof(header)) {
@@ -265,6 +326,7 @@ fail:
   close(fd);
   return -1;
 }
+static int ws_open(unsigned short port) { return ws_open_after(port, ""); }
 static int ws_send(int fd, int opcode, int final, const void *data, size_t n) {
   unsigned char header[8], *copy = malloc(n ? n : 1);
   size_t i, length = n < 126 ? 2 : 4;
@@ -323,6 +385,179 @@ static int until(int fd, char *data, size_t cap, const char *needle) {
       return 0;
   }
   return -1;
+}
+static int json_field(const char *data, const char *name, char *out,
+                      size_t cap) {
+  char key[64];
+  const char *start, *end;
+  size_t n;
+  snprintf(key, sizeof(key), "\"%s\":\"", name);
+  start = strstr(data, key);
+  if (!start || !(end = strchr(start + strlen(key), '"')))
+    return -1;
+  start += strlen(key);
+  n = (size_t)(end - start);
+  if (n >= cap)
+    return -1;
+  memcpy(out, start, n);
+  out[n] = 0;
+  return 0;
+}
+static int replay_cursors(unsigned short port, const char *epoch, char *data,
+                          size_t cap) {
+  const char *stale[] = {"2", "previous-host.2"};
+  size_t i;
+  int fd, opcode, failed = 0;
+  char cursor[128];
+  for (i = 0; i < 2; ++i) {
+    fd = ws_open_after(port, stale[i]);
+    if (fd < 0)
+      return -1;
+    if (ws_read(fd, data, cap, &opcode) < 0 ||
+        !strstr(data, "\"type\":\"reset\"") ||
+        until(fd, data, cap, "aGVsbG8gd29ybGQ="))
+      failed = 1;
+    close(fd);
+    if (failed)
+      return -1;
+  }
+  snprintf(cursor, sizeof(cursor), "%s.2", epoch);
+  fd = ws_open_after(port, cursor);
+  if (fd < 0)
+    return -1;
+  failed = ws_read(fd, data, cap, &opcode) < 0 ||
+           !strstr(data, "\"type\":\"session\"");
+  close(fd);
+  return failed ? -1 : 0;
+}
+static int queued_text(int fd, char *data, size_t cap, const char *text,
+                       char *id, char *revision, int *held, int *steer,
+                       const char *accepted) {
+  char encoded[256], current[128] = "", rev[128] = "";
+  int opcode, found = 0, h = 0, s = 0, frames, complete = 0,
+              acknowledged = !accepted, provisional = 0;
+  (void)demo_www_base64((const unsigned char *)text, strlen(text), encoded);
+  for (frames = 0; frames < 300; ++frames) {
+    if (ws_read(fd, data, cap, &opcode) < 0) {
+      fprintf(stderr, "waiting for queued text '%s'; last frame: %s\n", text,
+              data);
+      return -1;
+    }
+    if (strstr(data, "\"type\":\"queue_item\"")) {
+      if (json_field(data, "id", current, sizeof(current)) ||
+          json_field(data, "revision", rev, sizeof(rev)))
+        return -1;
+      h = strstr(data, "\"held\":\"1\"") != NULL;
+      s = strstr(data, "\"mode\":\"steer\"") != NULL;
+      provisional = strstr(data, "\"mode\":\"pending\"") != NULL;
+    }
+    if (!provisional && strstr(data, "\"type\":\"queue_text\"") &&
+        strstr(data, encoded)) {
+      strcpy(id, current);
+      strcpy(revision, rev);
+      *held = h;
+      *steer = s;
+      found = 1;
+    }
+    if (found && strstr(data, "\"type\":\"queue_end\""))
+      complete = 1;
+    if (accepted && strstr(data, "\"type\":\"accepted\"")) {
+      char request[65];
+      if (!json_field(data, "request", request, sizeof(request)) &&
+          !strcmp(request, accepted))
+        acknowledged = 1;
+    }
+    if (complete && acknowledged)
+      return 0;
+  }
+  return -1;
+}
+static int edit_turns(int fd, unsigned short port, char *data, size_t cap,
+                      int fixture) {
+  char id[128], revision[128], updated[128], new_revision[128], request[1024];
+  int held, steer, next_held, next_steer;
+  if (fixture) {
+    if (ws_text(fd, "action=approval-fixture") ||
+        until(fd, data, cap, "\"type\":\"accepted\""))
+      return -1;
+  } else {
+    if (ws_text(fd, "action=send&view=edits&request=blocking&request_seq=1&"
+                    "text=blocking+turn") ||
+        until(fd, data, cap, "\"request\":\"blocking\""))
+      return -1;
+    if (ws_text(fd, "action=steer&view=edits&request=queued&request_seq=2&text="
+                    "editable+queued+text"))
+      return -1;
+  }
+  if (queued_text(fd, data, cap,
+                  fixture ? "first approval" : "editable queued text", id,
+                  revision, &held, &steer, fixture ? NULL : "queued") ||
+      held != fixture || !steer)
+    return -1;
+  snprintf(request, sizeof(request),
+           "action=edit&view=edits&request=saved&request_seq=3&id=%s&revision=%"
+           "s&text=revised+queued+text",
+           id, revision);
+  if (ws_text(fd, request))
+    return -1;
+  if (queued_text(fd, data, cap, "revised queued text", updated, new_revision,
+                  &next_held, &next_steer, "saved") ||
+      strcmp(updated, id) || !strcmp(new_revision, revision) ||
+      held != next_held || steer != next_steer)
+    return -1;
+  if (ws_text(fd, request) || until(fd, data, cap, "\"request\":\"saved\"") ||
+      !strstr(data, "\"type\":\"accepted\""))
+    return -1;
+  snprintf(request, sizeof(request),
+           "action=edit&view=edits&request=stale&request_seq=4&id=%s&revision=%"
+           "s&text=must+not+replace",
+           id, revision);
+  if (ws_text(fd, request) || until(fd, data, cap, "\"request\":\"stale\"") ||
+      !strstr(data, "\"type\":\"error\""))
+    return -1;
+  if (fixture) {
+    char later[128], later_revision[128];
+    int observer = ws_open(port), status;
+    if (observer < 0)
+      return -1;
+    status = queued_text(observer, data, cap, "later approval", later,
+                         later_revision, &next_held, &next_steer, NULL);
+    close(observer);
+    if (status)
+      return -1;
+    snprintf(request, sizeof(request),
+             "action=edit&view=edits&request=later&request_seq=5&id=%s&"
+             "revision=%s&text=must+not+replace",
+             later, later_revision);
+    if (ws_text(fd, request) || until(fd, data, cap, "\"request\":\"later\"") ||
+        !strstr(data, "\"type\":\"error\""))
+      return -1;
+  }
+  snprintf(request, sizeof(request),
+           "action=approve&request=stale-approval&id=%s&revision=%s", id,
+           revision);
+  if (ws_text(fd, request) ||
+      until(fd, data, cap, "\"request\":\"stale-approval\"") ||
+      !strstr(data, "\"type\":\"error\""))
+    return -1;
+  if (!fixture) {
+    snprintf(request, sizeof(request),
+             "action=edit&view=edits&request=shell-edit&request_seq=6&id=%s&"
+             "revision=%s&text=%%2Fshell",
+             id, new_revision);
+    if (ws_text(fd, request) ||
+        until(fd, data, cap, "\"request\":\"shell-edit\"") ||
+        !strstr(data, "\"type\":\"error\""))
+      return -1;
+  }
+  return 0;
+}
+static void inherited_gate(const int *gate) {
+  close(gate[1]);
+  if (dup2(gate[0], 9) < 0 || setenv("SOFTLINE_CHAT_GATE_FD", "9", 1))
+    _exit(2);
+  if (gate[0] != 9)
+    close(gate[0]);
 }
 /* Inspect raw producer deltas, carrying only a short suffix across WS frames.
  */
@@ -439,7 +674,8 @@ int main(int argc, char **argv) {
   int pipes[2] = {-1, -1}, fd = -1, one = -1, two = -1, status, opcode,
       failed = 1;
   pid_t child = -1, owner = -1;
-  int slave = -1, dual, charts;
+  int slave = -1, dual, charts, edits, gate[2] = {-1, -1};
+  char epoch[96];
   const char *mode = argc >= 4 ? argv[3] : "";
   unsigned short queue_port = 0;
   unsigned short port;
@@ -449,8 +685,11 @@ int main(int argc, char **argv) {
   (void)signal(SIGPIPE, SIG_IGN);
   CHECK((argc == 2 || argc == 4 || argc == 5) && data && http);
   charts = !strncmp(mode, "charts-", 7);
+  edits = !strncmp(mode, "edits-", 6);
   if (charts)
     mode += 7;
+  if (edits)
+    mode += 6;
   dual = !strcmp(mode, "dual") || !strcmp(mode, "remote");
   CHECK(snprintf(root, sizeof(root), "%s/www-mock-XXXXXX", argv[1]) <
             (int)sizeof(root) &&
@@ -474,6 +713,8 @@ int main(int argc, char **argv) {
     }
   }
   CHECK(pipe(pipes) == 0);
+  if (edits)
+    CHECK(pipe(gate) == 0);
   if (argc == 5) {
     char line[1024];
     unsigned int parsed = 0;
@@ -485,6 +726,8 @@ int main(int argc, char **argv) {
         _exit(2);
       close(pipes[0]);
       setenv("SOFTLINE_WEB", "0", 1);
+      if (edits)
+        inherited_gate(gate);
       execl(argv[4], argv[4], "0", (char *)NULL);
       _exit(2);
     }
@@ -542,6 +785,8 @@ int main(int argc, char **argv) {
       }
       unsetenv("SOFTLINE_CHAT_IMAGE_DIR");
       unsetenv("SOFTLINE_CHAT_IMAGE_MAX_BYTES");
+      if (edits)
+        inherited_gate(gate);
       if (argc == 5) {
         char number[16];
         (void)snprintf(number, sizeof(number), "%u", (unsigned int)queue_port);
@@ -604,6 +849,7 @@ int main(int argc, char **argv) {
   two = ws_open(port);
   CHECK(one >= 0 && two >= 0);
   CHECK(until(one, data, SL_WWW_FRAME_MAX + 1, "\"type\":\"session\"") == 0);
+  CHECK(!json_field(data, "id", epoch, sizeof(epoch)));
   {
     static const char *const triggers[] = {"/", "h", "v", "n", "@"};
     size_t i;
@@ -624,6 +870,14 @@ int main(int argc, char **argv) {
     failed = 0;
     goto cleanup;
   }
+  if (edits) {
+    int edited = edit_turns(one, port, data, SL_WWW_FRAME_MAX + 1, 0);
+    if (edited)
+      fprintf(stderr, "edit test last frame: %s\n", data);
+    CHECK(!edited);
+    failed = 0;
+    goto cleanup;
+  }
   if (dual)
     CHECK(write_all(terminal_fd, "independent ANSI draft\022", 23) == 0);
   CHECK(ws_send(one, 1, 0, "action=send&request=first&", 26) == 0);
@@ -633,6 +887,7 @@ int main(int argc, char **argv) {
   }
   CHECK(until(one, data, SL_WWW_FRAME_MAX + 1, "\"type\":\"accepted\"") == 0);
   CHECK(until(two, data, SL_WWW_FRAME_MAX + 1, "aGVsbG8gd29ybGQ=") == 0);
+  CHECK(!replay_cursors(port, epoch, data, SL_WWW_FRAME_MAX + 1));
   CHECK(ws_send(one, 9, 1, "p", 1) == 0);
   do {
     CHECK(ws_read(one, data, SL_WWW_FRAME_MAX + 1, &opcode) >= 0);
@@ -654,6 +909,7 @@ int main(int argc, char **argv) {
   CHECK(until(one, data, SL_WWW_FRAME_MAX + 1, "\"type\":\"error\"") == 0 &&
         strstr(data, "\"request\":\"invalid\""));
   if (argc == 2) {
+    CHECK(!edit_turns(one, port, data, SL_WWW_FRAME_MAX + 1, 1));
     CHECK(ws_text(one, "action=send&request=deferred&text=deferred+rejection&"
                        "view=test&request_seq=2") == 0);
     CHECK(ws_send(one, 9, 1, "barrier", 7) == 0);
@@ -974,6 +1230,10 @@ int main(int argc, char **argv) {
   }
   failed = 0;
 cleanup:
+  if (gate[0] >= 0)
+    close(gate[0]);
+  if (gate[1] >= 0)
+    close(gate[1]);
   if (fd >= 0)
     close(fd);
   if (one >= 0)

@@ -112,12 +112,16 @@ to split UTF-8 characters while keeping each JSON frame valid.
 
 ## Browser event contract
 
-All JSON values below are strings. Sequence numbers are opaque decimal strings
-and must be assigned by the host's history owner. Replies may omit `seq`.
+All JSON values below are strings. Replay cursors are opaque strings assigned
+by the host's history owner. Bind them to the session epoch: the examples use
+`epoch.sequence` and reset/replay from the beginning for foreign, missing or
+expired cursors. A bare number never authorizes replay across host restarts.
+Replies may omit `seq`.
 
 | Event | Fields and behavior |
 | --- | --- |
 | `session` | `id`: host epoch; reconnect retries only within the same epoch |
+| `capabilities` | `edit=1` enables revision-checked queue edits; optional `terminal` is a same-origin absolute path to a host-provided terminal page |
 | `reset` | Optional `text`; clear the retained transcript and queue before replay |
 | `begin` | `id`, `role` (`user`, `assistant`, `note`) |
 | `delta` | `id`, `role`, `text`, or `encoding=base64` plus `data`; append incrementally |
@@ -143,6 +147,9 @@ Browser text frames are URL-encoded actions:
   the entire inventory for that prefix followed by `complete_end`, even when
   current typed text matches only a subset. `all=1` opens the explicit `+` menu.
 - `approve`/`reject`: `id`, `revision`; `cancel` stops current generation/backlog.
+- `edit`: `view`, unique `request`, monotonic `request_seq`, `id`, `revision`,
+  replacement `text`. Preserve identity, position, Q/S intent and approval hold;
+  acknowledge only after the backend accepts the replacement.
 - `image_begin`: unique `id`, `media_type=image/png` or `image/jpeg`, `filename`,
   exact `size`; wait for credit, send bounded binary chunks, then `image_end`.
   `image_cancel` carries the same `id` and is valid before BEGIN is delivered.
@@ -155,6 +162,40 @@ the send button and Alt-Enter submit actual draft text, never a ghost. Ordinary
 typing filters cached provider snapshots without another request. Tab resolves
 known directory ancestors lazily for a partial path such as `@examples/ch`.
 Only the explicit `+` button opens a menu, for completions, images and recovery.
+
+The `+` menu also exposes queue and approval actions with shortcut hints:
+
+| Action | Browser shortcut (Control on every platform) |
+| --- | --- |
+| Open the host's terminal page | Ctrl+` |
+| Edit focused approval, otherwise newest queued entry | Ctrl+Shift+Enter |
+| Focus the oldest pending approval | Ctrl+Shift+1 |
+| Approve the focused request | Ctrl+Shift+2 |
+| Reject the focused request | Ctrl+Shift+3 |
+
+These apply in the prompt and focused approval row and avoid Chrome/Chromium's
+Alt menu bindings and tab-search shortcut.
+Keyboard approval decisions require explicit focus; Escape leaves that focus, decisions
+clear it, and key repeat cannot approve or reject subsequent requests. Approval
+rows have **Approve · Edit · Reject** buttons; later approval rows stay disabled
+until the oldest is decided. Controls and the menu remain responsive while a
+completion provider is pending. Ordinary textarea arrows, selections and native
+modifier navigation remain browser-owned when completion does not handle them.
+
+Queue edits open a separate form, preserving the view's unsent prompt. The
+queue continues normally while the form is open. Saving compares the captured
+revision; a changed/consumed entry rejects the save and retains the edited text
+for inspection or copying. Remote saves acquire and release a backend edit token
+during the save. Duplicate requests replay their outcome. Closing the form
+before saving leaves the queue unchanged.
+Host restart invalidates an open edit target, retaining its text for copying;
+reused queue IDs cannot redirect that old edit into the new conversation.
+
+The examples advertise queue editing. They have no browser terminal endpoint;
+the terminal menu entry remains disabled until a host supplies one. An example
+host can advertise its already mounted terminal page with
+`SOFTLINE_WEB_TERMINAL_URL=/terminal`. This opens that page with no opener access;
+the host owns its terminal renderer, authentication and WebSocket transport.
 
 The C examples share one registration table between native and web editors
 (`/`, `h`, `v`, `n`, `@`), including scope and trigger stripping. Exiting an

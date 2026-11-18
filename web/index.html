@@ -38,7 +38,7 @@
       <form id="composer" autocomplete="off">
         <div id="uploads" aria-label="Image attachments" hidden></div>
         <div class="input-row">
-          <button id="plus" class="icon-button" type="button" aria-label="Completions and images" aria-expanded="false" title="Completions and images">+</button>
+          <button id="plus" class="icon-button" type="button" aria-label="Actions, completions and images" aria-expanded="false" title="Actions, completions and images">+</button>
           <div class="prompt-editor">
             <pre id="prompt-projection" aria-hidden="true" hidden><span id="projection-before"></span><span id="completion-ghost"></span><span id="projection-after"></span></pre>
             <textarea id="prompt" rows="1" placeholder="Ask softline" aria-label="Message" aria-autocomplete="inline" spellcheck="false"></textarea>
@@ -50,6 +50,14 @@
     </div>
   </main>
   <input id="image-input" type="file" accept="image/png,image/jpeg" multiple hidden>
+  <dialog id="queue-editor" aria-labelledby="queue-editor-title">
+    <form id="queue-edit-form">
+      <h2 id="queue-editor-title">Edit queued message</h2>
+      <textarea id="queue-edit-text" aria-label="Queued message" rows="6" spellcheck="false" required></textarea>
+      <p id="queue-edit-error" role="status"></p>
+      <div class="queue-edit-tools"><button id="queue-edit-cancel" type="button">Cancel</button><button id="queue-edit-save" type="submit">Save</button></div>
+    </form>
+  </dialog>
   <div id="toast" role="status" hidden></div>
   <div id="image-preview" role="button" tabindex="0" aria-label="Open image" hidden><img id="image-preview-content" alt=""></div>
   <dialog id="image-viewer" aria-labelledby="image-viewer-title">

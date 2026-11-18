@@ -28,6 +28,7 @@ typedef struct record {
   char id[128], revision[128], token[128], text[DEMO_PROMPT_MAX + 1];
   int held, edit_held;
 } record_t;
+static int completion_fd = -1;
 typedef struct peer {
   demo_link_t link;
   record_t entries[DEMO_ITEM_MAX];
@@ -796,6 +797,11 @@ static int shell_case(peer_t *p, unsigned short port) {
    * Start this seam test with its own response, not that finishing turn. */
   while (p->active)
     CHECK(!receive(p));
+  {
+    char completed[32];
+    while (read(completion_fd, completed, sizeof(completed)) > 0) {
+    }
+  }
   memset(&request, 0, sizeof(request));
   request.operation = SL_QUEUE_CLEAR;
   CHECK(!call(p, &request) && p->status == SL_QUEUE_ACCEPTED);
@@ -818,9 +824,17 @@ static int shell_case(peer_t *p, unsigned short port) {
     CHECK(!receive(p));
   CHECK(p->active && !strcmp(p->last_source, "\n\n"));
   before = p->source_bytes;
-  /* Leave this subscription unread for longer than both 2 ms/character
-   * responses. Both turns must finish without output backpressure. */
-  (void)poll(NULL, 0, 1000);
+  /* Keep the subscription unread while an independent fixture pipe observes
+   * both producer completions, including any variable-length chart segment. */
+  {
+    int completed;
+    double deadline = now() + 10000;
+    for (completed = 0; completed < 2; ++completed) {
+      char byte;
+      CHECK(!wait_fd(completion_fd, POLLIN, deadline));
+      CHECK(read(completion_fd, &byte, 1) == 1);
+    }
+  }
   demo_link_close(&p->link);
   CHECK(!attach(p, port, "shell-controller"));
   CHECK(!p->active && !p->count && before == p->source_bytes);
@@ -1026,6 +1040,7 @@ int main(int argc, char **argv) {
   int startup[2], status, result, port;
   FILE *output;
   char line[128];
+  int completion[2];
   pid_t child;
   peer_t *p;
   int terminal_only = argc == 3 && !strcmp(argv[1], "disconnect");
@@ -1047,9 +1062,20 @@ int main(int argc, char **argv) {
   CHECK(waitpid(child, &status, 0) == child && WIFEXITED(status) &&
         WEXITSTATUS(status) == 1);
   CHECK(!pipe(startup));
+  {
+    CHECK(!pipe(completion));
+    completion_fd = completion[0];
+    CHECK(!demo_nonblock(completion_fd));
+    {
+      char number[32];
+      snprintf(number, sizeof(number), "%d", completion[1]);
+      CHECK(!setenv("SOFTLINE_CHAT_TEST_COMPLETION_FD", number, 1));
+    }
+  }
   child = fork();
   CHECK(child >= 0);
   if (!child) {
+    close(completion[0]);
     dup2(startup[1], STDOUT_FILENO);
     close(startup[0]);
     close(startup[1]);
@@ -1062,6 +1088,8 @@ int main(int argc, char **argv) {
     _exit(127);
   }
   close(startup[1]);
+  close(completion[1]);
+  unsetenv("SOFTLINE_CHAT_TEST_COMPLETION_FD");
   output = fdopen(startup[0], "r");
   CHECK(output && fgets(line, sizeof(line), output) &&
         sscanf(line, "LISTEN 127.0.0.1 %d", &port) == 1);
@@ -1096,6 +1124,7 @@ int main(int argc, char **argv) {
   kill(child, SIGTERM);
   CHECK(waitpid(child, &status, 0) == child);
   fclose(output);
+  close(completion_fd);
   CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
   return result;
 }

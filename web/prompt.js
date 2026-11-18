@@ -35,7 +35,7 @@ export class Prompt {
     });
     this.input.addEventListener('scroll', () => this.syncScroll());
     new ResizeObserver(() => this.render()).observe(get('plus').parentElement || this.input);
-    get('plus').addEventListener('click', () => this.enqueue(() => this.openMenu()));
+    get('plus').addEventListener('click', () => this.openMenu());
     options.document.addEventListener('click', event => { if (!event.target.closest('#completions,#plus')) this.hideMenu(); });
   }
   current() { return { text: this.input.value, cursor: this.input.selectionStart, end: this.input.selectionEnd }; }
@@ -112,7 +112,7 @@ export class Prompt {
     }
     if (event.request !== this.menuRequest || !this.menuOpen || this.menuText !== this.input.value || this.menuCursor !== this.input.selectionStart) return;
     if (event.type === 'complete' && event.value !== undefined) { this.menuItems.push(event); this.showMenu(); }
-    if (event.type === 'complete_end' && event.status !== 'ok') this.hideMenu();
+    if (event.type === 'complete_end' && event.status !== 'ok') { this.menuItems = []; this.showMenu(); }
   }
   enqueue(action) {
     this.jobs.push(action); this.drain();
@@ -132,10 +132,16 @@ export class Prompt {
   }
   beforeInput(event) {
     const literal = ['insertFromPaste', 'insertFromDrop', 'insertFromPasteAsQuotation'].includes(event.inputType);
-    if (event.cancelable !== false && (this.busy || (event.data && space(event.data) && !literal))) {
-      event.preventDefault(); this.enqueue(() => this.editInput(event.inputType, event.data || '', literal)); return;
+    const data = event.data ?? event.dataTransfer?.getData('text/plain');
+    const replayable = ['insertText', 'insertFromPaste', 'insertFromDrop', 'insertFromPasteAsQuotation', 'insertLineBreak', 'insertParagraph', 'deleteContentBackward', 'deleteContentForward'].includes(event.inputType) &&
+      (!event.inputType.startsWith('insert') || ['insertLineBreak', 'insertParagraph'].includes(event.inputType) || typeof data === 'string');
+    if (event.cancelable !== false && replayable && (this.busy || (data && space(data) && !literal))) {
+      event.preventDefault(); this.enqueue(() => this.editInput(event.inputType, data || '', literal)); return;
     }
+    // Native undo, word deletion and composition invalidate pending acceptance.
+    // Never cancel an edit we cannot reproduce.
     if (literal) this.finish();
+    if (this.busy && !replayable) this.model.reset();
     this.literalInput = literal; this.before = this.input.value;
   }
   changed(event) {
@@ -147,6 +153,7 @@ export class Prompt {
   }
   async editInput(type, data, literal = false) {
     if (literal) this.finish();
+    if (type === 'insertLineBreak' || type === 'insertParagraph') data = '\n';
     if (type.startsWith('insert')) {
       for (const character of literal ? [data] : [...data]) {
         if (!literal && space(character)) await this.model.separator(character);
@@ -168,10 +175,10 @@ export class Prompt {
     this.literalInput = literal; this.before = this.input.value; this.hideMenu(); this.render();
   }
   move(key) {
-    const { text, cursor } = this.current();
+    const { text, cursor, end } = this.current();
     let at = cursor;
-    if (key === 'ArrowLeft') at = boundary(text, cursor, false);
-    else if (key === 'ArrowRight') at = boundary(text, cursor, true);
+    if (key === 'ArrowLeft') at = end !== cursor ? cursor : boundary(text, cursor, false);
+    else if (key === 'ArrowRight') at = end !== cursor ? end : boundary(text, cursor, true);
     else if (key === 'Home') at = text.lastIndexOf('\n', cursor - 1) + 1;
     else if (key === 'End') { const next = text.indexOf('\n', cursor); at = next < 0 ? text.length : next; }
     if (at !== cursor || this.input.selectionEnd !== cursor) {
@@ -181,10 +188,21 @@ export class Prompt {
   key(event) {
     if (event.isComposing) return;
     const control = event.ctrlKey && !event.altKey, key = event.key;
+    const shortcut = !event.altKey && !event.metaKey && event.ctrlKey &&
+      (event.shiftKey ? { Enter: 'edit', Digit1: 'approvals', Digit2: 'approve', Digit3: 'reject' }[event.code || key] : key === '`' || event.code === 'Backquote' ? 'terminal' : null);
+    if (shortcut && this.options.action) {
+      event.preventDefault();
+      this.hideMenu();
+      if (!event.repeat) this.options.action(shortcut);
+      return;
+    }
     if (control && key.toLowerCase() === 'c' && this.options.cancelImages()) { event.preventDefault(); return; }
     if (this.menuOpen && ['ArrowDown', 'ArrowUp', 'Tab'].includes(key)) {
       event.preventDefault();
-      if (this.menuList.length) this.menuActive = (this.menuActive + (key === 'ArrowUp' ? -1 : 1) + this.menuList.length) % this.menuList.length;
+      for (let tries = 0; tries < this.menuList.length; ++tries) {
+        this.menuActive = (this.menuActive + (key === 'ArrowUp' ? -1 : 1) + this.menuList.length) % this.menuList.length;
+        if (!this.menuList[this.menuActive].disabled) break;
+      }
       this.showMenu(); return;
     }
     if (key === 'Escape') {
@@ -193,12 +211,16 @@ export class Prompt {
     }
     if (key === 'Enter' && !event.shiftKey) {
       event.preventDefault();
-      if (this.menuOpen && !event.altKey) this.enqueue(() => this.choose(this.menuList[this.menuActive]));
+      if (this.menuOpen && !event.altKey) {
+        const item = this.menuList[this.menuActive];
+        if (item?.action) this.choose(item);
+        else this.enqueue(() => this.choose(item));
+      }
       else this.enqueue(() => this.options.submit(event.altKey));
       return;
     }
     if (key === 'Tab' && this.model.active()) { event.preventDefault(); this.enqueue(() => this.model.tab()); return; }
-    if ((key === 'ArrowRight' || (control && key.toLowerCase() === 'f')) && !event.shiftKey && !event.altKey && !event.metaKey && this.model.active()) {
+    if (((key === 'ArrowRight' && !event.ctrlKey) || (control && key.toLowerCase() === 'f')) && !event.shiftKey && !event.altKey && !event.metaKey && this.model.active()) {
       event.preventDefault(); this.enqueue(async () => {
         const revision = this.model.revision;
         if (!await this.model.right() && revision === this.model.revision) this.move('ArrowRight');
@@ -208,8 +230,8 @@ export class Prompt {
       if (this.model.active() || this.busy) { event.preventDefault(); this.enqueue(() => this.editInput('insertText', key === ' ' ? ' ' : '\n')); }
       return;
     }
-    const movement = control ? { a: 'Home', b: 'ArrowLeft', e: 'End', f: 'ArrowRight' }[key.toLowerCase()] : ['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(key) ? key : null;
-    if (movement && !event.shiftKey && !event.altKey) { event.preventDefault(); this.enqueue(() => this.move(movement)); return; }
+    const movement = control ? { a: 'Home', b: 'ArrowLeft', e: 'End', f: 'ArrowRight' }[key.toLowerCase()] : this.busy && ['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(key) ? key : null;
+    if (movement && !event.shiftKey && !event.altKey && !event.metaKey) { event.preventDefault(); this.enqueue(() => this.move(movement)); return; }
     if (this.busy && ['Backspace', 'Delete'].includes(key)) {
       event.preventDefault(); this.enqueue(() => this.editInput(key === 'Backspace' ? 'deleteContentBackward' : 'deleteContentForward', ''));
     }
@@ -224,24 +246,29 @@ export class Prompt {
   showMenu() {
     if (!this.menuOpen) return;
     const list = [...this.menuItems];
+    list.unshift(...(this.options.actions?.() || []).map(action => ({ ...action, action: action.id })));
     if (this.options.images()) list.unshift({ image: true, label: 'Add images', description: 'PNG or JPEG · also drop images here' });
     for (const item of this.options.recovery()) list.unshift({ recover: true, source: item, text: item.text, label: 'Recover unsent prompt', description: item.text.slice(0, 60) });
+    if (!list[this.menuActive] || list[this.menuActive].disabled) this.menuActive = Math.max(0, list.findIndex(item => !item.disabled));
     this.menuList = list; this.menu.replaceChildren();
     list.forEach((item, index) => {
       const button = this.options.document.createElement('button'), label = this.options.document.createElement('span'),
         symbol = this.options.document.createElement('span'), description = this.options.document.createElement('span');
       button.type = 'button'; button.className = `completion${index === this.menuActive ? ' active' : ''}`;
+      button.disabled = !!item.disabled;
+      button.setAttribute('aria-disabled', String(!!item.disabled));
       button.setAttribute('role', 'option'); button.setAttribute('aria-selected', String(index === this.menuActive));
       symbol.className = 'completion-icon'; symbol.textContent = item.image ? '▧' : item.label?.startsWith('/') ? '/' : '↳';
       description.className = 'description'; description.textContent = item.description || '';
       label.textContent = item.label || item.value; button.append(symbol, label, description);
-      button.addEventListener('click', () => this.enqueue(() => this.choose(item))); this.menu.append(button);
+      button.addEventListener('click', () => item.action ? this.choose(item) : this.enqueue(() => this.choose(item))); this.menu.append(button);
     });
     this.menu.hidden = !list.length; this.get('plus').setAttribute('aria-expanded', String(!!list.length));
   }
   async choose(item) {
-    if (!item) return;
+    if (!item || item.disabled) return;
     this.finish();
+    if (item.action) { this.options.action(item.action); return; }
     if (item.image) { this.options.imagePicker(); return; }
     if (item.recover) {
       const { text, cursor, end } = this.current();

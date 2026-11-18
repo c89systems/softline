@@ -11,6 +11,7 @@ demo_www_t *demo_www_open(const sl_www_config_t *, unsigned short,
                           demo_www_closed_t);
 void demo_www_close(demo_www_t *);
 unsigned short demo_www_port(const demo_www_t *);
+const char *demo_www_epoch(const demo_www_t *);
 int demo_www_poll(demo_www_t *, int timeout_ms);
 /* Append to a host's poll set; dispatch with poll(..., 0) after readiness. */
 int demo_www_descriptors(demo_www_t *, struct pollfd *, size_t);

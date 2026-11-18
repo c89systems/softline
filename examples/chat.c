@@ -1128,6 +1128,53 @@ static int web_image(void *context, sl_t *source,
   struct chat_state *state = context;
   return demo_client_image_event(state->remote, source, event);
 }
+static int web_edit(void *context, const char *id, const char *revision,
+                    const char *text, const char *token,
+                    sl_prompt_queue_mode_t mode, sl_queue_request_id_t *out) {
+  struct chat_state *state = context;
+  size_t i;
+  if (text && (is_shell_command(text) || !strcmp(text, "/quit")))
+    return SL_ERROR_UNSUPPORTED;
+  if (state->remote) {
+    sl_queue_request_t request;
+    int status;
+    if (!token) {
+      sl_queue_backend_info_t info;
+      sl_queue_entry_t entry;
+      if (sl_queue_backend_info(state->sl, &info) != SL_OK)
+        return SL_ERROR;
+      for (i = 0; i < info.visible_count; ++i)
+        if (sl_queue_backend_entry(state->sl, i, &entry) == SL_OK &&
+            !strcmp(entry.id, id) && entry.edit_held)
+          return SL_ERROR_CONFLICT;
+    }
+    memset(&request, 0, sizeof(request));
+    request.operation = token ? text ? SL_QUEUE_END_EDIT : SL_QUEUE_ABORT_EDIT
+                              : SL_QUEUE_BEGIN_EDIT;
+    request.item_id = id;
+    request.item_revision = revision;
+    request.edit_token = token;
+    request.text = token ? text : NULL;
+    request.mode = mode;
+    status = sl_queue_backend_request(state->sl, &request, out);
+    if (status != SL_OK && token && text) {
+      request.operation = SL_QUEUE_ABORT_EDIT;
+      request.text = NULL;
+      (void)sl_queue_backend_request(state->sl, &request, NULL);
+    }
+    return status;
+  }
+  for (i = 0; i < sl_prompt_queue_count(state->sl); ++i) {
+    sl_prompt_queue_entry_info_t info;
+    char current[32];
+    if (sl_prompt_queue_info(state->sl, i, &info) != SL_OK)
+      return SL_ERROR;
+    (void)snprintf(current, sizeof(current), "%lu", info.id);
+    if (!strcmp(current, id))
+      return sl_prompt_queue_replace(state->sl, i, text);
+  }
+  return SL_ERROR_CONFLICT;
+}
 static void web_result(void *context, const sl_queue_result_t *result) {
   struct chat_state *state = context;
   demo_web_result(state->web, result);
@@ -1297,6 +1344,7 @@ int main(int argc, char **argv) {
     memset(&ops, 0, sizeof(ops));
     ops.submit = web_submit;
     ops.control = web_control;
+    ops.edit = web_edit;
     if (state.remote)
       ops.image = web_image;
     state.web = demo_web_open(state.sl, &ops, &state, 8080, &enabled);
