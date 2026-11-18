@@ -27,6 +27,7 @@ int main(int argc, char **argv) {
                                 "/softline.js",
                                 "/completion.js",
                                 "/prompt.js",
+                                "/images.js",
                                 "/markdown.js",
                                 "/smd.js",
                                 "/JetBrainsMono-Regular.woff2"};
@@ -36,6 +37,7 @@ int main(int argc, char **argv) {
       "web/softline.js",
       "web/completion.js",
       "web/prompt.js",
+      "web/images.js",
       "web/markdown.js",
       "vendor/streaming-markdown/smd.js",
       "vendor/jetbrains-mono/JetBrainsMono-Regular.woff2"};

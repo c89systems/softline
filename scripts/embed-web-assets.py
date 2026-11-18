@@ -10,6 +10,7 @@ assets = [
     ("/softline.js", "text/javascript; charset=utf-8", "web/softline.js"),
     ("/completion.js", "text/javascript; charset=utf-8", "web/completion.js"),
     ("/prompt.js", "text/javascript; charset=utf-8", "web/prompt.js"),
+    ("/images.js", "text/javascript; charset=utf-8", "web/images.js"),
     ("/markdown.js", "text/javascript; charset=utf-8", "web/markdown.js"),
     ("/smd.js", "text/javascript; charset=utf-8", "vendor/streaming-markdown/smd.js"),
     ("/JetBrainsMono-Regular.woff2", "font/woff2", "vendor/jetbrains-mono/JetBrainsMono-Regular.woff2"),

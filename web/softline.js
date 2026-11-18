@@ -1,11 +1,13 @@
 import { MarkdownStream } from './markdown.js';
 import { Prompt } from './prompt.js';
+import { ImagePreviews } from './images.js';
 
 function randomId() {
   return Array.from(crypto.getRandomValues(new Uint32Array(4)), value => value.toString(16).padStart(8, '0')).join('');
 }
 const $ = id => document.getElementById(id);
 const prompt = $('prompt'), scroll = $('scroll'), messages = $('messages');
+const previews = new ImagePreviews(document, window);
 const state = { socket: null, online: false, follow: true, messages: new Map(),
   queue: new Map(), seq: '', upload: null,
   view: randomId(), generation: 0, imageLimit: 32 * 1024 * 1024,
@@ -38,6 +40,7 @@ function resizePrompt() {
   prompt.style.height = `${Math.min(Math.max(prompt.scrollHeight, projection.hidden ? 0 : projection.scrollHeight), 200)}px`;
   if (prompt.clientWidth) projection.style.width = `${prompt.clientWidth}px`;
   $('send').disabled = !state.online || !prompt.value.trim() || !!state.attachments.length;
+  previews.draft();
 }
 function follow() { if (state.follow) scroll.scrollTop = scroll.scrollHeight; }
 scroll.addEventListener('scroll', () => {
@@ -197,9 +200,11 @@ async function uploadFile(upload) {
   const insertion = (upload.anchor && !/\s$/u.test(prompt.value.slice(0, upload.anchor)) ? ' ' : '') + result.path +
     (upload.anchor < prompt.value.length && !/^\s/u.test(prompt.value.slice(upload.anchor)) ? ' ' : '');
   prompt.setRangeText(insertion, upload.anchor, upload.anchor, 'preserve');
+  previews.remember(result.path, upload.url, file.name);
+  upload.url = null;
   editor.reset();
   for (const job of state.attachments) if (job !== upload && job.anchor >= upload.anchor) job.anchor += insertion.length;
-  state.upload = null; URL.revokeObjectURL(upload.url); chip.remove();
+  state.upload = null; chip.remove();
   $('uploads').hidden = !$('uploads').childElementCount; resizePrompt(); prompt.focus();
 }
 let uploadChain = Promise.resolve();
@@ -226,6 +231,7 @@ function receive(event) {
   if (e.view && e.view !== state.view) return;
   switch (e.type) {
     case 'reset':
+      previews.hide();
       for (const m of state.messages.values()) m.stream?.end();
       state.messages.clear(); messages.replaceChildren(); state.queue.clear(); state.stagingQueue = null; queue();
       if (e.text) toast(e.text); break;
@@ -236,7 +242,7 @@ function receive(event) {
         ? m.decoder.decode(Uint8Array.from(atob(e.data || ''), c => c.charCodeAt(0)), { stream: true })
         : e.text || '';
       m.raw.push(text);
-      if (m.stream) m.stream.write(text); else m.body.append(document.createTextNode(text));
+      if (m.stream) m.stream.write(text); else previews.append(m.body, text, m);
       follow(); break;
     }
     case 'end': {
@@ -245,7 +251,7 @@ function receive(event) {
         const tail = m.decoder.decode();
         if (tail) m.raw.push(tail);
         if (m.stream) { m.stream.write(tail); m.stream.end(); }
-        else if (tail) m.body.append(document.createTextNode(tail));
+        else previews.append(m.body, tail, m, true);
       }
       follow(); break;
     }

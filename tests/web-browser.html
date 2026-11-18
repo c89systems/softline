@@ -40,6 +40,14 @@ async function waitFor(fn){const until=Date.now()+5000;while(!fn()){if(Date.now(
 const frame=document.createElement('iframe');frame.title='Actual Softline UI regression fixture';frame.style.cssText='width:100%;height:500px;border:1px solid var(--line)';fixtures.append(frame);
 const bootstrap=`<script>
 window.softlineTestCopied=[];
+const hostFetch=window.fetch.bind(window);
+window.fetch=async(...args)=>{
+  const response=await hostFetch(...args);
+  if(typeof args[0]==='string'&&args[0].endsWith('config.json')){
+    const config=await response.json();return new Response(JSON.stringify({...config,images:'1'}),{headers:{'Content-Type':'application/json'}});
+  }
+  return response;
+};
 Object.defineProperty(navigator,'clipboard',{value:{writeText:async text=>{window.softlineTestCopied.push(text)}}});
 window.WebSocket=class extends EventTarget {
   static OPEN=1;
@@ -50,7 +58,18 @@ window.WebSocket=class extends EventTarget {
   },0)}
   reply(value){this.dispatchEvent(new MessageEvent('message',{data:JSON.stringify(value)}))}
   send(value){
+    if(typeof value!=='string'){queueMicrotask(()=>this.reply({type:'image_credit',id:this.upload}));return}
     this.sent.push(value);const q=new URLSearchParams(value);
+    if(q.get('action')==='image_begin'){this.upload=q.get('id');queueMicrotask(()=>this.reply({type:'image_credit',id:this.upload}));return}
+    if(q.get('action')==='image_end'){queueMicrotask(()=>this.reply({type:'image_done',id:this.upload,path:'/backend/softline-image-preview.png'}));return}
+    if(q.get('action')==='send'){
+      queueMicrotask(()=>{
+        const id=q.get('request'),text=q.get('text'),cut=Math.floor(text.length/2);
+        this.reply({type:'accepted',request:id});this.reply({type:'begin',id,role:'user'});
+        this.reply({type:'delta',id,role:'user',text:text.slice(0,cut)});
+        this.reply({type:'delta',id,role:'user',text:text.slice(cut)});this.reply({type:'end',id});
+      });return;
+    }
     if(q.get('action')!=='complete')return;
     const lists={'@':['@README.md','@space dir/','@@literal.txt'],'@space dir/':['@space dir/file.txt'],'/':['/approve','/status'],'/approve':['/approve on','/approve off']};
     const candidates=q.get('all')==='1'?['/status','@']:lists[q.get('resolve')]||[];
@@ -149,6 +168,40 @@ await uiCheck('inline ghosts use composer font, wrap within the editor and never
     assert(Math.abs(p.clientWidth-overlay.clientWidth)<1,'ghost wrap width differs');
     sendDraft();assert(lastAction('send')?.get('text')==='REA','Enter accepted ghost');
   }
+});
+await uiCheck('local image path hover uses the retained upload without changing editor geometry',async()=>{
+  const w=frame.contentWindow,doc=frame.contentDocument,p=doc.querySelector('#prompt');
+  const bytes=Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII='),c=>c.charCodeAt(0));
+  const transfer=new w.DataTransfer();transfer.items.add(new w.File([bytes],'preview.png',{type:'image/png'}));
+  inputDraft('');doc.querySelector('#image-input').files=transfer.files;
+  doc.querySelector('#image-input').dispatchEvent(new w.Event('change',{bubbles:true}));
+  const path='/backend/softline-image-preview.png';
+  await waitFor(()=>p.value===path&&doc.querySelector('#uploads').hidden);
+  for(const width of [760,360])for(const font of ['sans','mono']){
+    frame.style.width=width+'px';doc.documentElement.dataset.font=font;await doc.fonts.ready;
+    inputDraft('long prefix '.repeat(6)+path);
+    await new Promise(resolve=>w.requestAnimationFrame(()=>w.requestAnimationFrame(resolve)));
+    const span=doc.querySelector('#projection-before [data-image-path]'),bounds=p.getBoundingClientRect();
+    assert(span,'draft path reference missing');
+    const rect=[...span.getClientRects()].find(r=>r.bottom>bounds.top&&r.top<bounds.bottom);
+    assert(rect,'wrapped path has no visible hit target');
+    const x=Math.max(bounds.left+1,Math.min(bounds.right-1,(rect.left+rect.right)/2));
+    const y=Math.max(bounds.top+1,Math.min(bounds.bottom-1,(rect.top+rect.bottom)/2));
+    const before=doc.querySelector('#composer').getBoundingClientRect().height;
+    p.dispatchEvent(new w.PointerEvent('pointermove',{clientX:x,clientY:y,bubbles:true}));
+    const panel=doc.querySelector('#image-preview'),image=doc.querySelector('#image-preview-content');
+    assert(!panel.hidden&&image.src.startsWith('blob:'),'hover lost the local upload');
+    await waitFor(()=>image.complete&&image.naturalWidth>0);
+    assert(p.value==='long prefix '.repeat(6)+path,'hover changed the prompt');
+    assert(doc.querySelector('#composer').getBoundingClientRect().height===before,'preview changed composer height');
+    p.dispatchEvent(new w.PointerEvent('pointerleave'));assert(panel.hidden,'leaving the path retained the layer');
+  }
+  inputDraft(path);sendDraft();
+  await waitFor(()=>[...doc.querySelectorAll('.user .image-reference')].some(span=>span.textContent===path));
+  const reference=[...doc.querySelectorAll('.user .image-reference')].find(span=>span.textContent===path);
+  reference.focus();assert(!doc.querySelector('#image-preview').hidden,'submitted path lost keyboard preview');
+  w.document.dispatchEvent(new w.KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true}));
+  assert(doc.querySelector('#image-preview').hidden,'Escape retained the image layer');
 });
 document.title=failures?`FAIL (${failures}) softline browser checks`:'PASS softline browser checks';
 document.documentElement.dataset.checks=failures?'failed':'passed';

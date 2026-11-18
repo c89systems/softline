@@ -164,6 +164,17 @@ All tabs and ANSI share the accepted conversation and queue. Drafts live in
 their originating views. Browser image sources use `sl_image_paste_start_source`
 on separate image-only editor handles, feeding the same constructor callback,
 timeouts, backpressure, completion insertion, and cancellation as native Ctrl-V.
+
+After an upload is acknowledged, its temporary thumbnail disappears and the
+plain backend path remains in the draft. Hover that path to show a floating
+local image preview. The same path in a submitted user message supports hover,
+click and keyboard focus; Escape dismisses the preview. Editing and sending
+still use the original plain text. No backend file-serving endpoint is needed:
+only images uploaded in this browser tab have previews, and a reload loses them.
+The client retains at most 64 recently uploaded or previewed local blob URLs,
+releasing evicted URLs and those retained when leaving the page. Reconnect/replay
+preserves these local associations. Streamed messages match paths incrementally,
+with only an unfinished known-path prefix retained between chunks.
 Source ownership transfers only after successful adoption; close runs once.
 The example callback copies at most one bounded protocol chunk; file writes
 and publication run in the example host loop after the callback returns.

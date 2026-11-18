@@ -139,7 +139,7 @@ add_custom_command(OUTPUT "${_sl_web_assets}"
   COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/scripts/embed-web-assets.py"
     "${CMAKE_CURRENT_SOURCE_DIR}" "${_sl_web_assets}"
   DEPENDS scripts/embed-web-assets.py web/index.html web/softline.css web/softline.js
-          web/completion.js web/prompt.js
+          web/completion.js web/prompt.js web/images.js
     web/markdown.js vendor/streaming-markdown/smd.js vendor/streaming-markdown/LICENSE
     vendor/jetbrains-mono/JetBrainsMono-Regular.woff2 vendor/jetbrains-mono/OFL.txt
   VERBATIM)
