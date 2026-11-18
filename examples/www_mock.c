@@ -628,6 +628,7 @@ demo_www_t *demo_www_open(const sl_www_config_t *config, unsigned short port,
   struct sockaddr_in address;
   socklen_t length = sizeof(address);
   sl_www_config_t adapted;
+  int reuse = 1;
   size_t i;
   if (!w || !config) {
     free(w);
@@ -649,7 +650,10 @@ demo_www_t *demo_www_open(const sl_www_config_t *config, unsigned short port,
   address.sin_family = AF_INET;
   address.sin_addr.s_addr = htonl(0x7f000001UL);
   address.sin_port = htons(port);
-  if (!w->handler || w->listener < 0 || nonblock(w->listener) ||
+  if (!w->handler || w->listener < 0 ||
+      setsockopt(w->listener, SOL_SOCKET, SO_REUSEADDR, &reuse,
+                 sizeof(reuse)) ||
+      nonblock(w->listener) ||
       bind(w->listener, (struct sockaddr *)&address, sizeof(address)) ||
       listen(w->listener, PEERS) ||
       getsockname(w->listener, (struct sockaddr *)&address, &length)) {
