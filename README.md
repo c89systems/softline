@@ -292,6 +292,12 @@ worker emits one source character every 20 ms; the owner-thread watch callback
 feeds libmdf incrementally and forwards each sink fragment directly into a
 Softline output session. The responses mix headings, subheadings, italic, bold,
 code, and paragraphs while input remains editable.
+Every third simulated reply adds a randomly generated chart fence. Horizontal
+bars, vertical bars and tile charts appear in shuffled groups of three charts,
+with varying labels, values and sorting, so nine replies exercise every kind.
+Local, remote, dual ANSI/web and web-only examples use the same producer data;
+the web view draws tile fences as actual pies. The Lua chat example stays plain
+text.
 
 When connected to `example_queue_owner`, the C chat example uses the
 [streaming image handover](docs/image-paste.md#remote-chat-example) for Ctrl-V.

@@ -324,6 +324,83 @@ static int until(int fd, char *data, size_t cap, const char *needle) {
   }
   return -1;
 }
+/* Inspect raw producer deltas, carrying only a short suffix across WS frames.
+ */
+static int chart_turns(int fd, char *data, size_t cap) {
+  static const char alphabet[] =
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  unsigned int kinds = 0;
+  int turn;
+  for (turn = 1; turn <= 9; ++turn) {
+    char request[160], id[64] = {0}, tail[96] = {0};
+    size_t used = 0;
+    int chart = 0, kind = 0, frames;
+    snprintf(request, sizeof(request),
+             "action=send&request=chart-%d&view=charts&request_seq=%d&text="
+             "chart+turn+%d",
+             turn, turn, turn);
+    if (ws_text(fd, request))
+      return -1;
+    for (frames = 0; frames < 2000; ++frames) {
+      int opcode;
+      if (ws_read(fd, data, cap, &opcode) < 0)
+        return -1;
+      if (opcode != 1)
+        continue;
+      if (strstr(data, "\"type\":\"error\""))
+        return -1;
+      if (strstr(data, "\"type\":\"begin\"") &&
+          strstr(data, "\"role\":\"assistant\"")) {
+        const char *start = strstr(data, "\"id\":\""), *end;
+        size_t length;
+        if (!start || !(end = strchr(start + 6, '"')))
+          return -1;
+        length = (size_t)(end - start) + 1;
+        if (length >= sizeof(id))
+          return -1;
+        memcpy(id, start, length);
+        id[length] = 0;
+      }
+      if (strstr(data, "\"type\":\"delta\"") &&
+          strstr(data, "\"role\":\"assistant\"")) {
+        const char *encoded = strstr(data, "\"data\":\"");
+        unsigned int value = 0, bits = 0;
+        if (!encoded)
+          return -1;
+        for (encoded += 8; *encoded && *encoded != '"' && *encoded != '=';
+             ++encoded) {
+          const char *digit = strchr(alphabet, *encoded);
+          if (!digit)
+            return -1;
+          value = (value << 6) | (unsigned int)(digit - alphabet);
+          bits += 6;
+          if (bits >= 8) {
+            bits -= 8;
+            if (used + 1 == sizeof(tail))
+              memmove(tail, tail + 1, --used);
+            tail[used++] = (char)((value >> bits) & 255);
+            tail[used] = 0;
+            if (strstr(tail, "mdf-"))
+              chart = 1;
+            if (strstr(tail, "mdf-bar-chart") ||
+                strstr(tail, "mdf-horizontal-bar-chart"))
+              kind = 1;
+            if (strstr(tail, "mdf-vertical-bar-chart"))
+              kind = 2;
+            if (strstr(tail, "mdf-tile-chart"))
+              kind = 4;
+          }
+        }
+      }
+      if (id[0] && strstr(data, "\"type\":\"end\"") && strstr(data, id))
+        break;
+    }
+    if (frames == 2000 || chart != (turn % 3 == 0) || (chart && !kind))
+      return -1;
+    kinds |= (unsigned int)kind;
+  }
+  return kinds == 7 ? 0 : -1;
+}
 static int completion_file(const char *root, const char *name, int directory) {
   char path[8192];
   int fd;
@@ -362,7 +439,8 @@ int main(int argc, char **argv) {
   int pipes[2] = {-1, -1}, fd = -1, one = -1, two = -1, status, opcode,
       failed = 1;
   pid_t child = -1, owner = -1;
-  int slave = -1, dual;
+  int slave = -1, dual, charts;
+  const char *mode = argc >= 4 ? argv[3] : "";
   unsigned short queue_port = 0;
   unsigned short port;
   size_t used;
@@ -370,7 +448,10 @@ int main(int argc, char **argv) {
                                         0,   255, 1,  2,  3,  4,  5,  6};
   (void)signal(SIGPIPE, SIG_IGN);
   CHECK((argc == 2 || argc == 4 || argc == 5) && data && http);
-  dual = argc >= 4 && (!strcmp(argv[3], "dual") || !strcmp(argv[3], "remote"));
+  charts = !strncmp(mode, "charts-", 7);
+  if (charts)
+    mode += 7;
+  dual = !strcmp(mode, "dual") || !strcmp(mode, "remote");
   CHECK(snprintf(root, sizeof(root), "%s/www-mock-XXXXXX", argv[1]) <
             (int)sizeof(root) &&
         mkdtemp(root));
@@ -468,7 +549,7 @@ int main(int argc, char **argv) {
       } else if (dual)
         execl(argv[2], argv[2], (char *)NULL);
       else
-        execl(argv[2], argv[2], !strcmp(argv[3], "owner") ? "0" : "--web-only",
+        execl(argv[2], argv[2], !strcmp(mode, "owner") ? "0" : "--web-only",
               (char *)NULL);
       _exit(2);
     }
@@ -537,6 +618,11 @@ int main(int argc, char **argv) {
       CHECK(strstr(data,
                    i == 0 || i == 4 ? "\"expand\":\"1\"" : "\"expand\":\"0\""));
     }
+  }
+  if (charts) {
+    CHECK(!chart_turns(one, data, SL_WWW_FRAME_MAX + 1));
+    failed = 0;
+    goto cleanup;
   }
   if (dual)
     CHECK(write_all(terminal_fd, "independent ANSI draft\022", 23) == 0);

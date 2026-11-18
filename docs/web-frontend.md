@@ -23,6 +23,11 @@ there by default. `SOFTLINE_CHAT_IMAGE_DIR` changes backend storage;
 `SOFTLINE_CHAT_IMAGE_MAX_BYTES` changes the enforced default of 32 MiB.
 Remote-client browser uploads go to the remote queue owner's image store.
 
+Every third simulated response contains a randomized libmdf chart fence.
+Horizontal bars, vertical bars and pies appear in shuffled groups, so nine
+responses show all three kinds. ANSI and every attached browser receive the
+same chart source and data. The plain-text Lua queue example remains separate.
+
 `SOFTLINE_WEB_TITLE`, `SOFTLINE_WEB_WELCOME` (Markdown), and
 `SOFTLINE_WEB_BANNER` (trusted host HTML/SVG in the welcome area) customize the
 examples. `SOFTLINE_WEB_HEADER` optionally supplies trusted HTML, SVG or image

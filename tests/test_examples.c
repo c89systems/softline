@@ -17,7 +17,7 @@
 #include <unistd.h>
 
 enum {
-  MAX_ROWS = 40,
+  MAX_ROWS = 64,
   MAX_COLS = 140,
   RAW_CAP = 262144,
   CHAT_READY_TIMEOUT_MS = 15000
@@ -825,11 +825,12 @@ static void test_chat_spacing_across_turns(const char *path) {
   TEST("chat keeps one empty row across consecutive response turns");
   ASSERT_TRUE(setenv("SOFTLINE_CHAT_CHAR_MS", "0", 1) == 0,
               "failed to set fast stream delay");
-  pid = spawn(path, &fd, 120, 40);
+  /* Keep all three turns visible even when the third reply draws a chart. */
+  pid = spawn(path, &fd, 120, 64);
   ASSERT_TRUE(setenv("SOFTLINE_CHAT_CHAR_MS", "2", 1) == 0,
               "failed to restore stream delay");
   ASSERT_TRUE(pid > 0, "spawn failed");
-  term_init(&t, fd, 120, 40);
+  term_init(&t, fd, 120, 64);
   ASSERT_TRUE(wait_raw(&t, "\033[?2004h", CHAT_READY_TIMEOUT_MS) == 0,
               "editor missing");
   ASSERT_TRUE(write(fd, "one\r", 4) == 4, "first send failed");
@@ -842,9 +843,13 @@ static void test_chat_spacing_across_turns(const char *path) {
               "second response missing");
   ASSERT_TRUE(wait_screen(&t, "+ streaming demo", 10000) == 0,
               "second response did not finish");
+  ASSERT_TRUE(strstr(t.raw, "                    ") == NULL,
+              "completed prose turns wrote literal blank runs to scrollback");
   ASSERT_TRUE(write(fd, "three\r", 6) == 6, "third send failed");
   ASSERT_TRUE(wait_screen(&t, "A single line can be", 3000) == 0,
               "third response missing");
+  ASSERT_TRUE(wait_screen(&t, "Progress snapshot", 3000) == 0,
+              "third response chart missing");
   ASSERT_TRUE(wait_screen(&t, "+ streaming demo", 10000) == 0,
               "third response did not finish");
   ASSERT_TRUE(term_row_of(&t, "# A short answer") ==
@@ -857,8 +862,6 @@ static void test_chat_spacing_across_turns(const char *path) {
                       term_row_of(&t, "The stream is still live.") + 2 &&
                   term_row_of(&t, "# Notes") == term_row_of(&t, "> three") + 2,
               "consecutive turns have extra blank rows");
-  ASSERT_TRUE(strstr(t.raw, "                    ") == NULL,
-              "completed turns wrote literal blank runs to scrollback");
   ASSERT_TRUE(cancel_and_quit(&t, fd, pid) == 0, "child failed");
   PASS();
 }

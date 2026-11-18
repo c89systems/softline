@@ -15,6 +15,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "chat_charts.h"
 #include "chat_demo_data.h"
 #include "completion.h"
 #include "queue_demo_client.h"
@@ -37,6 +38,7 @@ struct chat_state {
   int busy;
   int exit_requested;
   unsigned int turn_index;
+  demo_charts_t charts;
   size_t response_bytes;
   char previous_response_char;
   int approval_demo;
@@ -525,13 +527,15 @@ static int operation_watch(sl_t *sl, const sl_watch_event_t *event,
 
 static int start_operation(struct chat_state *state) {
   const char *answer;
+  const char *segments[2];
+  char chart[DEMO_CHART_CAPACITY];
   int pipe_fds[2];
   int flags;
   pid_t pid;
   unsigned int delay;
   int gate_fd = -1;
   const char *gate = getenv("SOFTLINE_CHAT_GATE_FD");
-  size_t i;
+  size_t i, segment;
   if (gate) {
     char *end;
     long value;
@@ -554,6 +558,10 @@ static int start_operation(struct chat_state *state) {
   answer =
       response_templates[state->turn_index++ % (sizeof(response_templates) /
                                                 sizeof(response_templates[0]))];
+  if (demo_chart_next(&state->charts, chart, sizeof(chart)) < 0)
+    return -1;
+  segments[0] = answer;
+  segments[1] = chart;
   delay = character_delay_us();
   if (pipe(pipe_fds) != 0)
     return -1;
@@ -583,11 +591,13 @@ static int start_operation(struct chat_state *state) {
           _exit(1);
       } while (token != '\n');
     }
-    for (i = 0; answer[i] != '\0'; i++) {
-      if (write(pipe_fds[1], answer + i, 1) != 1)
-        break;
-      if (delay > 0)
-        wait_character(delay);
+    for (segment = 0; segment < 2; ++segment) {
+      for (i = 0; segments[segment][i] != '\0'; i++) {
+        if (write(pipe_fds[1], segments[segment] + i, 1) != 1)
+          _exit(0);
+        if (delay > 0)
+          wait_character(delay);
+      }
     }
     close(pipe_fds[1]);
     _exit(0);
@@ -1172,6 +1182,8 @@ int main(int argc, char **argv) {
   int cancelled_busy;
 
   memset(&state, 0, sizeof(state));
+  demo_charts_init(&state.charts,
+                   (unsigned long)time(NULL) ^ (unsigned long)getpid());
   state.reconnect_fd = -1;
   state.watch_fd = -1;
   state.worker_pid = -1;

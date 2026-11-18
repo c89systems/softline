@@ -5,6 +5,7 @@
 #define _DARWIN_C_SOURCE 1
 #endif
 #define _POSIX_C_SOURCE 200809L
+#include "chat_charts.h"
 #include "chat_demo_data.h"
 #include "queue_demo_image.h"
 #include "queue_demo_terminal.h"
@@ -63,6 +64,9 @@ typedef struct owner {
       initialized, demo_enabled, gate_fd, waiting_gate, stall_hello_once;
   unsigned long delay_us, interval_ms;
   unsigned int turn_index;
+  demo_charts_t charts;
+  char chart[DEMO_CHART_CAPACITY];
+  int chart_pending;
   const char *answer;
   size_t answer_pos;
   char previous;
@@ -730,6 +734,8 @@ static void start_response(owner_t *o, double now) {
       response_templates[o->turn_index++ % (sizeof(response_templates) /
                                             sizeof(response_templates[0]))];
   o->answer_pos = 0;
+  o->chart_pending =
+      demo_chart_next(&o->charts, o->chart, sizeof(o->chart)) > 0;
   o->previous = 0;
   o->next_piece = now;
   o->attach_wait_seam = 0;
@@ -873,6 +879,11 @@ static void pump(owner_t *o, double now) {
         handoff_shell(o, NULL);
     }
     o->previous = byte;
+    if (!o->answer[o->answer_pos] && o->chart_pending) {
+      o->answer = o->chart;
+      o->answer_pos = 0;
+      o->chart_pending = 0;
+    }
     if (!o->answer[o->answer_pos]) {
       if (used) {
         chunk[used] = 0;
@@ -910,6 +921,8 @@ int main(int argc, char **argv) {
     return 1;
   }
   demo_link_init(&o->link, -1);
+  demo_charts_init(&o->charts,
+                   (unsigned long)time(NULL) ^ (unsigned long)getpid());
   if (demo_image_store_init(&o->image)) {
     free(o);
     return 1;
