@@ -24,7 +24,9 @@ there by default. `SOFTLINE_CHAT_IMAGE_DIR` changes backend storage;
 Remote-client browser uploads go to the remote queue owner's image store.
 
 `SOFTLINE_WEB_TITLE`, `SOFTLINE_WEB_WELCOME` (Markdown), and
-`SOFTLINE_WEB_BANNER` (trusted host HTML/SVG) customize the examples.
+`SOFTLINE_WEB_BANNER` (trusted host HTML/SVG in the welcome area) customize the
+examples. `SOFTLINE_WEB_HEADER` optionally supplies trusted HTML, SVG or image
+markup in the upper-left toolbar; that area is hidden and unbranded by default.
 `SOFTLINE_QUEUE_DISPLAY_DELAY_MS` defaults to 500 and affects only Q/S/pending
 visibility. Admission, execution, acknowledgement, and FIFO have no delay.
 New rows show immediately while the queue is already visible; approval rows,
@@ -77,7 +79,13 @@ over ordinary HTTP, using browser-generated random request identities.
 
 Configuration strings are copied at construction. Custom asset descriptors,
 paths, MIME types, bytes, and callback contexts are borrowed until destruction.
-Banner HTML is trusted host input; Markdown/model output is rendered as text
+Set `config.header` to optional upper-left toolbar HTML, for example
+`<a href="./"><img src="./logo.svg" alt="My project"></a>`. NULL, empty or
+whitespace-only headers hide the area without reserving space. The existing
+`config.banner` independently controls welcome-area branding. Toolbar graphics
+fit within a 32px height and the available toolbar width.
+
+Header and banner HTML are trusted host input; Markdown/model output is rendered as text
 and safe DOM elements. Optional graphics are custom assets registered in
 `config.assets`. Configuration text is bounded by the event encoder's 8192-byte
 aggregate limit. Constructor failure returns NULL. The `images` configuration

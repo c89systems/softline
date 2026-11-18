@@ -316,7 +316,7 @@ sl_www_t *sl_www_create(const sl_www_config_t *config) {
   sl_www_t *self;
   www_impl_t *impl;
   sl_www_config_t defaults;
-  sl_www_field_t fields[6];
+  sl_www_field_t fields[7];
   char delay[32], limit[32];
   size_t i;
   if (!config) {
@@ -365,7 +365,9 @@ sl_www_t *sl_www_create(const sl_www_config_t *config) {
   fields[4].value = limit;
   fields[5].name = "images";
   fields[5].value = config->binary ? "1" : "0";
-  if (sl_www_emit(save_settings, impl, "config", NULL, fields, 6) != SL_OK) {
+  fields[6].name = "header";
+  fields[6].value = config->header;
+  if (sl_www_emit(save_settings, impl, "config", NULL, fields, 7) != SL_OK) {
     destroy(self);
     return NULL;
   }

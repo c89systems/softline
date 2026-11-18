@@ -308,6 +308,8 @@ try {
   $('welcome-text').replaceChildren(); const welcome = new MarkdownStream($('welcome-text')); welcome.write(config.welcome || 'Welcome to softline'); welcome.end();
   // This is host-supplied branding, separate from model Markdown.
   $('banner').innerHTML = config.banner || '';
+  $('brand').innerHTML = config.header || '';
+  $('brand').hidden = !config.header?.trim();
   connect();
 } catch (error) { $('connection').textContent = 'Unavailable'; toast(error.message); }
 resizePrompt();

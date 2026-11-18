@@ -80,11 +80,13 @@ int main(void) {
   sl_www_config_t config;
   sl_www_asset_t asset;
   sl_www_field_t fields[2];
+  char header[] = "<a href=\"./\"><svg aria-label='custom header'></svg></a>";
   host_t h;
   size_t i;
   memset(&h, 0, sizeof(h));
   sl_www_config_init(&config);
-  CHECK(!config.enabled && !strcmp(config.welcome, "Welcome to softline"));
+  CHECK(!config.enabled && !config.header &&
+        !strcmp(config.welcome, "Welcome to softline"));
   h.web = sl_www_create(&config);
   CHECK(h.web && h.web->asset(h.web, "/", &asset) == SL_ERROR_INVALID);
   sl_www_destroy(h.web);
@@ -100,6 +102,9 @@ int main(void) {
     h.web = sl_www_create(&config);
     CHECK(h.web && sl_www_asset(h.web, "/banner.svg", &asset) == SL_OK &&
           asset.length == 6);
+    CHECK(sl_www_asset(h.web, "/config.json", &asset) == SL_OK &&
+          write_frame(&h, asset.data, asset.length) == SL_OK &&
+          strstr(h.output, "\"header\":\"\""));
     sl_www_destroy(h.web);
     custom.content_type = "image/svg+xml\r\nInjected: value";
     CHECK(!sl_www_create(&config));
@@ -113,7 +118,10 @@ int main(void) {
   config.context = &h;
   config.title = "Custom \"title\"";
   config.banner = "<svg aria-label='host banner'></svg>";
+  config.header = header;
   h.web = sl_www_create(&config);
+  /* The receiver owns configuration bytes after construction. */
+  header[1] = 'X';
   CHECK(h.web && sl_www_asset(h.web, "/", &asset) == SL_OK &&
         asset.length > 100 && !memcmp(asset.data, "<!doctype html>", 15));
   CHECK(sl_www_asset(h.web, "/JetBrainsMono-Regular.woff2", &asset) == SL_OK &&
@@ -121,6 +129,11 @@ int main(void) {
   CHECK(sl_www_asset(h.web, "/smd.js", &asset) == SL_OK && asset.length > 1000);
   CHECK(sl_www_asset(h.web, "/config.json", &asset) == SL_OK && asset.length &&
         memchr(asset.data, '\\', asset.length));
+  CHECK(
+      write_frame(&h, asset.data, asset.length) == SL_OK &&
+      strstr(h.output, "\"header\":\"<a href=\\\"./\\\"><svg "
+                       "aria-label='custom header'></svg></a>\"") &&
+      strstr(h.output, "\"banner\":\"<svg aria-label='host banner'></svg>\""));
   CHECK(sl_www_asset(h.web, "/../LICENSE", &asset) == SL_ERROR_INVALID);
   CHECK(sl_www_connect(h.web, &h, "42") == SL_OK && h.replays == 1);
   CHECK(h.web->message(h.web, &h, request, sizeof(request) - 1, write_frame,

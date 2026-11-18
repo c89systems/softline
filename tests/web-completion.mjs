@@ -98,7 +98,7 @@ export async function runWebCompletionTests(source, completionSource, promptSour
       crypto: { getRandomValues(array) { return array.fill(++serial); } }, localStorage: { getItem() {}, setItem() {} },
       ResizeObserver: class { observe() {} }, performance: { now: () => 0 },
       MarkdownStream: class { write() {} end() {} },
-      fetch: async () => ({ ok: true, json: async () => ({ images: options.images ? '1' : '0' }) }),
+      fetch: async () => ({ ok: true, json: async () => ({ images: options.images ? '1' : '0', ...options.config }) }),
       setTimeout: (fn, delay) => { const id = ++serial; timers.set(id, { fn, delay }); return id; },
       clearTimeout: id => timers.delete(id)
     };
@@ -277,5 +277,16 @@ export async function runWebCompletionTests(source, completionSource, promptSour
     ui.reply(ui.queries()[0]); await ui.idle();
     assert(ui.prompt.value === 'l' && ui.prompt.selectionStart === 0, 'pending Right moved the new insertion point');
   }, { manual: true });
+  await check('toolbar branding is hidden and empty by default', async ui => {
+    assert(ui.get('brand').hidden && ui.get('brand').innerHTML === '', 'default toolbar included branding');
+  });
+  const header = '<a href="./"><svg aria-label="My project"></svg><img src="./logo.svg" alt="Logo"></a>';
+  await check('trusted custom header HTML is visible independently of welcome branding', async ui => {
+    assert(!ui.get('brand').hidden && ui.get('brand').innerHTML === header, 'host header HTML was lost or hidden');
+    assert(ui.get('banner').innerHTML === '<b>Welcome banner</b>', 'header replaced the welcome banner');
+  }, { config: { header, banner: '<b>Welcome banner</b>' } });
+  await check('whitespace header does not reserve a toolbar branding slot', async ui => {
+    assert(ui.get('brand').hidden, 'empty host branding took toolbar space');
+  }, { config: { header: ' \n\t' } });
   return checks;
 }

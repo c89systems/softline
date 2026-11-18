@@ -75,6 +75,9 @@ typedef struct sl_www_config {
   const char *welcome;
   /** Trusted host HTML/SVG only; model text is never HTML. */
   const char *banner;
+  /** Optional trusted host HTML/SVG in the upper-left toolbar; default empty.
+   */
+  const char *header;
   /** Optional borrowed asset descriptors and bytes. */
   const sl_www_asset_t *assets;
   /** Number of custom assets. */

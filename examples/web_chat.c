@@ -699,6 +699,7 @@ demo_web_chat_t *demo_web_open(sl_t *editor, const demo_web_ops_t *ops,
   if (getenv("SOFTLINE_WEB_WELCOME"))
     config.welcome = getenv("SOFTLINE_WEB_WELCOME");
   config.banner = getenv("SOFTLINE_WEB_BANNER");
+  config.header = getenv("SOFTLINE_WEB_HEADER");
   w->www = demo_www_open(&config, (unsigned short)number, closed);
   if (!w->www) {
     demo_web_close(w);
