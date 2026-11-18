@@ -590,6 +590,32 @@ without a named constant, add the letter byte to `softline.KEY_ALT_BASE`.
 The repository ships Lua examples for simple prompts and queued chat turns.
 The Lua chat example demonstrates queue delivery without libmdf.
 
+The Softline Lua module does support streaming output from the separate libmdf
+Lua facade. Its sink callback can call `sl:output_stream_write(chunk)` directly
+on the Lua/editor thread; no complete response is collected between renderers.
+For example, with an open Softline output session:
+
+```lua
+local mdf = require("libmdf")
+local renderer = mdf.document_stream({format = "ansi", ansi_mode = "on",
+    width = 80}, function(chunk)
+  assert(sl:output_stream_write(chunk))
+  return true
+end)
+-- In the host's producer/watch callback, for each arriving source chunk:
+assert(renderer:write(chunk))
+-- Once, at response EOF:
+assert(renderer:finish_document())
+renderer:close()
+```
+
+`lua_libmdf_stream` tests this composition using the checksum-pinned libmdf
+0.23.1 Lua facade against the existing SDK. It feeds one-byte Markdown and chart
+fragments, verifies output before EOF and concurrent typing, and constructs both
+handles on a coroutine collected before later callbacks. The facade is built
+only under the local Lua test runtime; libsoftline and its installed Lua module
+do not acquire a libmdf runtime dependency.
+
 The exact commands `!sh` and `/shell` open `$SHELL -i` (`/bin/sh -i` when
 unset or empty), only between turns on an interactive terminal. Enter or idle
 Alt-Enter launches the shell. Busy shell submissions remain queued and editable

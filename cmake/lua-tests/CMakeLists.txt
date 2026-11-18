@@ -50,6 +50,9 @@ add_test(NAME lua_queue_display_option COMMAND "${BASH_EXECUTABLE}"
   "${root}/tests/check_queue_display_option.sh" "${root}"
   "${SOFTLINE_LUA_EXECUTABLE}" "${root}/examples/chat.lua")
 add_test(NAME lua_backend_coroutines COMMAND "${pty_test}" backend-coroutines "${SOFTLINE_LUA_EXECUTABLE}" "${root}")
+add_test(NAME lua_libmdf_stream COMMAND "${pty_test}" libmdf "${SOFTLINE_LUA_EXECUTABLE}" "${root}")
+set_tests_properties(lua_libmdf_stream PROPERTIES REQUIRED_FILES
+  "${lua_build}/libmdf/libmdf.lua;${lua_build}/libmdf/libmdf/core.so")
 if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Linux")
   set_tests_properties(lua_backend_coroutines PROPERTIES ENVIRONMENT "DISPLAY=;SOFTLINE_TEST_IMAGE_ERRORS=1")
 endif()

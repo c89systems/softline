@@ -168,6 +168,34 @@ cleanup:
   close_editor(&e);
   return failed;
 }
+static int libmdf_stream(void) {
+  struct editor e;
+  char modules[4096];
+  const char *slash = strrchr(executable, '/');
+  int failed = 0;
+  memset(&e, 0, sizeof(e));
+  e.master = -1;
+  REQUIRE(slash && snprintf(modules, sizeof(modules), "%.*s/libmdf",
+                            (int)(slash - executable),
+                            executable) < (int)sizeof(modules));
+  test_rows = 24;
+  test_columns = 80;
+  REQUIRE(start(&e, "tests/lua_libmdf_stream.lua", modules, NULL) == 0);
+  REQUIRE(wait_for(&e, "MDF-LUA-FIRST", 0) == 0);
+  REQUIRE(!contains(&e, "MDF-LUA-LAST", 0));
+  REQUIRE(send_bytes(&e, "draft") == 0);
+  REQUIRE(wait_for(&e, "MDF-LUA-LAST", 0) == 0);
+  REQUIRE(contains(&e, "Build", 0) && contains(&e, "Review", 0));
+  REQUIRE(!contains(&e, "mdf-bar-chart", 0) &&
+          !contains(&e, "mdf-tile-chart", 0));
+  REQUIRE(wait_for(&e, "MDF-LUA-EOF", 0) == 0);
+  REQUIRE(send_bytes(&e, "\r") == 0);
+  REQUIRE(wait_for(&e, "Lua libmdf streaming passed:", 0) == 0);
+  REQUIRE(finish(&e) == 0);
+cleanup:
+  close_editor(&e);
+  return failed;
+}
 static int watch(void) {
   struct editor e;
   int failed = 0, scenario;
@@ -704,6 +732,8 @@ int main(int argc, char **argv) {
     return history();
   if (!strcmp(argv[1], "live"))
     return live();
+  if (!strcmp(argv[1], "libmdf"))
+    return libmdf_stream();
   if (!strcmp(argv[1], "cancel"))
     return cancel();
   if (!strcmp(argv[1], "watch"))
