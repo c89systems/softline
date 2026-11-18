@@ -2,6 +2,7 @@
 #define _DARWIN_C_SOURCE 1
 #endif
 #define _POSIX_C_SOURCE 200809L
+#include "queue_demo_wire.h"
 #include "web_chat.h"
 #include <arpa/inet.h>
 #include <dirent.h>
@@ -109,6 +110,12 @@ static int control(void *context, const char *action, const char *id,
   sl_queue_result_t result;
   (void)id;
   (void)revision;
+  if (!strcmp(action, "consume-front")) {
+    char *text = NULL;
+    int status = sl_prompt_queue_take(app->sl, 0, &text);
+    sl_free_string(app->sl, text);
+    return status;
+  }
   if (!strcmp(action, "approval-fixture")) {
     size_t index = sl_prompt_queue_count(app->sl);
     if (sl_prompt_queue_append(app->sl, "first approval", 1, NULL) != SL_OK ||
@@ -494,6 +501,9 @@ static int edit_turns(int fd, unsigned short port, char *data, size_t cap,
                   revision, &held, &steer, fixture ? NULL : "queued") ||
       held != fixture || !steer)
     return -1;
+  if (fixture && (ws_text(fd, "action=consume-front&request=moved") ||
+                  until(fd, data, cap, "\"request\":\"moved\"")))
+    return -1;
   snprintf(request, sizeof(request),
            "action=edit&view=edits&request=saved&request_seq=3&id=%s&revision=%"
            "s&text=revised+queued+text",
@@ -558,6 +568,42 @@ static void inherited_gate(const int *gate) {
     _exit(2);
   if (gate[0] != 9)
     close(gate[0]);
+}
+static int approval_edits(int fd, unsigned short port, char *data, size_t cap) {
+  const char *original =
+      "Demo queued request #1: Summarize the next steps before continuing.";
+  char id[128], revision[128], request[1024];
+  int held, steer, observer, status;
+  if (queued_text(fd, data, cap, original, id, revision, &held, &steer, NULL) ||
+      !held || steer)
+    return -1;
+  snprintf(request, sizeof(request),
+           "action=edit&view=approvals&request=unchanged&request_seq=1&id=%s&"
+           "revision=%s&text=Demo+queued+request+%%231%%3A+Summarize+the+next+"
+           "steps+before+continuing.",
+           id, revision);
+  if (ws_text(fd, request) ||
+      until(fd, data, cap, "\"request\":\"unchanged\"") ||
+      !strstr(data, "\"type\":\"accepted\""))
+    return -1;
+  observer = ws_open(port);
+  if (observer < 0)
+    return -1;
+  status = queued_text(observer, data, cap, original, id, revision, &held,
+                       &steer, NULL);
+  close(observer);
+  if (status || !held || steer)
+    return -1;
+  snprintf(request, sizeof(request),
+           "action=edit&view=approvals&request=changed&request_seq=2&id=%s&"
+           "revision=%s&text=Revised+approval+text",
+           id, revision);
+  if (ws_text(fd, request) ||
+      queued_text(fd, data, cap, "Revised approval text", id, revision, &held,
+                  &steer, "changed") ||
+      !held || steer)
+    return -1;
+  return 0;
 }
 /* Inspect raw producer deltas, carrying only a short suffix across WS frames.
  */
@@ -674,7 +720,8 @@ int main(int argc, char **argv) {
   int pipes[2] = {-1, -1}, fd = -1, one = -1, two = -1, status, opcode,
       failed = 1;
   pid_t child = -1, owner = -1;
-  int slave = -1, dual, charts, edits, gate[2] = {-1, -1};
+  int slave = -1, dual, charts, edits, approvals, gate[2] = {-1, -1};
+  demo_link_t approval_link;
   char epoch[96];
   const char *mode = argc >= 4 ? argv[3] : "";
   unsigned short queue_port = 0;
@@ -683,13 +730,17 @@ int main(int argc, char **argv) {
   static const unsigned char png[16] = {137, 80,  78, 71, 13, 10, 26, 10,
                                         0,   255, 1,  2,  3,  4,  5,  6};
   (void)signal(SIGPIPE, SIG_IGN);
+  demo_link_init(&approval_link, -1);
   CHECK((argc == 2 || argc == 4 || argc == 5) && data && http);
   charts = !strncmp(mode, "charts-", 7);
   edits = !strncmp(mode, "edits-", 6);
+  approvals = !strncmp(mode, "approvals-", 10);
   if (charts)
     mode += 7;
   if (edits)
     mode += 6;
+  if (approvals)
+    mode += 10;
   dual = !strcmp(mode, "dual") || !strcmp(mode, "remote");
   CHECK(snprintf(root, sizeof(root), "%s/www-mock-XXXXXX", argv[1]) <
             (int)sizeof(root) &&
@@ -774,8 +825,11 @@ int main(int argc, char **argv) {
           dup2(pipes[1], STDERR_FILENO) < 0 || setenv("SOFTLINE_WEB", "1", 1) ||
           setenv("SOFTLINE_WEB_PORT", "0", 1) ||
           setenv("SOFTLINE_HISTORY_DIR", root, 1) ||
-          setenv("SOFTLINE_CHAT_APPROVAL_DEMO", "0", 1) ||
+          setenv("SOFTLINE_CHAT_APPROVAL_DEMO", approvals ? "1" : "0", 1) ||
           setenv("SOFTLINE_CHAT_CHAR_MS", "0", 1))
+        _exit(2);
+      if (approvals && (setenv("SOFTLINE_CHAT_APPROVAL_MS", "50", 1) ||
+                        setenv("SOFTLINE_CHAT_APPROVAL_SEED", "1", 1)))
         _exit(2);
       if (dual) {
         close(terminal_fd);
@@ -815,6 +869,12 @@ int main(int argc, char **argv) {
       CHECK(read_all(pipes[0], &c, 1) == 0);
       if (c == '\n') {
         line[at] = 0;
+        {
+          unsigned int queue_number;
+          if (sscanf(line, "LISTEN 127.0.0.1 %u", &queue_number) == 1 &&
+              queue_number <= 65535)
+            queue_port = (unsigned short)queue_number;
+        }
         (void)sscanf(line, "WEB http://127.0.0.1:%u", &parsed);
         at = 0;
       } else if (at + 1 < sizeof(line))
@@ -826,6 +886,21 @@ int main(int argc, char **argv) {
     CHECK(read_all(pipes[0], &port, sizeof(port)) == 0);
   close(pipes[0]);
   pipes[0] = -1;
+  if (approvals && !strcmp(mode, "owner")) {
+    demo_packet_t hello = {0};
+    int native = connect_to(queue_port);
+    CHECK(native >= 0);
+    demo_link_init(&approval_link, native);
+    demo_put_number(&hello, DEMO_HELLO);
+    demo_put_string(&hello, "web-approval-observer");
+    demo_put_number(&hello, 0);
+    demo_put_number(&hello, 0);
+    demo_put_number(&hello, 1);
+    demo_put_number(&hello, 50);
+    demo_put_number(&hello, 1);
+    CHECK(!demo_link_queue(&approval_link, &hello) &&
+          !demo_link_flush(&approval_link));
+  }
   fd = connect_to(port);
   CHECK(fd >= 0);
   CHECK(write_all(fd, "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n", 35) == 0);
@@ -867,6 +942,14 @@ int main(int argc, char **argv) {
   }
   if (charts) {
     CHECK(!chart_turns(one, data, SL_WWW_FRAME_MAX + 1));
+    failed = 0;
+    goto cleanup;
+  }
+  if (approvals) {
+    int edited = approval_edits(one, port, data, SL_WWW_FRAME_MAX + 1);
+    if (edited)
+      fprintf(stderr, "approval edit last frame: %s\n", data);
+    CHECK(!edited);
     failed = 0;
     goto cleanup;
   }
@@ -1230,6 +1313,7 @@ int main(int argc, char **argv) {
   }
   failed = 0;
 cleanup:
+  demo_link_close(&approval_link);
   if (gate[0] >= 0)
     close(gate[0]);
   if (gate[1] >= 0)

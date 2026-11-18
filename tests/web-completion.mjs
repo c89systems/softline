@@ -313,6 +313,27 @@ export async function runWebCompletionTests(source, completionSource, promptSour
     ui.event({ type: 'accepted', request: retry.get('request') });
     assert(!ui.get('queue-editor').open && ui.prompt.value === 'independent unsent draft', 'successful edit lost independent draft');
   });
+  await check('Enter closes an unchanged approval edit without submitting a queue mutation', async ui => {
+    ui.event({ type: 'capabilities', edit: '1' }); await ui.type('independent draft');
+    queueState(ui, [{ id: 'a', revision: '1' }]); shortcut(ui, 'edit');
+    // Other queue metadata can change while this harmless, unchanged form is open.
+    queueState(ui, [{ id: 'a', revision: '2' }]);
+    const enter = ui.get('queue-edit-text').fire('keydown', { key: 'Enter' });
+    assert(enter.defaultPrevented && !ui.get('queue-editor').open, 'Enter did not finish an unchanged edit');
+    assert(!ui.socket.sent.some(frame => frame.get('action') === 'edit') && ui.prompt.value === 'independent draft', 'unchanged edit mutated queue or draft');
+  });
+  await check('Enter saves changed approval text, while Shift+Enter and composition stay native', async ui => {
+    ui.event({ type: 'capabilities', edit: '1' });
+    queueState(ui, [{ id: 'a', revision: '1' }]); shortcut(ui, 'edit');
+    const input = ui.get('queue-edit-text'); input.value = 'updated approval';
+    assert(!input.fire('keydown', { key: 'Enter', shiftKey: true }).defaultPrevented, 'Shift+Enter could not insert a newline');
+    assert(!input.fire('keydown', { key: 'Enter', isComposing: true }).defaultPrevented, 'composition submitted an edit');
+    input.fire('keydown', { key: 'Enter' });
+    const edit = ui.socket.sent.find(frame => frame.get('action') === 'edit');
+    assert(edit?.get('text') === 'updated approval' && !edit.get('original') && ui.get('queue-editor').open, 'Enter did not submit the edited text or wait for admission');
+    ui.event({ type: 'accepted', request: edit.get('request') });
+    assert(!ui.get('queue-editor').open, 'accepted edit left the form open');
+  });
   await check('plus actions expose shortcuts and terminal is enabled only by the host', async ui => {
     ui.get('plus').click(); await ui.idle();
     let items = ui.get('completions').children;

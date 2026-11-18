@@ -183,7 +183,10 @@ completion provider is pending. Ordinary textarea arrows, selections and native
 modifier navigation remain browser-owned when completion does not handle them.
 
 Queue edits open a separate form, preserving the view's unsent prompt. The
-queue continues normally while the form is open. Saving compares the captured
+form uses Enter to save and Shift+Enter for a newline. Saving unchanged text
+simply closes the form without a queue mutation. Local revisions follow entry
+identity, so consuming an earlier row does not invalidate an untouched target.
+The queue continues normally while the form is open. Saving compares the captured
 revision; a changed/consumed entry rejects the save and retains the edited text
 for inspection or copying. Remote saves acquire and release a backend edit token
 during the save. Duplicate requests replay their outcome. Closing the form

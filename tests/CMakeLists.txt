@@ -123,11 +123,17 @@ if(UNIX)
     "$<TARGET_FILE:example_queue_owner>" charts-owner)
   add_test(NAME softline_www_edits_owner COMMAND test_www_mock "${PROJECT_BINARY_DIR}"
     "$<TARGET_FILE:example_queue_owner>" edits-owner)
+  add_test(NAME softline_www_approvals_owner COMMAND test_www_mock "${PROJECT_BINARY_DIR}"
+    "$<TARGET_FILE:example_queue_owner>" approvals-owner)
+  set_tests_properties(softline_www_approvals_owner PROPERTIES LABELS "integration;web;editing" TIMEOUT 15)
   set_tests_properties(softline_www_edits_owner PROPERTIES LABELS "integration;web;editing" TIMEOUT 30)
   set_tests_properties(softline_www_charts_owner PROPERTIES LABELS "integration;web;libmdf" TIMEOUT 90)
   set_tests_properties(softline_www_queue_owner PROPERTIES LABELS "integration;web;clipboard;example-smoke;memcheck" TIMEOUT 30)
   if(TARGET example_chat)
     foreach(mode local dual)
+      add_test(NAME softline_www_approvals_${mode} COMMAND test_www_mock "${PROJECT_BINARY_DIR}"
+        "$<TARGET_FILE:example_chat>" "approvals-${mode}")
+      set_tests_properties(softline_www_approvals_${mode} PROPERTIES LABELS "integration;web;editing" TIMEOUT 15)
       add_test(NAME softline_www_edits_${mode} COMMAND test_www_mock "${PROJECT_BINARY_DIR}"
         "$<TARGET_FILE:example_chat>" "edits-${mode}")
       set_tests_properties(softline_www_edits_${mode} PROPERTIES LABELS "integration;web;editing" TIMEOUT 30)
@@ -135,6 +141,9 @@ if(UNIX)
         "$<TARGET_FILE:example_chat>" "charts-${mode}")
       set_tests_properties(softline_www_charts_${mode} PROPERTIES LABELS "integration;web;libmdf" TIMEOUT 30)
     endforeach()
+    add_test(NAME softline_www_approvals_remote COMMAND test_www_mock "${PROJECT_BINARY_DIR}"
+      "$<TARGET_FILE:example_chat_remote>" approvals-remote "$<TARGET_FILE:example_queue_owner>")
+    set_tests_properties(softline_www_approvals_remote PROPERTIES LABELS "integration;web;editing" TIMEOUT 15)
     add_test(NAME softline_www_edits_remote COMMAND test_www_mock "${PROJECT_BINARY_DIR}"
       "$<TARGET_FILE:example_chat_remote>" edits-remote "$<TARGET_FILE:example_queue_owner>")
     set_tests_properties(softline_www_edits_remote PROPERTIES LABELS "integration;web;editing" TIMEOUT 30)

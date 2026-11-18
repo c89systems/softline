@@ -113,7 +113,7 @@ function decide(action, item) {
 function editQueue(item) {
   if (!state.canEdit || !state.online || !item || item.mode === 'pending') { toast('No editable queued message is available.'); return; }
   if (state.edit) { $('queue-editor').showModal(); $('queue-edit-text').focus(); return; }
-  state.edit = { id: item.id, revision: item.revision };
+  state.edit = { id: item.id, revision: item.revision, original: item.text };
   $('queue-edit-save').disabled = $('queue-edit-cancel').disabled = $('queue-edit-text').disabled = false;
   $('queue-edit-text').value = item.text; $('queue-edit-error').textContent = '';
   $('queue-editor').showModal(); $('queue-edit-text').focus();
@@ -147,16 +147,22 @@ function promptAction(action) {
 $('queue-edit-cancel').addEventListener('click', () => { if (!state.editPending) $('queue-editor').close(); });
 $('queue-editor').addEventListener('cancel', event => { if (state.editPending) event.preventDefault(); });
 $('queue-editor').addEventListener('close', () => { state.edit = null; prompt.focus(); });
-$('queue-edit-form').addEventListener('submit', event => {
-  event.preventDefault();
+function saveEdit() {
   if (!state.edit || state.editPending) return;
   const text = $('queue-edit-text').value;
+  if (text === state.edit.original) { $('queue-editor').close(); return; }
   if (!text.trim() || new TextEncoder().encode(text).length > 128 * 1024) { $('queue-edit-error').textContent = 'Use nonempty text within 128 KiB.'; return; }
-  const request = randomId(), fields = { ...state.edit, text, request, request_seq: ++state.requestSeq };
+  const request = randomId(), fields = { id: state.edit.id, revision: state.edit.revision, text, request, request_seq: ++state.requestSeq };
   if (send('edit', fields)) {
     state.editPending = request; state.pending.set(request, { action: 'edit', fields, text });
     $('queue-edit-save').disabled = $('queue-edit-cancel').disabled = $('queue-edit-text').disabled = true;
     $('queue-edit-error').textContent = 'Saving…';
+  }
+}
+$('queue-edit-form').addEventListener('submit', event => { event.preventDefault(); saveEdit(); });
+$('queue-edit-text').addEventListener('keydown', event => {
+  if (event.key === 'Enter' && !event.shiftKey && !event.altKey && !event.ctrlKey && !event.metaKey && !event.isComposing) {
+    event.preventDefault(); saveEdit();
   }
 });
 function editResult(request, error) {

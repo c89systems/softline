@@ -25,6 +25,24 @@ typedef struct web_view {
   unsigned long storage_kind;
   int storage_paused;
 } web_view_t;
+typedef struct web_queue_item {
+  char id[128], revision[128];
+  char *text;
+  int steer, held;
+} web_queue_item_t;
+static void release_queue(web_queue_item_t *items, size_t count,
+                          const web_queue_item_t *retained,
+                          size_t retained_count) {
+  size_t i, j;
+  for (i = 0; i < count; ++i) {
+    for (j = 0; j < retained_count; ++j)
+      if (items[i].text == retained[j].text)
+        break;
+    if (j == retained_count)
+      free(items[i].text);
+  }
+  memset(items, 0, count * sizeof(*items));
+}
 struct demo_web_chat {
   demo_www_t *www;
   sl_t *editor;
@@ -54,13 +72,9 @@ struct demo_web_chat {
   } actors[128];
   size_t next_request;
   /* Bounded host-owned queue projection, separate from conversation replay. */
-  struct {
-    char id[128], revision[128];
-    char *text;
-    int steer, held;
-  } queue[WEB_QUEUE_MAX];
+  web_queue_item_t queue[WEB_QUEUE_MAX], building[WEB_QUEUE_MAX];
   size_t queue_count, queue_build;
-  int queue_changed;
+  int queue_changed, queue_failed;
   unsigned long queue_serial;
 };
 static const char *field(const sl_www_request_t *r, const char *name) {
@@ -472,6 +486,8 @@ static size_t queue_target(demo_web_chat_t *w, const char *id,
         !strcmp(w->requests[i].item, id))
       return WEB_QUEUE_MAX;
   demo_web_queue(w);
+  if (w->queue_failed)
+    return WEB_QUEUE_MAX;
   for (i = 0; i < w->queue_count; ++i) {
     if (w->queue[i].held && oldest == WEB_QUEUE_MAX)
       oldest = i;
@@ -774,8 +790,8 @@ void demo_web_close(demo_web_chat_t *w) {
     demo_www_close(w->www);
     for (i = 0; i < 128; ++i)
       free(w->requests[i].text);
-    for (i = 0; i < WEB_QUEUE_MAX; ++i)
-      free(w->queue[i].text);
+    release_queue(w->building, w->queue_build, w->queue, w->queue_count);
+    release_queue(w->queue, w->queue_count, NULL, 0);
     free(w->status);
     free(w);
   }
@@ -858,36 +874,51 @@ unsigned short demo_web_port(demo_web_chat_t *w) {
 }
 demo_www_t *demo_web_listener(demo_web_chat_t *w) { return w ? w->www : NULL; }
 void demo_web_queue_begin(demo_web_chat_t *w) {
-  if (w)
+  if (w) {
+    release_queue(w->building, w->queue_build, w->queue, w->queue_count);
     w->queue_build = 0;
+    w->queue_failed = 0;
+  }
 }
 void demo_web_queue_entry(demo_web_chat_t *w, const char *id,
                           const char *revision, const char *text, int steer,
                           int held) {
-  size_t i;
+  size_t i, previous;
   char *copy;
+  web_queue_item_t *next;
   if (!w || w->queue_build == WEB_QUEUE_MAX || strlen(id) >= 128 ||
       strlen(revision) >= 128 || strlen(text) > 128u * 1024u)
     return;
-  i = w->queue_build++;
-  if (w->queue[i].text && !strcmp(w->queue[i].text, text) &&
-      !strcmp(w->queue[i].id, id) &&
-      (!*revision || !strcmp(w->queue[i].revision, revision)) &&
-      w->queue[i].steer == steer && w->queue[i].held == held)
+  i = w->queue_build;
+  next = w->building + i;
+  for (previous = 0; previous < w->queue_count; ++previous)
+    if (!strcmp(w->queue[previous].id, id))
+      break;
+  if (previous < w->queue_count && !strcmp(w->queue[previous].text, text) &&
+      w->queue[previous].steer == steer && w->queue[previous].held == held) {
+    *next = w->queue[previous];
+    if (*revision)
+      strcpy(next->revision, revision);
+    if (i != previous || strcmp(next->revision, w->queue[previous].revision))
+      w->queue_changed = 1;
+    ++w->queue_build;
     return;
+  }
   copy = malloc(strlen(text) + 1);
-  if (!copy)
+  if (!copy) {
+    w->queue_failed = 1;
     return;
+  }
   strcpy(copy, text);
-  free(w->queue[i].text);
-  w->queue[i].text = copy;
-  strcpy(w->queue[i].id, id);
+  next->text = copy;
+  strcpy(next->id, id);
   if (*revision)
-    strcpy(w->queue[i].revision, revision);
+    strcpy(next->revision, revision);
   else
-    (void)snprintf(w->queue[i].revision, 128, "local-%lu", ++w->queue_serial);
-  w->queue[i].steer = steer;
-  w->queue[i].held = held;
+    (void)snprintf(next->revision, 128, "local-%lu", ++w->queue_serial);
+  next->steer = steer;
+  next->held = held;
+  ++w->queue_build;
   w->queue_changed = 1;
 }
 static void publish_queue_entry(demo_web_chat_t *w, size_t index) {
@@ -928,13 +959,18 @@ void demo_web_queue_end(demo_web_chat_t *w) {
   size_t i;
   if (!w)
     return;
+  if (w->queue_failed) {
+    release_queue(w->building, w->queue_build, w->queue, w->queue_count);
+    w->queue_build = 0;
+    return;
+  }
   if (w->queue_build != w->queue_count)
     w->queue_changed = 1;
-  for (i = w->queue_build; i < w->queue_count; ++i) {
-    free(w->queue[i].text);
-    w->queue[i].text = NULL;
-  }
+  release_queue(w->queue, w->queue_count, w->building, w->queue_build);
+  memcpy(w->queue, w->building, w->queue_build * sizeof(*w->queue));
+  memset(w->building, 0, w->queue_build * sizeof(*w->building));
   w->queue_count = w->queue_build;
+  w->queue_build = 0;
   if (!w->queue_changed)
     return;
   (void)demo_www_publish(w->www, "queue_begin", NULL, 0);
