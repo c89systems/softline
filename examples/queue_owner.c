@@ -1095,7 +1095,7 @@ int main(int argc, char **argv) {
     ops.edit = web_edit;
     ops.snapshot = web_snapshot;
     ops.terminal = 1;
-    ops.terminal_lock_command = 1;
+    ops.terminal_unlock_command = "/terminal-lock off";
     o->web = demo_web_open(NULL, &ops, o, 8081, &enabled);
     if (enabled && !o->web) {
       perror("web listener");

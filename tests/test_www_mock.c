@@ -974,6 +974,13 @@ int main(int argc, char **argv) {
   CHECK(one >= 0 && two >= 0);
   CHECK(until(one, data, SL_WWW_FRAME_MAX + 1, "\"type\":\"session\"") == 0);
   CHECK(!json_field(data, "id", epoch, sizeof(epoch)));
+  if (handoff || terminal || argc == 2) {
+    CHECK(!until(one, data, SL_WWW_FRAME_MAX + 1, "\"type\":\"capabilities\""));
+    if (argc == 2)
+      CHECK(!strstr(data, "\"terminal_unlock_command\""));
+    else
+      CHECK(strstr(data, "\"terminal_unlock_command\":\"/terminal-lock off\""));
+  }
   {
     static const char *const triggers[] = {"/", "h", "v", "n", "@"};
     size_t i;
@@ -1103,6 +1110,21 @@ int main(int argc, char **argv) {
   CHECK(ws_text(one, "action=complete&request=7&text=%2Fst&cursor=3&all=0") ==
         0);
   CHECK(until(one, data, SL_WWW_FRAME_MAX + 1, "\"value\":\"/status\"") == 0);
+  CHECK(!ws_text(one, "action=complete&request=menu&text=&cursor=0&all=1"));
+  {
+    int slash = 0, files = 0;
+    for (;;) {
+      CHECK(!until(one, data, SL_WWW_FRAME_MAX + 1, "\"request\":\"menu\""));
+      if (strstr(data, "\"type\":\"complete_end\"")) {
+        CHECK(strstr(data, "\"status\":\"ok\""));
+        break;
+      }
+      slash |= strstr(data, "\"value\":\"/terminal-lock\"") != NULL;
+      files |= strstr(data, "\"value\":\"@\"") != NULL &&
+               strstr(data, "\"continue\":\"1\"") != NULL;
+    }
+    CHECK(slash && files);
+  }
   {
     static const struct {
       const char *query, *first, *second;

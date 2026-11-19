@@ -102,6 +102,8 @@ int main(int argc, char **argv) {
   modules[2] = asset(w, "/terminal-panel.js");
   CHECK(html && css && js && md && prompt && modules[0] && modules[1] &&
         modules[2]);
+  CHECK(!strstr(html, "/terminal-lock") && !strstr(js, "/terminal-lock") &&
+        !strstr(prompt, "/terminal-lock"));
   /* Logical DOM doubles cannot catch missing real controls. Verify the image
    * controllers' literal bindings against the actual embedded HTML as well. */
   for (i = 0; i < 3; ++i) {

@@ -176,7 +176,9 @@ export async function runWebCompletionTests(source, completionSource, promptSour
     await new AsyncFunction(...Object.keys(env), stripImports(source))(...Object.values(env));
     socket.fire('open');
     event({ type: 'session', id: 'initial' });
-    for (const [, trigger, scope, strip, expand] of policies) event({ type: 'completion_provider', trigger, scope, strip, expand });
+    if (!options.noProviders) {
+      for (const [, trigger, scope, strip, expand] of policies) event({ type: 'completion_provider', trigger, scope, strip, expand });
+    }
     const prompt = get('prompt');
     function input(text, inputType = 'insertText') {
       const e = prompt.fire('beforeinput', { inputType, data: text, cancelable: true });
@@ -396,17 +398,41 @@ export async function runWebCompletionTests(source, completionSource, promptSour
     assert(ui.prompt.readOnly, 'clearing explicit lock overrode terminal policy');
     terminalState(ui, 1, false); assert(!ui.prompt.readOnly, 'disabling automatic policy retained its lock');
   });
-  await check('a locked browser can turn off automatic locking without losing its draft', async ui => {
-    ui.event({ type: 'capabilities', terminal_lock_command: '1' });
+  await check('unregistered slash and at-sign input stays literal and has no candidates', async ui => {
+    await ui.type('/custom @path'); await ui.idle();
+    assert(!ui.queries().length && !ui.ghost(), 'unregistered text triggered completion');
+    ui.get('plus').click(); ui.reply(ui.queries()[0], []);
+    assert(ui.get('completions').children.every(item => !/^[/@]/u.test(item.children[1].textContent)), 'menu invented a command');
+    ui.form(); await ui.idle();
+    assert(ui.sent() === '/custom @path', 'unregistered input was interpreted locally');
+    terminalState(ui, 1, true);
+    assert(ui.get('plus').disabled, 'UI supplied a built-in unlock command');
+  }, { manual: true, noProviders: true });
+  await check('reconnect drops trigger registrations the host no longer publishes', async ui => {
+    await ui.type('@l'); await ui.idle();
+    assert(ui.ghost(), 'initial host registration did not provide a candidate');
+    ui.socket.close(); ui.timeout(1000);
+    ui.event({ type: 'session', id: 'initial' }); await ui.idle();
+    assert(!ui.queries().length && !ui.ghost(), 'reconnect reused the old registration');
+    ui.form(); await ui.idle();
+    assert(ui.sent() === '@l', 'removed registration stripped the at-sign');
+    await ui.type('/ap'); await ui.idle();
+    assert(!ui.queries().length && !ui.ghost(), 'reconnect reused the old slash registration');
+  });
+  await check('the locked menu submits a host command verbatim and preserves the draft', async ui => {
+    const command = 'resume-composer allow';
     await ui.type('keep this draft'); ui.prompt.setSelectionRange(2, 7);
     terminalState(ui, 1, true);
+    ui.event({ type: 'capabilities', terminal_unlock_command: 'resume\ncomposer' });
+    assert(ui.get('plus').disabled, 'menu accepted a multiline command');
+    ui.event({ type: 'capabilities', terminal_unlock_command: command });
     assert(ui.prompt.readOnly && !ui.get('plus').disabled && ui.get('send').disabled, 'locked prompt stranded its own policy control');
     ui.get('plus').click();
     const items = ui.get('completions').children;
-    assert(items.length === 1 && items[0].textContent.includes('/terminal-lock off'), 'locked menu exposed draft actions or omitted its command');
+    assert(items.length === 1 && items[0].children[1].textContent === command, 'locked menu did not show the host command');
     assert(ui.document.activeElement === items[0], 'keyboard focus did not enter the locked menu');
     items[0].click();
-    assert(ui.sent() === '/terminal-lock off' && ui.prompt.readOnly, 'menu did not wait for the server policy');
+    assert(ui.sent() === command && ui.prompt.readOnly, 'menu did not send the host text or wait for its policy');
     terminalState(ui, 1, false);
     assert(!ui.prompt.readOnly && ui.prompt.value === 'keep this draft' && ui.prompt.selectionStart === 2 && ui.prompt.selectionEnd === 7, 'policy command lost the draft or selection');
     terminalState(ui, 1, true); ui.event({ type: 'prompt_state', disabled: '1' });
@@ -451,7 +477,7 @@ export async function runWebCompletionTests(source, completionSource, promptSour
     ui.get('completions').children.find(item => item.textContent.includes('@literal.txt')).click(); await ui.idle();
     assert(ui.prompt.value === '@literal.txt', 'literal filename fixture did not insert');
     if (automatic) {
-      ui.event({ type: 'capabilities', terminal_lock_command: '1' });
+      ui.event({ type: 'capabilities', terminal_unlock_command: '/resume-composer' });
       terminalState(ui, 1, true);
       ui.get('plus').click(); ui.get('completions').children[0].click();
       terminalState(ui, 1, false);

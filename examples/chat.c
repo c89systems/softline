@@ -1383,7 +1383,7 @@ int main(int argc, char **argv) {
     ops.submit = web_submit;
     ops.control = web_control;
     ops.edit = web_edit;
-    ops.terminal_lock_command = 1;
+    ops.terminal_unlock_command = "/terminal-lock off";
     if (state.remote)
       ops.image = web_image;
     state.web = demo_web_open(state.sl, &ops, &state, 8080, &enabled);

@@ -94,6 +94,10 @@ export class Prompt {
     if (literal) this.model.adopt(literal.start, literal.end, true);
     this.hideMenu();
   }
+  newSession() {
+    this.model.providers.clear();
+    this.suspend();
+  }
   connected() {
     if (this.input.readOnly) return;
     const literal = this.model.session?.literal ? this.model.session : null;

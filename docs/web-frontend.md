@@ -121,7 +121,7 @@ Replies may omit `seq`.
 | Event | Fields and behavior |
 | --- | --- |
 | `session` | `id`: host epoch; reconnect retries only within the same epoch |
-| `capabilities` | `edit=1` enables revision-checked queue edits; optional `terminal` is a same-origin absolute path to a host-provided terminal page; `terminal_lock_command=1` enables the locked prompt's `/terminal-lock off` action for hosts that accept that command as a normal submission |
+| `capabilities` | `edit=1` enables revision-checked queue edits. Optional `terminal` is a same-origin absolute path to a terminal page. Optional `terminal_unlock_command` is a single-line host command. During an automatic terminal lock, the `+` menu displays that text and submits it verbatim through the normal prompt handler, preserving the draft. |
 | `reset` | Optional `text`; clear the retained transcript and queue before replay |
 | `begin` | `id`, `role` (`user`, `assistant`, `note`) |
 | `delta` | `id`, `role`, `text`, or `encoding=base64` plus `data`; append incrementally |
@@ -132,7 +132,7 @@ Replies may omit `seq`.
 | `status` | Host-owned `text`, `busy=0/1`; a reserved single-line slot keeps layout stable, with long text ellipsized and available in its title |
 | `prompt_state` | Host-owned `disabled=0/1`, optional tooltip `text`; dim/lock the composer while retaining the draft, scrolling and feed. Send current state during reconnect/replay; optional `view` targets one browser |
 | `terminal_state` | Atomic host snapshot: `active` is the conversation-wide active/initializing handoff count, `disable_prompt=0/1` selects automatic prompt locking (default `0`). Count both TUI and browser sessions; publish on lifecycle or policy changes and replay current state |
-| `completion_provider` | Host registration: one-character `trigger`, `scope=start/word`, `strip=0/1`, `expand=0/1`; send on each connection |
+| `completion_provider` | Host registration: one-character `trigger`, `scope=start/word`, `strip=0/1`, `expand=0/1`. Send the current registrations after `session` on each connection. |
 | `complete` | `request`, raw full `candidate` including trigger; explicit `+` menu also uses canonical `value`, `label`, `description`, UTF-8 byte `start`/`end`, optional `continue=1` |
 | `complete_end` | `request`, `status=ok/error`; completes one provider snapshot, including empty results |
 | `accepted`, `error` | `request`, optional `text`; optional `view` targets one draft owner |
@@ -147,7 +147,10 @@ Browser text frames are URL-encoded actions:
   completion supplies UTF-8 byte `start`/`end` and `resolve`: initially the
   registered trigger, then an explicitly requested continuation prefix. Return
   the entire inventory for that prefix followed by `complete_end`, even when
-  current typed text matches only a subset. `all=1` opens the explicit `+` menu.
+  current typed text matches only a subset. For the explicit `+` menu, answer
+  `all=1` by enumerating candidates from the same registrations used by the TUI.
+  A lazy provider can offer its root with `continue=1` and resolve children when
+  selected, as the examples do for filename completion.
 - `approve`/`reject`: `id`, `revision`; `cancel` stops current generation/backlog.
 - `edit`: `view`, unique `request`, monotonic `request_seq`, `id`, `revision`,
   replacement `text`. Preserve identity, position, Q/S intent and approval hold;
@@ -156,6 +159,8 @@ Browser text frames are URL-encoded actions:
   exact `size`; wait for credit, send bounded binary chunks, then `image_end`.
   `image_cancel` carries the same `id` and is valid before BEGIN is delivered.
 
+Hosts register all completion triggers and candidates, including slash commands
+and filename completion. The chat examples register `/` and `@`.
 Typing uses the same completion interaction as the TUI: a dim inline ghost
 leaves the draft untouched. Tab accepts and cycles the original matching subset;
 Right/Ctrl-F at the token endpoint accepts or commits the selected candidate,

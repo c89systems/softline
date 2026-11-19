@@ -292,13 +292,14 @@ static int replay(void *context, void *peer, const char *after) {
   {
     sl_www_field_t capabilities[3] = {{"edit", NULL, 0},
                                       {"terminal", NULL, 0},
-                                      {"terminal_lock_command", NULL, 0}};
+                                      {"terminal_unlock_command", NULL, 0}};
     capabilities[0].value = w->ops.edit ? "1" : "0";
     capabilities[1].value = getenv("SOFTLINE_WEB_TERMINAL_URL");
     if (!capabilities[1].value && demo_www_terminal_enabled(w->www))
       capabilities[1].value = "/terminal";
-    capabilities[2].value = w->ops.terminal_lock_command ? "1" : "0";
-    (void)demo_www_reply(peer, "capabilities", capabilities, 3);
+    capabilities[2].value = w->ops.terminal_unlock_command;
+    (void)demo_www_reply(peer, "capabilities", capabilities,
+                         capabilities[2].value ? 3 : 2);
   }
   w->queue_changed = 1;
   demo_web_queue(w);
@@ -431,14 +432,21 @@ static int complete(demo_web_chat_t *w, const sl_www_request_t *r) {
     else
       result = demo_resolve(w->editor, resolve, completion, &c, w);
   } else if (c.all) {
-    static const char *const triggers[] = {"/", "h", "v", "n"};
     size_t i;
     result = SL_OK;
-    for (i = 0; i < sizeof(triggers) / sizeof(triggers[0]) && result == SL_OK;
-         ++i)
-      result = demo_resolve(w->editor, triggers[i], completion, &c, w);
-    if (result == SL_OK)
-      result = completion("@", &c);
+    for (i = 0;
+         i < sizeof(demo_completion_rules) / sizeof(demo_completion_rules[0]) &&
+         result == SL_OK;
+         ++i) {
+      char trigger[2];
+      trigger[0] = demo_completion_rules[i].trigger;
+      trigger[1] = '\0';
+      /* Browse filenames lazily when the user selects the root. */
+      if (trigger[0] == '@')
+        result = completion(trigger, &c);
+      else
+        result = demo_resolve(w->editor, trigger, completion, &c, w);
+    }
   } else if (prefix[0] == '@') {
     size_t length = strlen(prefix), parent = length;
     char *directory;

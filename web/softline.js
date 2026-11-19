@@ -16,7 +16,7 @@ const state = { socket: null, online: false, follow: true, messages: new Map(),
   images: true, attachments: [], requestSeq: 0, approval: null, edit: null,
   editPending: null, canEdit: false, terminal: '', promptDisabled: false, restorePromptAfterTerminal: false,
   promptExplicitDisabled: false, promptReason: '', terminalPromptLock: false, terminalHandoffs: 0,
-  canToggleTerminalLock: false };
+  terminalUnlockCommand: '' };
 const icon = () => $('copy-icon').content.cloneNode(true);
 let toastTimer;
 function toast(text) { $('toast').textContent = text; $('toast').hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => { $('toast').hidden = true; }, 3500); }
@@ -136,8 +136,8 @@ function actionItems() {
   ];
 }
 function promptAction(action) {
-  if (action === 'terminal-lock') {
-    if (canToggleLockedPrompt()) sendPrompt('/terminal-lock off', 'send');
+  if (action === 'terminal-unlock') {
+    if (canUnlockPrompt()) sendPrompt(state.terminalUnlockCommand, 'send');
   } else if (action === 'focus') {
     editor.focus();
   } else if (action === 'approvals') {
@@ -204,7 +204,7 @@ function adjustAnchor(before, after, syntax) {
 const editor = new Prompt({
   document, send, mutate: adjustAnchor, resize: resizePrompt, toast, submit,
   actions: actionItems, action: promptAction,
-  lockedActions: () => canToggleLockedPrompt() ? [{ id: 'terminal-lock', label: '/terminal-lock off',
+  lockedActions: () => canUnlockPrompt() ? [{ id: 'terminal-unlock', label: state.terminalUnlockCommand,
     description: 'Allow typing while terminals are open', disabled: !state.online }] : [],
   images: () => state.images, recovery: () => state.failed,
   recovered: item => { state.failed = state.failed.filter(candidate => candidate !== item); },
@@ -228,8 +228,8 @@ function promptState(disabled, text = '') {
   state.promptExplicitDisabled = disabled; state.promptReason = text;
   updatePromptState();
 }
-function canToggleLockedPrompt() {
-  return state.canToggleTerminalLock && state.promptDisabled && !state.promptExplicitDisabled;
+function canUnlockPrompt() {
+  return !!state.terminalUnlockCommand && state.promptDisabled && !state.promptExplicitDisabled;
 }
 function updatePromptState() {
   const disabled = state.promptExplicitDisabled || (state.terminalPromptLock && state.terminalHandoffs > 0);
@@ -238,7 +238,7 @@ function updatePromptState() {
   prompt.setAttribute('aria-disabled', String(disabled));
   prompt.title = disabled ? state.promptExplicitDisabled ? state.promptReason || 'The host has paused prompt input.' : 'A terminal handoff is active.' : '';
   $('composer').dataset.disabled = disabled ? '1' : '0';
-  $('plus').disabled = disabled && !canToggleLockedPrompt();
+  $('plus').disabled = disabled && !canUnlockPrompt();
   $('image-input').disabled = disabled;
   if (disabled && !wasDisabled) editor.suspend();
   else if (!disabled && wasDisabled) {
@@ -426,9 +426,10 @@ function receive(event) {
     case 'image_done': if (e.id === state.upload?.id) credit({ path: e.path }); break;
     case 'image_error': if (e.id === state.upload?.id) cancelUpload(e.text || 'Image upload failed.'); break;
     case 'session':
+      editor.newSession();
+      state.terminalUnlockCommand = '';
       if (state.epoch && state.epoch !== e.id) {
         terminalPanel.close();
-        state.canToggleTerminalLock = false;
         state.terminalHandoffs = 0; state.terminalPromptLock = false;
         promptState(false);
         state.seq = ''; clearConversation();
@@ -437,20 +438,23 @@ function receive(event) {
         state.canEdit = false; state.terminal = '';
       }
       state.online = true; $('connection').textContent = 'Connected';
-      editor.connected(); resizePrompt(); queue();
+      updatePromptState(); queue();
       if (!state.epoch || state.epoch === e.id) for (const item of state.pending.values()) send(item.action, item.fields);
       else if (state.epoch && state.pending.size) {
         state.failed.push(...state.pending.values()); state.failed = state.failed.slice(-16); state.pending.clear();
         toast('The host restarted. Unconfirmed prompts are available under +; they were not sent again.');
       }
       state.epoch = e.id; break;
-    case 'capabilities':
+    case 'capabilities': {
       state.canEdit = e.edit === '1';
-      state.canToggleTerminalLock = e.terminal_lock_command === '1';
+      const command = e.terminal_unlock_command;
+      state.terminalUnlockCommand = typeof command === 'string' && command.trim() &&
+        !/[\u0000-\u001f\u007f\u2028\u2029]/u.test(command) ? command : '';
       updatePromptState();
       state.terminal = typeof e.terminal === 'string' && /^\/(?!\/)/u.test(e.terminal) && !/[\\\u0000-\u0020]/u.test(e.terminal) ? e.terminal : '';
       if (!state.terminal) terminalPanel.close();
       queue(); break;
+    }
     case 'accepted': state.pending.delete(e.request); editResult(e.request); break;
     case 'error':
       editResult(e.request, e.text || 'The entry changed or was consumed. Your edit is kept.');
