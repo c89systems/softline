@@ -22,6 +22,9 @@ shell and foreground process group, and arranges nonblocking child reaping.
 Shell exit preserves the final output and reports its exit status. Reconnection
 never silently starts a new shell: reload/open another terminal deliberately.
 Healthy shells have no idle/session timeout.
+The TUI's Alt-S remote terminal and browser terminals can remain open and run
+concurrently. They use separate PTYs with independent shell state, dimensions
+and lifetimes; closing or resizing one does not affect the other.
 
 The library ships `/terminal`, `/terminal.js`, `/terminal.css`, `/xterm.js`,
 `/xterm-addon-fit.js`, `/xterm.css`, and their license assets through
@@ -58,6 +61,9 @@ handshake window while its PTY cleanup proceeds independently.
 `softline_www_terminal_owner` drives the actual HTTP/WebSocket listener and real
 shell: working directory, geometry, Ctrl+C, UTF-8/NUL/high bytes, separate PTYs,
 EOF/exit status, output backpressure with simultaneous chat, and invalid credit.
+It also keeps the TUI's native TCP PTY open alongside the browser PTY, verifies
+native I/O while browser output is blocked, and checks independent shell state
+and exit status after a browser shell closes.
 `softline_www_terminal_adapter` verifies blocked input, cancellation, failed
 launch and child reaping. `softline_www_terminal_client` checks browser transport
 logic with xterm/DOM doubles, including acknowledgements after consumption,

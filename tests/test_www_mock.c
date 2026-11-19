@@ -950,7 +950,8 @@ int main(int argc, char **argv) {
     }
   }
   if (terminal) {
-    CHECK(!terminal_roundtrip(port, one, root, data, SL_WWW_FRAME_MAX + 1));
+    CHECK(!terminal_roundtrip(port, queue_port, one, root, data,
+                              SL_WWW_FRAME_MAX + 1));
     failed = 0;
     goto cleanup;
   }
