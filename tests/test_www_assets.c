@@ -166,6 +166,23 @@ int main(int argc, char **argv) {
         strstr(css, "#terminal-panel{flex:none;") &&
         strstr(css, "@keyframes terminal-slide-up") &&
         strstr(css, "#composer[data-disabled=\"1\"]"));
+  {
+    char *page = asset(w, "/terminal"), *style = asset(w, "/terminal.css");
+    char *grid, *footer;
+    CHECK(page && style);
+    grid = strstr(page, "<main id=\"terminal\"");
+    footer = strstr(page, "<footer class=\"terminal-footer\"");
+    CHECK(grid && footer && grid < footer && !strstr(page, "<header"));
+    CHECK(strstr(footer, "id=\"terminal-status\"") &&
+          strstr(footer, "id=\"terminal-close\""));
+    at = strstr(style, ".terminal-footer{");
+    CHECK(at && (rule_end = strchr(at, '}')) != NULL);
+    CHECK(strstr(at, "height:24px;") && strstr(at, "height:24px;") < rule_end);
+    CHECK(!strstr(style, "terminal-toolbar") &&
+          strstr(style, "#terminal{flex:1;min-height:0;padding:8px 16px;"));
+    free(page);
+    free(style);
+  }
   CHECK(strstr(html, "aria-autocomplete=\"inline\"") &&
         strstr(html, "aria-keyshortcuts=\"Escape\"") &&
         strstr(html, "id=\"prompt-projection\" aria-hidden=\"true\" hidden") &&

@@ -26,7 +26,7 @@ export function mountTerminal({ document, window, Terminal, FitAddon }) {
   const url = new window.URL('./terminal/events', window.location.href);
   url.protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
   const socket = new window.WebSocket(url); socket.binaryType = 'arraybuffer';
-  const status = text => { get('terminal-status').textContent = text; };
+  const status = text => { get('terminal-status').textContent = get('terminal-status').title = text; };
   const send = (action, fields = {}) => {
     if (socket.readyState !== window.WebSocket.OPEN) return false;
     try { socket.send(new URLSearchParams({ action, ...fields }).toString()); return true; }
@@ -67,8 +67,8 @@ export function mountTerminal({ document, window, Terminal, FitAddon }) {
       const height = screen?.getBoundingClientRect().height;
       const rowHeight = height > 0 && terminal.rows > 0 ? height / terminal.rows : Math.ceil(terminal.options.fontSize * 1.2);
       const padding = window.getComputedStyle(container);
-      const toolbar = document.querySelector('.terminal-toolbar').getBoundingClientRect().height;
-      const chromeHeight = toolbar + (parseFloat(padding.getPropertyValue('padding-top')) || 0) + (parseFloat(padding.getPropertyValue('padding-bottom')) || 0);
+      const footer = document.querySelector('.terminal-footer').getBoundingClientRect().height;
+      const chromeHeight = footer + (parseFloat(padding.getPropertyValue('padding-top')) || 0) + (parseFloat(padding.getPropertyValue('padding-bottom')) || 0);
       window.parent.postMessage({ type: 'softline-terminal-size', rowHeight, chromeHeight }, window.location.origin);
     }
     if (ready && !closed && !send('resize', { rows: terminal.rows, columns: terminal.cols })) stop('Connection lost.');

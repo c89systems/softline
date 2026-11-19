@@ -10,7 +10,7 @@ class Target {
 function boot(options = {}) {
   const nodes = new Map(), raf = new Map(); let serial = 0, terminal, socket, observer;
   const document = new Target();
-  Object.assign(document, { documentElement: { dataset: {} }, hasFocus: () => options.focus !== false, querySelector: () => ({ getBoundingClientRect: () => ({ height: 40 }) }), getElementById(id) { if (!nodes.has(id)) nodes.set(id, new Target()); return nodes.get(id); } });
+  Object.assign(document, { documentElement: { dataset: {} }, hasFocus: () => options.focus !== false, querySelector: selector => selector === '.terminal-footer' ? { getBoundingClientRect: () => ({ height: 24 }) } : null, getElementById(id) { if (!nodes.has(id)) nodes.set(id, new Target()); return nodes.get(id); } });
   class Terminal {
     constructor(options) { this.options = options; this.rows = 24; this.cols = 80; this.writes = []; terminal = this; }
     loadAddon(addon) { this.fit = addon; }
@@ -26,7 +26,7 @@ function boot(options = {}) {
   }
   const window = new Target();
   Object.assign(window, { URL, WebSocket: Socket, location: { href: 'https://localhost/chat/terminal', protocol: 'https:', origin: 'https://localhost' },
-    getComputedStyle: () => ({ getPropertyValue: () => '' }), close() { this.closed = true; },
+    getComputedStyle: () => ({ getPropertyValue: name => name.startsWith('padding-') ? '8px' : '' }), close() { this.closed = true; },
     requestAnimationFrame: fn => { const id = ++serial; raf.set(id, fn); return id; }, cancelAnimationFrame: id => raf.delete(id),
     ResizeObserver: class { constructor(fn) { this.fn = fn; observer = this; } observe() {} disconnect() { this.disconnected = true; } } });
   window.parent = options.embedded ? { messages: [], postMessage(data, origin) { this.messages.push({ data, origin }); } } : window;
@@ -91,6 +91,7 @@ check('connection loss disables typing and never starts another shell automatica
 check('server errors keep their actionable reason', ui => {
   ui.open(); ui.event('error', { text: 'Shell launch failed' });
   assert(ui.socket.readyState === 3 && ui.nodes.get('terminal-status').textContent === 'Shell launch failed', 'server failure reason was overwritten');
+  assert(ui.nodes.get('terminal-status').title === 'Shell launch failed', 'compact status lost its complete error tooltip');
 });
 check('page close cancels the owned session', ui => {
   ui.open(); ui.event('ready'); ui.window.fire('pagehide');

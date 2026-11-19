@@ -101,6 +101,9 @@ await uiCheck('terminal docks below the composer and fits short and tall viewpor
   const panel=doc.querySelector('#terminal-panel');
   await waitFor(()=>!panel.hidden&&panel.querySelector('iframe')?.contentDocument?.querySelector('.xterm-screen'));
   const terminalFrame=panel.querySelector('iframe');
+  const terminalDocument=terminalFrame.contentDocument,grid=terminalDocument.querySelector('#terminal'),footer=terminalDocument.querySelector('.terminal-footer');
+  assert(!terminalDocument.querySelector('header')&&Math.abs(grid.getBoundingClientRect().top)<1,'terminal still has a top status bar');
+  assert(footer&&Math.abs(footer.getBoundingClientRect().height-24)<1&&footer.getBoundingClientRect().top>=grid.getBoundingClientRect().bottom-1,'terminal status is not a compact footer');
   for(const height of [1400,500]){
     frame.style.height=`${height}px`;
     await new Promise(resolve=>setTimeout(resolve,150));

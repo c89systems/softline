@@ -321,6 +321,7 @@ export async function runWebCompletionTests(source, completionSource, promptSour
   });
   await check('terminal uses 25 measured rows or one third of the viewport without hiding the prompt', async ui => {
     openTerminal(ui);
+    assert(ui.get('terminal-panel').style.height === '491px', 'initial panel still reserves the old header');
     terminalEvent(ui, { type: 'softline-terminal-size', rowHeight: 17, chromeHeight: 58 });
     assert(ui.get('terminal-panel').style.height === '484px', 'panel did not reserve 25 measured rows plus chrome and border');
     ui.window.innerHeight = 1800; ui.get('workspace').rect.height = 1736; ui.window.fire('resize');

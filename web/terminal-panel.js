@@ -5,7 +5,7 @@ export class TerminalPanel {
     this.document = document; this.window = window; this.closed = closed;
     this.origin = window.origin || window.location.origin;
     this.panel = document.getElementById('terminal-panel');
-    this.rowHeight = 18; this.chromeHeight = 65;
+    this.rowHeight = 18; this.chromeHeight = 40;
     window.addEventListener('message', event => {
       if (!this.frame || event.source !== this.frame.contentWindow || event.origin !== this.origin) return;
       const data = event.data;
@@ -24,7 +24,7 @@ export class TerminalPanel {
     if (this.frame) { this.frame.contentWindow.focus(); return; }
     const url = new this.window.URL(path, this.document.baseURI || this.window.location.href);
     if (url.origin !== this.origin || !['http:', 'https:'].includes(url.protocol)) throw new Error('The terminal must use this chat origin.');
-    this.rowHeight = 18; this.chromeHeight = 65;
+    this.rowHeight = 18; this.chromeHeight = 40;
     const frame = this.document.createElement('iframe');
     frame.title = 'Server terminal'; frame.className = 'terminal-frame';
     frame.addEventListener('load', () => this.theme());

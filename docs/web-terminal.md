@@ -16,7 +16,9 @@ JavaScript, CSS and JetBrains Mono bytes are served locally; there is no CDN,
 package manager or browser installation at runtime. The terminal uses the chat
 theme selected in chat (including live theme changes) and a monospace terminal grid.
 The panel reserves at least 25 measured terminal rows or one third of the viewport,
-whichever needs more space, including room for its toolbar and padding. When the
+whichever needs more space, including room for its footer and padding. A single
+thin line separates chat and terminal; connection/exit status and the close icon
+sit in a compact 24-pixel footer below the grid. When the
 window or on-screen keyboard leaves too little space, it shrinks to preserve the
 composer and some conversation space. Font loading, window resizing and composer
 growth recalculate the size. Reduced-motion preferences disable the slide animation.
@@ -31,7 +33,7 @@ loop. Terminal output is never conversation output and is not retained in the
 chat replay log. Closing/navigating away disconnects the socket, terminates the
 shell and foreground process group, and arranges nonblocking child reaping.
 The standalone `/terminal` asset remains usable directly and reports shell exit
-status in its toolbar. The dock embeds that same view in an iframe, with a
+status in its footer. The dock embeds that same view in an iframe, with a
 separate WebSocket; closing the iframe closes its transport. Only messages from
 that exact frame and origin can resize or close the dock. Reconnection
 never silently starts a new shell: open another terminal deliberately.
@@ -63,6 +65,15 @@ view, and supplies its current state during replay/reconnect. Reconnection to
 the same host retains the last lock until the host updates it. Treat it as a UI
 state: hosts must still enforce their own admission policy. Neither the UI lock
 nor terminal opening changes the actual prompt queue's scheduling.
+
+Terminal **handoff** transfers interactive control. It does not automatically
+send a terminal transcript to an agent. Hosts already receive raw PTY output
+through `SL_TERMINAL_READ` and can feed both the frontend and their own capture
+consumer while chat remains live. The examples forward those chunks without
+recording them. Recording a session and delivering its contents to an agent on
+exit is host policy, such as a CAI feature; there is no built-in "send all
+terminal content" action. The browser's bounded scrollback is not a full-session
+recording, and raw PTY bytes include terminal control sequences.
 
 Custom terminal pages embedded through the `terminal` capability can use the
 same small frame bridge: post `softline-terminal-closed` to the same-origin
