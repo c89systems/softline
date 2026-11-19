@@ -121,7 +121,7 @@ Replies may omit `seq`.
 | Event | Fields and behavior |
 | --- | --- |
 | `session` | `id`: host epoch; reconnect retries only within the same epoch |
-| `capabilities` | `edit=1` enables revision-checked queue edits; optional `terminal` is a same-origin absolute path to a host-provided terminal page |
+| `capabilities` | `edit=1` enables revision-checked queue edits; optional `terminal` is a same-origin absolute path to a host-provided terminal page; `terminal_lock_command=1` enables the locked prompt's `/terminal-lock off` action for hosts that accept that command as a normal submission |
 | `reset` | Optional `text`; clear the retained transcript and queue before replay |
 | `begin` | `id`, `role` (`user`, `assistant`, `note`) |
 | `delta` | `id`, `role`, `text`, or `encoding=base64` plus `data`; append incrementally |
@@ -211,9 +211,9 @@ the [browser terminal](web-terminal.md) at `/terminal` on its existing web port
 (8081 by default). Ctrl+` and the `+` menu open the locally served xterm.js view
 in a bottom panel; closing it terminates its shell, and shell exit closes it.
 The conversation and prompt stay above the panel. Opening it leaves chat and
-input enabled by default. Set `SOFTLINE_WEB_DISABLE_PROMPT_DURING_TERMINAL=1`
-in the examples to automatically lock every conversation web prompt while any
-TUI or browser handoff is active. A `terminal_state` snapshot changes that policy
+input enabled by default. Use `/terminal-lock` in the examples to toggle whether
+every conversation web prompt locks during TUI or browser handoffs. A
+`terminal_state` snapshot changes that policy
 at runtime; the host owns lifecycle counts and propagation across its views.
 Hosts can explicitly dim/lock the composer with a `prompt_state`
 event (`disabled="1"`, optional tooltip `text`) and unlock with `disabled="0"`.

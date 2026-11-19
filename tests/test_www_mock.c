@@ -998,6 +998,14 @@ int main(int argc, char **argv) {
   if (handoff) {
     CHECK(!terminal_state_wait(one, data, SL_WWW_FRAME_MAX + 1, 0, 1));
     CHECK(!terminal_state_wait(two, data, SL_WWW_FRAME_MAX + 1, 0, 1));
+    CHECK(!ws_text(one, "action=send&view=policy&request=off&request_seq=1"
+                        "&text=%2Fterminal-lock+off"));
+    CHECK(!terminal_state_wait(one, data, SL_WWW_FRAME_MAX + 1, 0, 0));
+    CHECK(!terminal_state_wait(two, data, SL_WWW_FRAME_MAX + 1, 0, 0));
+    CHECK(terminal_fd >= 0 && !write_all(terminal_fd, "/terminal-lock\r",
+                                         sizeof("/terminal-lock\r") - 1));
+    CHECK(!terminal_state_wait(one, data, SL_WWW_FRAME_MAX + 1, 0, 1));
+    CHECK(!terminal_state_wait(two, data, SL_WWW_FRAME_MAX + 1, 0, 1));
     CHECK(terminal_fd >= 0 && write(terminal_fd, "\033s", 2) == 2);
     CHECK(!terminal_state_wait(one, data, SL_WWW_FRAME_MAX + 1, 1, 1));
     CHECK(!terminal_state_wait(two, data, SL_WWW_FRAME_MAX + 1, 1, 1));
@@ -1106,6 +1114,9 @@ int main(int argc, char **argv) {
          "@examples/chat.c", "@examples/other.c"},
         {"text=%2Fapprove&cursor=8&start=0&end=8&resolve=%2Fapprove",
          "/approve on", "/approve off"},
+        {"text=%2Fterminal-lock&cursor=14&start=0&end=14&resolve=%2Fterminal-"
+         "lock",
+         "/terminal-lock on", "/terminal-lock off"},
         {"text=%40many%2Fitem299&cursor=13&start=0&end=13&resolve=%40many%2F",
          "@many/item000", "@many/item299"}};
     size_t i;

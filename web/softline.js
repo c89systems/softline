@@ -15,7 +15,8 @@ const state = { socket: null, online: false, follow: true, messages: new Map(),
   queueDelay: 500, queueTimer: null, pending: new Map(), failed: [], epoch: null,
   images: true, attachments: [], requestSeq: 0, approval: null, edit: null,
   editPending: null, canEdit: false, terminal: '', promptDisabled: false, restorePromptAfterTerminal: false,
-  promptExplicitDisabled: false, promptReason: '', terminalPromptLock: false, terminalHandoffs: 0 };
+  promptExplicitDisabled: false, promptReason: '', terminalPromptLock: false, terminalHandoffs: 0,
+  canToggleTerminalLock: false };
 const icon = () => $('copy-icon').content.cloneNode(true);
 let toastTimer;
 function toast(text) { $('toast').textContent = text; $('toast').hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => { $('toast').hidden = true; }, 3500); }
@@ -135,7 +136,9 @@ function actionItems() {
   ];
 }
 function promptAction(action) {
-  if (action === 'focus') {
+  if (action === 'terminal-lock') {
+    if (canToggleLockedPrompt()) sendPrompt('/terminal-lock off', 'send');
+  } else if (action === 'focus') {
     editor.focus();
   } else if (action === 'approvals') {
     const item = [...state.queue.values()].find(candidate => candidate.held === '1');
@@ -201,6 +204,8 @@ function adjustAnchor(before, after, syntax) {
 const editor = new Prompt({
   document, send, mutate: adjustAnchor, resize: resizePrompt, toast, submit,
   actions: actionItems, action: promptAction,
+  lockedActions: () => canToggleLockedPrompt() ? [{ id: 'terminal-lock', label: '/terminal-lock off',
+    description: 'Allow typing while terminals are open', disabled: !state.online }] : [],
   images: () => state.images, recovery: () => state.failed,
   recovered: item => { state.failed = state.failed.filter(candidate => candidate !== item); },
   imagePicker: () => $('image-input').click(),
@@ -223,6 +228,9 @@ function promptState(disabled, text = '') {
   state.promptExplicitDisabled = disabled; state.promptReason = text;
   updatePromptState();
 }
+function canToggleLockedPrompt() {
+  return state.canToggleTerminalLock && state.promptDisabled && !state.promptExplicitDisabled;
+}
 function updatePromptState() {
   const disabled = state.promptExplicitDisabled || (state.terminalPromptLock && state.terminalHandoffs > 0);
   const wasDisabled = state.promptDisabled;
@@ -230,24 +238,34 @@ function updatePromptState() {
   prompt.setAttribute('aria-disabled', String(disabled));
   prompt.title = disabled ? state.promptExplicitDisabled ? state.promptReason || 'The host has paused prompt input.' : 'A terminal handoff is active.' : '';
   $('composer').dataset.disabled = disabled ? '1' : '0';
-  $('plus').disabled = $('image-input').disabled = disabled;
+  $('plus').disabled = disabled && !canToggleLockedPrompt();
+  $('image-input').disabled = disabled;
   if (disabled && !wasDisabled) editor.suspend();
   else if (!disabled && wasDisabled) {
+    editor.hideMenu();
     if (state.online) editor.connected();
     editor.focus(!(state.restorePromptAfterTerminal && document.activeElement === scroll));
     state.restorePromptAfterTerminal = false;
   }
+  if (disabled) editor.showMenu();
   resizePrompt();
+}
+function sendPrompt(text, action) {
+  if (state.pending.size >= 32) {
+    toast('Wait for the host to confirm pending prompts.');
+    return false;
+  }
+  const request = randomId(), fields = { text, request, request_seq: ++state.requestSeq };
+  if (!send(action, fields)) return false;
+  state.pending.set(request, { action, fields, text });
+  return true;
 }
 function submit(steer = false) {
   if (state.promptDisabled || state.attachments.length) return;
   editor.finish();
   if (!prompt.value.trim()) return;
-  if (state.pending.size >= 32) { toast('Wait for the host to confirm pending prompts. Your draft is kept.'); return; }
   if (new TextEncoder().encode(prompt.value).length > 128 * 1024) { toast('The prompt exceeds 128 KiB. Your draft is kept.'); return; }
-  const request = randomId(), action = steer ? 'steer' : 'send', fields = { text: prompt.value, request, request_seq: ++state.requestSeq };
-  if (send(action, fields)) {
-    state.pending.set(request, { action, fields, text: fields.text });
+  if (sendPrompt(prompt.value, steer ? 'steer' : 'send')) {
     prompt.value = ''; prompt.setSelectionRange(0, 0); editor.reset(); started(); state.follow = true; resizePrompt(); editor.focus();
   }
 }
@@ -410,6 +428,7 @@ function receive(event) {
     case 'session':
       if (state.epoch && state.epoch !== e.id) {
         terminalPanel.close();
+        state.canToggleTerminalLock = false;
         state.terminalHandoffs = 0; state.terminalPromptLock = false;
         promptState(false);
         state.seq = ''; clearConversation();
@@ -427,6 +446,8 @@ function receive(event) {
       state.epoch = e.id; break;
     case 'capabilities':
       state.canEdit = e.edit === '1';
+      state.canToggleTerminalLock = e.terminal_lock_command === '1';
+      updatePromptState();
       state.terminal = typeof e.terminal === 'string' && /^\/(?!\/)/u.test(e.terminal) && !/[\\\u0000-\u0020]/u.test(e.terminal) ? e.terminal : '';
       if (!state.terminal) terminalPanel.close();
       queue(); break;

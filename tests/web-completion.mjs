@@ -396,6 +396,22 @@ export async function runWebCompletionTests(source, completionSource, promptSour
     assert(ui.prompt.readOnly, 'clearing explicit lock overrode terminal policy');
     terminalState(ui, 1, false); assert(!ui.prompt.readOnly, 'disabling automatic policy retained its lock');
   });
+  await check('a locked browser can turn off automatic locking without losing its draft', async ui => {
+    ui.event({ type: 'capabilities', terminal_lock_command: '1' });
+    await ui.type('keep this draft'); ui.prompt.setSelectionRange(2, 7);
+    terminalState(ui, 1, true);
+    assert(ui.prompt.readOnly && !ui.get('plus').disabled && ui.get('send').disabled, 'locked prompt stranded its own policy control');
+    ui.get('plus').click();
+    const items = ui.get('completions').children;
+    assert(items.length === 1 && items[0].textContent.includes('/terminal-lock off'), 'locked menu exposed draft actions or omitted its command');
+    assert(ui.document.activeElement === items[0], 'keyboard focus did not enter the locked menu');
+    items[0].click();
+    assert(ui.sent() === '/terminal-lock off' && ui.prompt.readOnly, 'menu did not wait for the server policy');
+    terminalState(ui, 1, false);
+    assert(!ui.prompt.readOnly && ui.prompt.value === 'keep this draft' && ui.prompt.selectionStart === 2 && ui.prompt.selectionEnd === 7, 'policy command lost the draft or selection');
+    terminalState(ui, 1, true); ui.event({ type: 'prompt_state', disabled: '1' });
+    assert(ui.get('plus').disabled, 'terminal command bypassed an explicit host lock');
+  }, { images: true });
   await check('closing a browser panel cannot unlock a handoff in another view', async ui => {
     openTerminal(ui); terminalState(ui, 2, true);
     terminalEvent(ui, { type: 'softline-terminal-closed' });
@@ -429,12 +445,21 @@ export async function runWebCompletionTests(source, completionSource, promptSour
     ui.reply(pending); await ui.idle();
     assert(ui.prompt.value === '@R', 'late completion or queued input changed the suspended draft');
   }, { manual: true });
-  await check('host lock retains literal filename completion metadata', async ui => {
+  for (const automatic of [false, true]) await check((automatic ? 'automatic' : 'explicit') + ' lock retains literal filename completion metadata', async ui => {
     ui.get('plus').click(); await ui.idle();
     ui.event({ type: 'complete', request: ui.queries().at(-1).get('request'), label: '@literal.txt', value: '@literal.txt', start: '0', end: '0', continue: '0' });
     ui.get('completions').children.find(item => item.textContent.includes('@literal.txt')).click(); await ui.idle();
     assert(ui.prompt.value === '@literal.txt', 'literal filename fixture did not insert');
-    ui.event({ type: 'prompt_state', disabled: '1' }); ui.event({ type: 'prompt_state', disabled: '0' }); await ui.idle();
+    if (automatic) {
+      ui.event({ type: 'capabilities', terminal_lock_command: '1' });
+      terminalState(ui, 1, true);
+      ui.get('plus').click(); ui.get('completions').children[0].click();
+      terminalState(ui, 1, false);
+    } else {
+      ui.event({ type: 'prompt_state', disabled: '1' });
+      ui.event({ type: 'prompt_state', disabled: '0' });
+    }
+    await ui.idle();
     ui.form(); await ui.idle();
     assert(ui.sent() === '@literal.txt', 'lock/unlock turned a literal filename into completion syntax');
   });

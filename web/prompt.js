@@ -37,6 +37,13 @@ export class Prompt {
     this.input.addEventListener('scroll', () => this.syncScroll());
     new ResizeObserver(() => this.render()).observe(get('plus').parentElement || this.input);
     get('plus').addEventListener('click', () => this.openMenu());
+    this.menu.addEventListener('keydown', event => {
+      if (this.input.readOnly && event.key === 'Escape') {
+        event.preventDefault();
+        this.hideMenu();
+        get('plus').focus({ preventScroll: true });
+      }
+    });
     options.document.addEventListener('click', event => { if (!event.target.closest('#completions,#plus')) this.hideMenu(); });
     options.document.addEventListener('keydown', event => {
       if (event.defaultPrevented || event.isComposing || event.key !== 'Escape' || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
@@ -268,7 +275,13 @@ export class Prompt {
   }
   hideMenu() { this.menuOpen = false; this.menuRequest = null; this.menu.hidden = true; this.get('plus').setAttribute('aria-expanded', 'false'); }
   openMenu() {
-    if (this.input.readOnly) return;
+    if (this.input.readOnly) {
+      if (!this.options.lockedActions?.().length) return;
+      this.menuOpen = true; this.menuActive = 0;
+      this.showMenu();
+      this.menu.children[0]?.focus({ preventScroll: true });
+      return;
+    }
     this.finish(); this.menuOpen = true; this.menuItems = []; this.menuActive = 0;
     this.menuText = this.input.value; this.menuCursor = this.input.selectionStart; this.menuRequest = String(++this.serial);
     this.options.send('complete', { request: this.menuRequest, text: this.menuText, cursor: new TextEncoder().encode(this.menuText.slice(0, this.menuCursor)).length, all: '1' });
@@ -276,10 +289,14 @@ export class Prompt {
   }
   showMenu() {
     if (!this.menuOpen) return;
-    const list = [...this.menuItems];
-    list.unshift(...(this.options.actions?.() || []).map(action => ({ ...action, action: action.id })));
-    if (this.options.images()) list.unshift({ image: true, label: 'Add images', description: 'PNG or JPEG · also drop images here' });
-    for (const item of this.options.recovery()) list.unshift({ recover: true, source: item, text: item.text, label: 'Recover unsent prompt', description: item.text.slice(0, 60) });
+    const locked = this.input.readOnly;
+    const actions = locked ? this.options.lockedActions?.() : this.options.actions?.();
+    const list = (actions || []).map(action => ({ ...action, action: action.id }));
+    if (!locked) {
+      list.push(...this.menuItems);
+      if (this.options.images()) list.unshift({ image: true, label: 'Add images', description: 'PNG or JPEG · also drop images here' });
+      for (const item of this.options.recovery()) list.unshift({ recover: true, source: item, text: item.text, label: 'Recover unsent prompt', description: item.text.slice(0, 60) });
+    }
     if (!list[this.menuActive] || list[this.menuActive].disabled) this.menuActive = Math.max(0, list.findIndex(item => !item.disabled));
     this.menuList = list; this.menu.replaceChildren();
     list.forEach((item, index) => {
@@ -298,7 +315,11 @@ export class Prompt {
   }
   async choose(item) {
     if (!item || item.disabled) return;
-    if (this.input.readOnly && !item.action) return;
+    if (this.input.readOnly) {
+      this.hideMenu();
+      if (item.action) this.options.action(item.action);
+      return;
+    }
     this.finish();
     if (item.action) { this.options.action(item.action); return; }
     if (item.image) { this.options.imagePicker(); return; }

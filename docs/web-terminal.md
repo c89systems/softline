@@ -49,9 +49,13 @@ choose to pause its **agent** until shell exit. It must still service its I/O
 event loop to move terminal bytes, process close/exit and serve conversation
 scrolling/replay. Softline does not impose an agent scheduling policy.
 
-Concurrent prompt and terminal is the default. To enable automatic locking in
-the examples, start with `SOFTLINE_WEB_DISABLE_PROMPT_DURING_TERMINAL=1` (only
-`0` and `1` are accepted). The server counts browser PTYs automatically, and
+Concurrent prompt and terminal is the default. In the chat examples, submit
+`/terminal-lock` from the web UI or TUI to toggle automatic locking for the
+conversation. Use `/terminal-lock on` or `/terminal-lock off` to set it directly.
+While a browser prompt is automatically locked, choose **+ → /terminal-lock off**
+to restore typing with the shell still open and the draft intact.
+`SOFTLINE_WEB_DISABLE_PROMPT_DURING_TERMINAL=1` sets the initial policy at startup.
+The server counts browser PTYs automatically, and
 the native handoff paths report their activity to the same conversation owner.
 Every browser prompt locks while any handoff is initializing or running, then
 unlocks after the last exits, disconnects or fails. Cleanup/reaping does not

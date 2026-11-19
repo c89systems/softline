@@ -330,6 +330,19 @@ static int handle_command(struct chat_state *state, const char *line,
                           int *handled) {
   int enabled, stopped;
   *handled = 1;
+  if (command_named(line, "/terminal-lock")) {
+    demo_www_t *web = demo_web_listener(state->web);
+    size_t active;
+    if (!web)
+      return command_message(state, "No web chat is served here.");
+    demo_www_terminal_status(web, &active, &enabled);
+    enabled = terminal_lock_setting(line, enabled);
+    if (enabled < 0)
+      return command_message(state, "Usage: /terminal-lock [on|off]");
+    demo_www_set_terminal_prompt_lock(web, enabled);
+    return command_message(state, enabled ? "Terminal prompt lock on."
+                                          : "Terminal prompt lock off.");
+  }
   if (!strcmp(line, "/status")) {
     char text[256];
     if (sl_get_prompt_queue_stopped(state->sl, &stopped) != SL_OK ||
@@ -1370,6 +1383,7 @@ int main(int argc, char **argv) {
     ops.submit = web_submit;
     ops.control = web_control;
     ops.edit = web_edit;
+    ops.terminal_lock_command = 1;
     if (state.remote)
       ops.image = web_image;
     state.web = demo_web_open(state.sl, &ops, &state, 8080, &enabled);

@@ -290,12 +290,15 @@ static int replay(void *context, void *peer, const char *after) {
   f.value = w->session;
   (void)demo_www_reply(peer, "session", &f, 1);
   {
-    sl_www_field_t capabilities[2] = {{"edit", NULL, 0}, {"terminal", NULL, 0}};
+    sl_www_field_t capabilities[3] = {{"edit", NULL, 0},
+                                      {"terminal", NULL, 0},
+                                      {"terminal_lock_command", NULL, 0}};
     capabilities[0].value = w->ops.edit ? "1" : "0";
     capabilities[1].value = getenv("SOFTLINE_WEB_TERMINAL_URL");
     if (!capabilities[1].value && demo_www_terminal_enabled(w->www))
       capabilities[1].value = "/terminal";
-    (void)demo_www_reply(peer, "capabilities", capabilities, 2);
+    capabilities[2].value = w->ops.terminal_lock_command ? "1" : "0";
+    (void)demo_www_reply(peer, "capabilities", capabilities, 3);
   }
   w->queue_changed = 1;
   demo_web_queue(w);
@@ -452,7 +455,7 @@ static int complete(demo_web_chat_t *w, const sl_www_request_t *r) {
      * against the complete typed prefix, including any partial basename. */
     result = demo_resolve(w->editor, directory, completion, &c, w);
     free(directory);
-  } else if (!strcmp(prefix, "/approve"))
+  } else if (!strcmp(prefix, "/approve") || !strcmp(prefix, "/terminal-lock"))
     result = demo_resolve(w->editor, prefix, completion, &c, w);
   else {
     char trigger[2];

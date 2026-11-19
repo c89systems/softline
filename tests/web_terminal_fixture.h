@@ -220,6 +220,20 @@ static int terminal_roundtrip(unsigned short port, unsigned short queue_port,
   observer = ws_open(port);
   TERMINAL_CHECK(observer >= 0);
   TERMINAL_STATE(2);
+  if (!policy) {
+    const char *enable = "action=send&view=terminal-policy&request=lock-on"
+                         "&request_seq=1&text=%2Fterminal-lock";
+    TERMINAL_CHECK(!ws_text(chat, enable));
+    policy = 1;
+    TERMINAL_STATE(2);
+    /* Resending the same command must not toggle twice. */
+    TERMINAL_CHECK(!ws_text(chat, enable));
+    TERMINAL_CHECK(!ws_text(chat,
+                            "action=send&view=terminal-policy&request=lock-off"
+                            "&request_seq=2&text=%2Fterminal-lock"));
+    policy = 0;
+    TERMINAL_STATE(2);
+  }
   command = "stty -echo; export SOFTLINE_WEB_TERMINAL_ISOLATION=first; printf "
             "'\\124\\105\\122\\115\\055\\122\\105\\101\\104\\131\\n'; pwd; "
             "stty size\n";

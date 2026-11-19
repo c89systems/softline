@@ -47,6 +47,17 @@ static int command_named(const char *line, const char *name) {
 
 static int is_local_command(const char *line) {
   return !strcmp(line, "/status") || !strcmp(line, "/resume") ||
-         command_named(line, "/approve");
+         command_named(line, "/approve") ||
+         command_named(line, "/terminal-lock");
+}
+
+static int terminal_lock_setting(const char *line, int enabled) {
+  if (!strcmp(line, "/terminal-lock"))
+    return !enabled;
+  if (!strcmp(line, "/terminal-lock on"))
+    return 1;
+  if (!strcmp(line, "/terminal-lock off"))
+    return 0;
+  return -1;
 }
 #endif

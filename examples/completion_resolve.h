@@ -81,8 +81,9 @@ static int demo_resolve(sl_t *sl, const char *prefix, sl_completion_emit_t emit,
   static const char *const simple[] = {"/quit", "hello world", "hello there",
                                        "verification", "next steps"};
   static const char *const chat[] = {
-      "hello world", "hello there", "/status", "/approve",     "/steer",
-      "/resume",     "/shell",      "/quit",   "verification", "next steps"};
+      "hello world",    "hello there",  "/status",   "/approve",
+      "/steer",         "/resume",      "/shell",    "/quit",
+      "/terminal-lock", "verification", "next steps"};
   const char *const *items = userdata ? chat : simple;
   size_t i, count = userdata ? sizeof(chat) / sizeof(chat[0])
                              : sizeof(simple) / sizeof(simple[0]);
@@ -93,10 +94,17 @@ static int demo_resolve(sl_t *sl, const char *prefix, sl_completion_emit_t emit,
     return demo_complete_files(prefix, emit, context);
   if (prefix[1]) {
     int status;
-    if (!userdata || strcmp(prefix, "/approve"))
+    if (!userdata)
       return SL_OK;
-    status = emit("/approve on", context);
-    return status == SL_OK ? emit("/approve off", context) : status;
+    if (!strcmp(prefix, "/approve")) {
+      status = emit("/approve on", context);
+      return status == SL_OK ? emit("/approve off", context) : status;
+    }
+    if (!strcmp(prefix, "/terminal-lock")) {
+      status = emit("/terminal-lock on", context);
+      return status == SL_OK ? emit("/terminal-lock off", context) : status;
+    }
+    return SL_OK;
   }
   for (i = 0; i < count; ++i)
     if (items[i][0] == prefix[0]) {

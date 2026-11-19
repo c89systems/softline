@@ -75,6 +75,7 @@ typedef struct owner {
   double next_piece, next_injection;
 } owner_t;
 static int web_submit(void *, const char *, int, sl_queue_request_id_t *);
+static void terminal_lock_command(owner_t *, const char *);
 static int web_control(void *, const char *, const char *, const char *);
 static void web_snapshot(void *, demo_web_chat_t *);
 static volatile sig_atomic_t quitting;
@@ -588,6 +589,10 @@ static int web_submit(void *context, const char *text, int steer,
   owner_t *o = context;
   sl_queue_request_t r;
   (void)request_id;
+  if (command_named(text, "/terminal-lock")) {
+    terminal_lock_command(o, text);
+    return SL_OK;
+  }
   if (is_shell_command(text) || !strcmp(text, "/quit"))
     return SL_ERROR_INVALID;
   memset(&r, 0, sizeof(r));
@@ -802,8 +807,27 @@ static void start_response(owner_t *o, double now) {
   o->waiting_gate = o->gate_fd >= 0;
   text_event(o, DEMO_RESPONSE_BEGIN, NULL);
 }
+static void terminal_lock_command(owner_t *o, const char *text) {
+  demo_www_t *web = demo_web_listener(o->web);
+  size_t active;
+  int enabled = o->terminal_policy;
+  if (web)
+    demo_www_terminal_status(web, &active, &enabled);
+  enabled = terminal_lock_setting(text, enabled);
+  if (enabled < 0) {
+    text_event(o, DEMO_MESSAGE, "Usage: /terminal-lock [on|off]");
+    return;
+  }
+  o->terminal_policy = enabled;
+  demo_www_set_terminal_prompt_lock(web, o->terminal_policy);
+  text_event(o, DEMO_MESSAGE,
+             o->terminal_policy ? "Terminal prompt lock on."
+                                : "Terminal prompt lock off.");
+}
 static void host_action(owner_t *o, const char *text, int at_seam, double now) {
-  if (!strcmp(text, "/status")) {
+  if (command_named(text, "/terminal-lock")) {
+    terminal_lock_command(o, text);
+  } else if (!strcmp(text, "/status")) {
     char line[256];
     (void)snprintf(line, sizeof(line),
                    "Status: %s / backlog %s / %lu queued / auto-approval %s",
@@ -841,7 +865,13 @@ static void host_action(owner_t *o, const char *text, int at_seam, double now) {
   }
 }
 static int ready(owner_t *o, item_t *item, int at_seam) {
-  if (o->gated || item->value.held || item->value.edit_held)
+  if (item->value.held || item->value.edit_held)
+    return 0;
+  /* This policy can change while the remote prompt is waiting for the owner.
+   * It does not consume input or start a response. */
+  if (command_named(item->value.text, "/terminal-lock"))
+    return 1;
+  if (o->gated)
     return 0;
   if (is_local_command(item->value.text))
     return 1;
@@ -1065,6 +1095,7 @@ int main(int argc, char **argv) {
     ops.edit = web_edit;
     ops.snapshot = web_snapshot;
     ops.terminal = 1;
+    ops.terminal_lock_command = 1;
     o->web = demo_web_open(NULL, &ops, o, 8081, &enabled);
     if (enabled && !o->web) {
       perror("web listener");
