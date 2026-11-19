@@ -31,7 +31,15 @@ int main(int argc, char **argv) {
                                 "/image-viewer.js",
                                 "/markdown.js",
                                 "/smd.js",
-                                "/JetBrainsMono-Regular.woff2"};
+                                "/JetBrainsMono-Regular.woff2",
+                                "/terminal",
+                                "/terminal.js",
+                                "/terminal.css",
+                                "/xterm.js",
+                                "/xterm-addon-fit.js",
+                                "/xterm.css",
+                                "/licenses/xterm.txt",
+                                "/licenses/xterm-addon-fit.txt"};
   static const char *sources[] = {
       "web/index.html",
       "web/softline.css",
@@ -42,7 +50,15 @@ int main(int argc, char **argv) {
       "web/image-viewer.js",
       "web/markdown.js",
       "vendor/streaming-markdown/smd.js",
-      "vendor/jetbrains-mono/JetBrainsMono-Regular.woff2"};
+      "vendor/jetbrains-mono/JetBrainsMono-Regular.woff2",
+      "web/terminal.html",
+      "web/terminal.js",
+      "web/terminal.css",
+      "vendor/xterm/xterm.mjs",
+      "vendor/xterm/addon-fit.mjs",
+      "vendor/xterm/xterm.css",
+      "vendor/xterm/LICENSE",
+      "vendor/xterm/LICENSE.addon-fit"};
   sl_www_config_t cfg;
   sl_www_t *w;
   char *html, *css, *js, *md, *prompt, *at, *rule_end, *modules[2];

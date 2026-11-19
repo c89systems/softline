@@ -88,7 +88,7 @@ run-chat-local: ## Run chat with the native local queue
 run-chat-remote: ## Attach chat to the separate TCP queue owner
 	@SOFTLINE_WEB=1 SOFTLINE_WEB_PORT="$(WEB_PORT)" $(MAKE) run-chat CHAT_QUEUE=remote
 
-run-chat-queue-server: build-debug ## Run volatile queue owner from build/ (QUEUE_PORT=7635)
+run-chat-queue-server: build-debug ## Run queue owner plus web chat/terminal from build/ (QUEUE_PORT=7635, QUEUE_WEB_PORT=8081)
 	@cd "$(BUILD_DIR)" && SOFTLINE_WEB=1 SOFTLINE_WEB_PORT="$(QUEUE_WEB_PORT)" $(CHAT_DEMO_ENV) ./debug/examples/example_queue_owner "$(QUEUE_PORT)"
 
 .PHONY: run-chat-web run-chat-web-only

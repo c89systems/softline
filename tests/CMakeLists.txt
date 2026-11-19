@@ -88,6 +88,9 @@ if(SOFTLINE_NODE_EXECUTABLE)
   add_test(NAME softline_www_client COMMAND "${SOFTLINE_NODE_EXECUTABLE}"
     "${PROJECT_SOURCE_DIR}/tests/check-web-completion.mjs")
   set_tests_properties(softline_www_client PROPERTIES LABELS "unit;web" TIMEOUT 10)
+  add_test(NAME softline_www_terminal_client COMMAND "${SOFTLINE_NODE_EXECUTABLE}"
+    "${PROJECT_SOURCE_DIR}/tests/check-web-terminal.mjs")
+  set_tests_properties(softline_www_terminal_client PROPERTIES LABELS "unit;web;terminal" TIMEOUT 10)
 endif()
 add_executable(test_image_source test_image_source.c)
 target_link_libraries(test_image_source PRIVATE softline)
@@ -96,6 +99,13 @@ softline_local_runtime(test_image_source)
 add_test(NAME softline_image_source COMMAND test_image_source)
 set_tests_properties(softline_image_source PROPERTIES LABELS "unit;clipboard;web;memcheck" TIMEOUT 10)
 if(UNIX)
+  add_executable(test_web_terminal test_web_terminal.c)
+  target_include_directories(test_web_terminal PRIVATE "${PROJECT_SOURCE_DIR}/examples")
+  target_link_libraries(test_web_terminal PRIVATE www_mock)
+  softline_apply_warnings(test_web_terminal)
+  softline_local_runtime(test_web_terminal)
+  add_test(NAME softline_www_terminal_adapter COMMAND test_web_terminal)
+  set_tests_properties(softline_www_terminal_adapter PROPERTIES LABELS "unit;integration;terminal;web;memcheck" TIMEOUT 10)
   add_executable(www_browser_fixture www_browser_fixture.c)
   target_include_directories(www_browser_fixture PRIVATE "${PROJECT_SOURCE_DIR}/examples")
   target_link_libraries(www_browser_fixture PRIVATE www_mock)
@@ -119,6 +129,9 @@ if(UNIX)
   set_tests_properties(softline_www_mock PROPERTIES LABELS "integration;web;clipboard;memcheck" TIMEOUT 20)
   add_test(NAME softline_www_queue_owner COMMAND test_www_mock "${PROJECT_BINARY_DIR}"
     "$<TARGET_FILE:example_queue_owner>" owner)
+  add_test(NAME softline_www_terminal_owner COMMAND test_www_mock "${PROJECT_BINARY_DIR}"
+    "$<TARGET_FILE:example_queue_owner>" terminal-owner)
+  set_tests_properties(softline_www_terminal_owner PROPERTIES LABELS "integration;web;terminal;memcheck" TIMEOUT 30)
   add_test(NAME softline_www_charts_owner COMMAND test_www_mock "${PROJECT_BINARY_DIR}"
     "$<TARGET_FILE:example_queue_owner>" charts-owner)
   add_test(NAME softline_www_edits_owner COMMAND test_www_mock "${PROJECT_BINARY_DIR}"

@@ -16,6 +16,7 @@ typedef struct demo_web_ops {
               sl_queue_request_id_t *);
   int (*image)(void *, sl_t *source, const sl_image_paste_event_t *);
   void (*snapshot)(void *, demo_web_chat_t *);
+  int terminal;
 } demo_web_ops_t;
 /* NULL with enabled=0 is normal. errno is set on configuration/listen failure.
  * SOFTLINE_WEB defaults off; SOFTLINE_WEB_PORT defaults to the caller's port.

@@ -4,7 +4,7 @@
 /* Example/test listener only. Never installed or linked into libsoftline. */
 typedef struct demo_www demo_www_t;
 typedef struct demo_www_peer demo_www_peer_t;
-#define DEMO_WWW_FDS 9
+#define DEMO_WWW_FDS 17
 #include <poll.h>
 typedef void (*demo_www_closed_t)(void *, demo_www_peer_t *);
 demo_www_t *demo_www_open(const sl_www_config_t *, unsigned short,
@@ -12,6 +12,9 @@ demo_www_t *demo_www_open(const sl_www_config_t *, unsigned short,
 void demo_www_close(demo_www_t *);
 unsigned short demo_www_port(const demo_www_t *);
 const char *demo_www_epoch(const demo_www_t *);
+void demo_www_enable_terminal(demo_www_t *);
+int demo_www_terminal_enabled(const demo_www_t *);
+int demo_www_timeout(const demo_www_t *, int);
 int demo_www_poll(demo_www_t *, int timeout_ms);
 /* Append to a host's poll set; dispatch with poll(..., 0) after readiness. */
 int demo_www_descriptors(demo_www_t *, struct pollfd *, size_t);

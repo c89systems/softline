@@ -194,11 +194,14 @@ before saving leaves the queue unchanged.
 Host restart invalidates an open edit target, retaining its text for copying;
 reused queue IDs cannot redirect that old edit into the new conversation.
 
-The examples advertise queue editing. They have no browser terminal endpoint;
-the terminal menu entry remains disabled until a host supplies one. An example
-host can advertise its already mounted terminal page with
-`SOFTLINE_WEB_TERMINAL_URL=/terminal`. This opens that page with no opener access;
-the host owns its terminal renderer, authentication and WebSocket transport.
+The examples advertise queue editing. `make run-chat-queue-server` also enables
+the [browser terminal](web-terminal.md) at `/terminal` on its existing web port
+(8081 by default). Ctrl+` and the `+` menu open the locally served xterm.js page.
+Each connection owns a new server PTY in the server's working directory;
+chat and other terminal sessions remain independent. The other chat examples
+leave this endpoint disabled. A host can advertise its own mounted terminal page
+with `SOFTLINE_WEB_TERMINAL_URL=/terminal`. The host owns its authentication and
+WebSocket transport; the library supplies assets and terminal-session APIs.
 
 The C examples share one registration table between native and web editors
 (`/`, `h`, `v`, `n`, `@`), including scope and trigger stripping. Exiting an

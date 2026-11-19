@@ -140,6 +140,8 @@ add_custom_command(OUTPUT "${_sl_web_assets}"
     "${CMAKE_CURRENT_SOURCE_DIR}" "${_sl_web_assets}"
   DEPENDS scripts/embed-web-assets.py web/index.html web/softline.css web/softline.js
           web/completion.js web/prompt.js web/images.js web/image-viewer.js
+          web/terminal.html web/terminal.js web/terminal.css vendor/xterm/xterm.mjs
+          vendor/xterm/addon-fit.mjs vendor/xterm/xterm.css vendor/xterm/LICENSE vendor/xterm/LICENSE.addon-fit
     web/markdown.js vendor/streaming-markdown/smd.js vendor/streaming-markdown/LICENSE
     vendor/jetbrains-mono/JetBrainsMono-Regular.woff2 vendor/jetbrains-mono/OFL.txt
   VERBATIM)
@@ -344,12 +346,14 @@ if(SL_INSTALL)
     install(FILES LICENSE README.md
       DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/doc/softline
     )
-    install(FILES docs/web-frontend.md docs/terminal-handoff-design.md
+    install(FILES docs/web-frontend.md docs/web-terminal.md docs/terminal-handoff-design.md
       DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/doc/softline)
     install(FILES vendor/streaming-markdown/LICENSE vendor/streaming-markdown/README.softline
       DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/doc/softline/streaming-markdown)
     install(FILES vendor/jetbrains-mono/OFL.txt vendor/jetbrains-mono/README.softline
       DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/doc/softline/jetbrains-mono)
+    install(FILES vendor/xterm/LICENSE vendor/xterm/LICENSE.addon-fit vendor/xterm/README.softline
+      DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/doc/softline/xterm)
 
     install(FILES
       ${CMAKE_CURRENT_BINARY_DIR}/softline-package-metadata.json

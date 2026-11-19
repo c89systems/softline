@@ -5,7 +5,8 @@ set_target_properties(softline_terminal_supervisor PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/examples")
 softline_apply_warnings(softline_terminal_supervisor)
 softline_local_runtime(softline_terminal_supervisor)
-add_library(www_mock STATIC "${PROJECT_SOURCE_DIR}/examples/www_mock.c")
+add_library(www_mock STATIC "${PROJECT_SOURCE_DIR}/examples/www_mock.c"
+  "${PROJECT_SOURCE_DIR}/examples/web_terminal.c")
 target_link_libraries(www_mock PUBLIC softline)
 softline_apply_warnings(www_mock)
 add_library(web_chat STATIC "${PROJECT_SOURCE_DIR}/examples/web_chat.c")

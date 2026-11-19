@@ -293,6 +293,8 @@ static int replay(void *context, void *peer, const char *after) {
     sl_www_field_t capabilities[2] = {{"edit", NULL, 0}, {"terminal", NULL, 0}};
     capabilities[0].value = w->ops.edit ? "1" : "0";
     capabilities[1].value = getenv("SOFTLINE_WEB_TERMINAL_URL");
+    if (!capabilities[1].value && demo_www_terminal_enabled(w->www))
+      capabilities[1].value = "/terminal";
     (void)demo_www_reply(peer, "capabilities", capabilities, 2);
   }
   w->queue_changed = 1;
@@ -782,6 +784,8 @@ demo_web_chat_t *demo_web_open(sl_t *editor, const demo_web_ops_t *ops,
     return NULL;
   }
   (void)snprintf(w->session, sizeof(w->session), "%s", demo_www_epoch(w->www));
+  if (ops->terminal)
+    demo_www_enable_terminal(w->www);
   return w;
 }
 void demo_web_close(demo_web_chat_t *w) {
@@ -867,7 +871,7 @@ int demo_web_timeout(demo_web_chat_t *w, int timeout_ms) {
           (timeout_ms < 0 || wait.timeout_ms < timeout_ms))
         timeout_ms = wait.timeout_ms;
     }
-  return timeout_ms;
+  return demo_www_timeout(w->www, timeout_ms);
 }
 unsigned short demo_web_port(demo_web_chat_t *w) {
   return w ? demo_www_port(w->www) : 0;

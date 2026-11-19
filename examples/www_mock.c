@@ -3,6 +3,7 @@
 #endif
 #define _POSIX_C_SOURCE 200809L
 #include "www_mock.h"
+#include "web_terminal.h"
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -35,6 +36,10 @@ typedef struct record {
   size_t length;
   int state;
 } record_t;
+typedef struct terminal_entry {
+  struct terminal_entry *next;
+  demo_web_terminal_t *value;
+} terminal_entry_t;
 struct demo_www_peer {
   demo_www_t *server;
   int fd, websocket, dead, opcode;
@@ -48,6 +53,10 @@ struct demo_www_peer {
   int asset_active, close_after_write;
   sl_watch_id_t watch;
   void *data;
+  int terminal_route;
+  int terminal_closing;
+  double terminal_close_due;
+  terminal_entry_t *terminal;
 };
 struct demo_www {
   int listener, polling;
@@ -63,8 +72,56 @@ struct demo_www {
   unsigned long sequence;
   char epoch[96];
   int publishing_state;
+  int terminal_enabled;
+  size_t terminal_count;
+  terminal_entry_t *retired;
 };
 const char *demo_www_epoch(const demo_www_t *w) { return w->epoch; }
+static int peer_write(void *, const void *, size_t);
+static double terminal_time(void) {
+  struct timespec now;
+  (void)clock_gettime(CLOCK_MONOTONIC, &now);
+  return now.tv_sec * 1000.0 + now.tv_nsec / 1000000.0;
+}
+void demo_www_enable_terminal(demo_www_t *w) {
+  if (w)
+    w->terminal_enabled = 1;
+}
+int demo_www_terminal_enabled(const demo_www_t *w) {
+  return w && w->terminal_enabled;
+}
+int demo_www_timeout(const demo_www_t *w, int timeout) {
+  size_t i;
+  if (!w || (timeout >= 0 && timeout <= 20))
+    return timeout;
+  if (w->terminal_count)
+    return 20;
+  for (i = 0; i < PEERS; ++i)
+    if (w->peers[i].terminal_closing)
+      return 20;
+  return timeout;
+}
+static void retire_terminal(demo_www_peer_t *p) {
+  if (!p->terminal)
+    return;
+  demo_web_terminal_close(p->terminal->value);
+  p->terminal->next = p->server->retired;
+  p->server->retired = p->terminal;
+  p->terminal = NULL;
+}
+static void reap_terminals(demo_www_t *w) {
+  terminal_entry_t **at = &w->retired;
+  while (*at) {
+    terminal_entry_t *entry = *at;
+    if (demo_web_terminal_destroy(entry->value) == SL_ERROR_NOT_READY)
+      at = &entry->next;
+    else {
+      *at = entry->next;
+      free(entry);
+      --w->terminal_count;
+    }
+  }
+}
 static int nonblock(int fd) {
   int flags = fcntl(fd, F_GETFL, 0);
   return flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0 ||
@@ -86,6 +143,7 @@ static void drop(demo_www_peer_t *p) {
   if (p->watch && p->server->editor)
     (void)sl_watch_remove(p->server->editor, p->watch);
   p->watch = 0;
+  retire_terminal(p);
   close(p->fd);
   p->fd = -1;
   if (p->server->closed)
@@ -144,6 +202,23 @@ static int queue_frame(demo_www_peer_t *p, int opcode, const void *bytes,
   p->queued += f->length;
   interest(p);
   return SL_OK;
+}
+static int terminal_write(void *context, int binary, const void *bytes,
+                          size_t length) {
+  return queue_frame(context, binary ? 2 : 1, bytes, length);
+}
+static void finish_terminal(demo_www_peer_t *p, int failed) {
+  unsigned char code[2] = {3, 232}; /* 1011 / 1000 */
+  code[1] = (unsigned char)(failed ? 243 : 232);
+  if (failed) {
+    sl_www_field_t error = {"text", "The server terminal failed.", 0};
+    (void)sl_www_emit(peer_write, p, "error", NULL, &error, 1);
+  }
+  retire_terminal(p);
+  if (queue_frame(p, 8, code, sizeof(code)) != SL_OK)
+    p->dead = 1;
+  p->terminal_closing = 1;
+  p->terminal_close_due = terminal_time() + 1000;
 }
 static int peer_write(void *context, const void *data, size_t length) {
   return queue_frame(context, 1, data, length);
@@ -316,7 +391,9 @@ static int http(demo_www_peer_t *p) {
   query = strchr(path, '?');
   if (query)
     *query++ = 0;
-  if (!strcmp(path, "/events") && !strcmp(method, "GET")) {
+  if ((!strcmp(path, "/events") ||
+       (!strcmp(path, "/terminal/events") && p->server->terminal_enabled)) &&
+      !strcmp(method, "GET")) {
     size_t i;
     if (!header((char *)p->input, "upgrade", upgrade, sizeof(upgrade)) ||
         strcasecmp(upgrade, "websocket") ||
@@ -371,6 +448,20 @@ static int http(demo_www_peer_t *p) {
         queue_frame(p, -1, response, (size_t)count) != SL_OK)
       return -1;
     p->websocket = 1;
+    if (!strcmp(path, "/terminal/events")) {
+      terminal_entry_t *entry;
+      if (p->server->terminal_count == PEERS ||
+          !(entry = calloc(1, sizeof(*entry))))
+        return -1;
+      entry->value = demo_web_terminal_create(terminal_write, p);
+      if (!entry->value) {
+        free(entry);
+        return -1;
+      }
+      p->terminal = entry;
+      p->terminal_route = 1;
+      ++p->server->terminal_count;
+    }
     if (query) {
       char *at = strstr(query, "after=");
       if (at && (at == query || at[-1] == '&')) {
@@ -380,7 +471,8 @@ static int http(demo_www_peer_t *p) {
           *at = 0;
       }
     }
-    if (sl_www_connect(p->server->handler, p, after) != SL_OK)
+    if (!p->terminal_route &&
+        sl_www_connect(p->server->handler, p, after) != SL_OK)
       return -1;
   } else {
     int found = !strcmp(method, "GET") || !strcmp(method, "HEAD");
@@ -410,6 +502,7 @@ static int input_frame(demo_www_peer_t *p) {
   uint64_t length;
   size_t header = 2, i, total;
   int opcode, final, result;
+  size_t limit = p->terminal_route ? 4096u : SL_WWW_REQUEST_MAX;
   if (p->input_length < 2)
     return 0;
   final = (b[0] & 128) != 0;
@@ -434,7 +527,7 @@ static int input_frame(demo_www_peer_t *p) {
     if (length <= 65535)
       return -1;
   }
-  if (length > SL_WWW_REQUEST_MAX || (opcode >= 8 && (!final || length > 125)))
+  if (length > limit || (opcode >= 8 && (!final || length > 125)))
     return -1;
   total = header + 4 + (size_t)length;
   if (p->input_length < total)
@@ -447,10 +540,12 @@ static int input_frame(demo_www_peer_t *p) {
     result = queue_frame(p, 10, b + header + 4, (size_t)length);
   else if (opcode == 10)
     result = SL_OK;
+  else if (p->terminal_closing)
+    result = SL_OK;
   else {
     if ((opcode != 0 && opcode != 1 && opcode != 2) ||
         (opcode == 0 ? !p->opcode : p->opcode != 0) ||
-        (size_t)length > SL_WWW_REQUEST_MAX - p->message_length)
+        (size_t)length > limit - p->message_length)
       return -1;
     if (opcode)
       p->opcode = opcode;
@@ -458,16 +553,22 @@ static int input_frame(demo_www_peer_t *p) {
     p->message_length += (size_t)length;
     result = SL_OK;
     if (final) {
-      result = p->opcode == 2
-                   ? sl_www_binary(p->server->handler, p, p->message,
-                                   p->message_length, peer_write, p)
-                   : sl_www_message(p->server->handler, p, p->message,
-                                    p->message_length, peer_write, p);
+      result =
+          p->terminal_route
+              ? demo_web_terminal_message(p->terminal->value, p->opcode == 2,
+                                          p->message, p->message_length)
+          : p->opcode == 2 ? sl_www_binary(p->server->handler, p, p->message,
+                                           p->message_length, peer_write, p)
+                           : sl_www_message(p->server->handler, p, p->message,
+                                            p->message_length, peer_write, p);
       p->opcode = 0;
       p->message_length = 0;
       if (result != SL_OK) {
         sl_www_field_t f = {"text", "Action rejected by host.", 0};
-        (void)demo_www_reply(p, "error", &f, 1);
+        if (p->terminal_route)
+          finish_terminal(p, 1);
+        else
+          (void)demo_www_reply(p, "error", &f, 1);
         result = SL_OK;
       }
     }
@@ -533,35 +634,41 @@ static int ready(sl_t *sl, const sl_watch_event_t *event, void *context) {
 }
 int demo_www_descriptors(demo_www_t *w, struct pollfd *fds, size_t capacity) {
   size_t i;
-  if (!w || !fds || capacity < PEERS + 1)
+  if (!w || !fds || capacity < DEMO_WWW_FDS)
     return -1;
   fds[0].fd = w->listener;
   fds[0].events = POLLIN;
   fds[0].revents = 0;
   for (i = 0; i < PEERS; ++i) {
     demo_www_peer_t *p = w->peers + i;
+    if (p->terminal_closing && terminal_time() >= p->terminal_close_due)
+      p->dead = 1;
     if (p->dead)
       drop(p);
     interest(p);
     fds[i + 1].fd = p->fd;
     fds[i + 1].events =
-        POLLIN | ((p->head || p->cursor || p->asset_active) ? POLLOUT : 0);
+        (p->close_after_write ? 0 : POLLIN) |
+        ((p->head || p->cursor || p->asset_active) ? POLLOUT : 0);
     fds[i + 1].revents = 0;
+    demo_web_terminal_descriptor(p->terminal ? p->terminal->value : NULL,
+                                 fds + PEERS + 1 + i);
   }
-  return PEERS + 1;
+  return DEMO_WWW_FDS;
 }
 int demo_www_poll(demo_www_t *w, int timeout_ms) {
-  struct pollfd fds[PEERS + 1];
+  struct pollfd fds[DEMO_WWW_FDS];
   size_t i;
   int result;
   if (!w || w->polling)
     return w ? 0 : -1;
   w->polling = 1;
-  if (demo_www_descriptors(w, fds, PEERS + 1) < 0) {
+  reap_terminals(w);
+  if (demo_www_descriptors(w, fds, DEMO_WWW_FDS) < 0) {
     w->polling = 0;
     return -1;
   }
-  result = poll(fds, PEERS + 1, timeout_ms);
+  result = poll(fds, DEMO_WWW_FDS, demo_www_timeout(w, timeout_ms));
   if (result < 0 && errno != EINTR) {
     w->polling = 0;
     return -1;
@@ -598,7 +705,7 @@ int demo_www_poll(demo_www_t *w, int timeout_ms) {
       drop(p);
       continue;
     }
-    if (fds[i + 1].revents & POLLIN) {
+    if (!p->close_after_write && (fds[i + 1].revents & POLLIN)) {
       ssize_t n = recv(p->fd, p->input + p->input_length,
                        INPUT_CAP - p->input_length, 0);
       int rc = 0;
@@ -614,11 +721,16 @@ int demo_www_poll(demo_www_t *w, int timeout_ms) {
       if (rc >= 0 && p->websocket)
         do {
           rc = input_frame(p);
-        } while (rc > 0 && !p->dead);
+        } while (rc > 0 && !p->dead && !p->close_after_write);
       if (rc < 0 || p->input_length == INPUT_CAP || p->dead) {
         drop(p);
         continue;
       }
+    }
+    if (p->terminal) {
+      int state = demo_web_terminal_pump(p->terminal->value);
+      if (state)
+        finish_terminal(p, state < 0);
     }
     if (flush(p) < 0) {
       drop(p);
@@ -690,6 +802,11 @@ void demo_www_close(demo_www_t *w) {
     return;
   for (i = 0; i < PEERS; ++i)
     drop(w->peers + i);
+  while (w->retired) {
+    reap_terminals(w);
+    if (w->retired)
+      (void)poll(NULL, 0, 1);
+  }
   if (w->watch && w->editor)
     (void)sl_watch_remove(w->editor, w->watch);
   if (w->listener >= 0)
@@ -733,7 +850,7 @@ static int save_record(void *context, const void *data, size_t length) {
   ++w->log_events;
   for (i = 0; i < PEERS; ++i) {
     demo_www_peer_t *p = w->peers + i;
-    if (p->fd >= 0 && p->websocket && !p->cursor) {
+    if (p->fd >= 0 && p->websocket && !p->terminal_route && !p->cursor) {
       p->cursor = r;
       interest(p);
     }

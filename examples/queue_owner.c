@@ -1038,6 +1038,7 @@ int main(int argc, char **argv) {
     ops.control = web_control;
     ops.edit = web_edit;
     ops.snapshot = web_snapshot;
+    ops.terminal = 1;
     o->web = demo_web_open(NULL, &ops, o, 8081, &enabled);
     if (enabled && !o->web) {
       perror("web listener");

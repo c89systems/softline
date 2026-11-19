@@ -302,14 +302,15 @@ static int read_all(int fd, void *data, size_t n) {
   }
   return 0;
 }
-static int ws_open_after(unsigned short port, const char *after) {
+static int ws_open_route(unsigned short port, const char *route,
+                         const char *after) {
   char request[1024];
   int size =
       snprintf(request, sizeof(request),
-               "GET /events?after=%s HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: "
+               "GET %s?after=%s HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: "
                "websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: "
                "13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n",
-               after);
+               route, after);
   int fd = connect_to(port);
   char header[1024];
   size_t at = 0, i;
@@ -332,6 +333,9 @@ static int ws_open_after(unsigned short port, const char *after) {
 fail:
   close(fd);
   return -1;
+}
+static int ws_open_after(unsigned short port, const char *after) {
+  return ws_open_route(port, "/events", after);
 }
 static int ws_open(unsigned short port) { return ws_open_after(port, ""); }
 static int ws_send(int fd, int opcode, int final, const void *data, size_t n) {
@@ -410,6 +414,7 @@ static int json_field(const char *data, const char *name, char *out,
   out[n] = 0;
   return 0;
 }
+#include "web_terminal_fixture.h"
 static int replay_cursors(unsigned short port, const char *epoch, char *data,
                           size_t cap) {
   const char *stale[] = {"2", "previous-host.2"};
@@ -720,7 +725,7 @@ int main(int argc, char **argv) {
   int pipes[2] = {-1, -1}, fd = -1, one = -1, two = -1, status, opcode,
       failed = 1;
   pid_t child = -1, owner = -1;
-  int slave = -1, dual, charts, edits, approvals, gate[2] = {-1, -1};
+  int slave = -1, dual, charts, edits, approvals, terminal, gate[2] = {-1, -1};
   demo_link_t approval_link;
   char epoch[96];
   const char *mode = argc >= 4 ? argv[3] : "";
@@ -735,12 +740,15 @@ int main(int argc, char **argv) {
   charts = !strncmp(mode, "charts-", 7);
   edits = !strncmp(mode, "edits-", 6);
   approvals = !strncmp(mode, "approvals-", 10);
+  terminal = !strncmp(mode, "terminal-", 9);
   if (charts)
     mode += 7;
   if (edits)
     mode += 6;
   if (approvals)
     mode += 10;
+  if (terminal)
+    mode += 9;
   dual = !strcmp(mode, "dual") || !strcmp(mode, "remote");
   CHECK(snprintf(root, sizeof(root), "%s/www-mock-XXXXXX", argv[1]) <
             (int)sizeof(root) &&
@@ -839,6 +847,7 @@ int main(int argc, char **argv) {
       }
       unsetenv("SOFTLINE_CHAT_IMAGE_DIR");
       unsetenv("SOFTLINE_CHAT_IMAGE_MAX_BYTES");
+      unsetenv("SOFTLINE_WEB_TERMINAL_ISOLATION");
       if (edits)
         inherited_gate(gate);
       if (argc == 5) {
@@ -940,6 +949,13 @@ int main(int argc, char **argv) {
                    i == 0 || i == 4 ? "\"expand\":\"1\"" : "\"expand\":\"0\""));
     }
   }
+  if (terminal) {
+    CHECK(!terminal_roundtrip(port, one, root, data, SL_WWW_FRAME_MAX + 1));
+    failed = 0;
+    goto cleanup;
+  }
+  if (argc == 2)
+    CHECK(ws_open_route(port, "/terminal/events", "") < 0);
   if (charts) {
     CHECK(!chart_turns(one, data, SL_WWW_FRAME_MAX + 1));
     failed = 0;
