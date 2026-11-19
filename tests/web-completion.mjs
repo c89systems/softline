@@ -127,6 +127,7 @@ export async function runWebCompletionTests(source, completionSource, promptSour
     });
     const get = document.getElementById;
     get('transcripts').hidden = get('transcript-toggle').hidden = true;
+    get('transcripts').append(get('transcript-tabs'), get('transcript-close'), get('transcript-screen'));
     get('conversation-pane').rect = { top: 64, height: 704 };
     get('composer-area').rect = { top: 600, height: 120 };
     get('image-preview').append(get('image-preview-content'));
@@ -337,15 +338,16 @@ export async function runWebCompletionTests(source, completionSource, promptSour
     transcript(ui, 'invalid', 'open', { rows: '201' });
     transcript(ui, 'log'); transcript(ui, 'pty', 'open', { rows: '40', columns: '140' });
     const [log, pty] = ui.terminals;
+    const [logTab, ptyTab] = ui.get('transcript-tabs').children;
     assert(ui.terminals.length === 2 && log.options.disableStdin && pty.options.disableStdin && pty.osc.has(52) && pty.osc.has(8), 'viewer accepted input or unsafe side effects');
     transcript(ui, 'log', 'data', { text: 'line\n\x00next' });
     transcript(ui, 'pty', 'data', { encoding: 'base64', data: btoa('\x1b[?1049h') });
     assert(decode(log.chunks[0]) === 'line\r\nnext' && decode(pty.chunks[0]) === '\x1b[?1049h', 'text and VT routing lost bytes');
     ui.prompt.value = 'unsent draft';
-    assert(ui.window.fire('keydown', { key: 'F8' }).defaultPrevented && ui.get('transcript-select').value === 'log', 'F8 failed to open first transcript');
+    assert(ui.window.fire('keydown', { key: 'F8' }).defaultPrevented && logTab['aria-selected'] === 'true', 'F8 failed to open first transcript');
     assert(!ui.get('transcripts').hidden && ui.get('transcript-toggle')['aria-expanded'] === 'true', 'transcript panel did not open');
     ui.get('transcript-toggle').click();
-    assert(ui.get('transcript-select').value === 'pty' && pty.options.cols === 140 && pty.options.rows === 40, 'cycling changed the source geometry');
+    assert(ptyTab['aria-selected'] === 'true' && pty.options.cols === 140 && pty.options.rows === 40, 'cycling changed the source geometry');
     transcript(ui, 'pty', 'resize', { rows: '25', columns: '110' });
     assert(pty.options.cols === 110 && pty.options.rows === 25, 'producer resize was lost');
     ui.event({ type: 'delta', id: 'm', role: 'user', text: 'chat stayed live' });
@@ -357,6 +359,32 @@ export async function runWebCompletionTests(source, completionSource, promptSour
     ui.event({ type: 'session', id: 'restarted' });
     assert(pty.disposed && ui.get('transcript-toggle').hidden, 'old transcript survived host restart');
   });
+  await check('transcript tabs switch by mouse and keyboard and close the pane without interrupting output', async ui => {
+    transcript(ui, 'log', 'open', { title: 'Run log' });
+    transcript(ui, 'pty', 'open', { title: 'Worker screen' });
+    const toggle = ui.get('transcript-toggle');
+    const [log, pty] = ui.get('transcript-tabs').children;
+    const [logPanel, ptyPanel] = ui.get('transcript-screen').children;
+    toggle.click();
+    assert(log.textContent === 'Run log' && pty.textContent === 'Worker screen', 'tabs did not use the host titles');
+    assert(pty.role === 'tab' && pty['aria-controls'] === ptyPanel.id &&
+      ptyPanel.role === 'tabpanel' && ptyPanel['aria-labelledby'] === pty.id, 'tab and panel were not associated');
+    pty.click();
+    assert(logPanel.hidden && !ptyPanel.hidden && log.tabIndex === -1 && pty.tabIndex === 0, 'click failed to switch the visible panel');
+    pty.focus();
+    assert(pty.fire('keydown', { key: 'ArrowRight' }).defaultPrevented &&
+      ui.document.activeElement === log && log['aria-selected'] === 'true', 'arrow key failed to wrap to the first tab');
+    log.fire('keydown', { key: 'End' });
+    assert(ui.document.activeElement === pty && pty['aria-selected'] === 'true', 'End failed to select the last tab');
+    ui.get('transcript-close').click();
+    assert(ui.get('transcripts').hidden && toggle['aria-expanded'] === 'false' &&
+      ui.document.activeElement === toggle, 'close failed to hide the pane and return focus');
+    transcript(ui, 'pty', 'data', { text: 'still running' });
+    const terminal = ui.terminals[1];
+    toggle.click();
+    pty.click();
+    assert(!ptyPanel.hidden && terminal.chunks.length === 1 && !terminal.disposed, 'closing the pane interrupted the transcript');
+  });
   await check('read-only transcript bounds pending bytes and recovers on host reset', async ui => {
     transcript(ui, 'log');
     ui.window.fire('keydown', { key: 'F8' });
@@ -366,7 +394,8 @@ export async function runWebCompletionTests(source, completionSource, promptSour
     transcript(ui, 'log', 'reset');
     transcript(ui, 'log', 'data', { text: 'replayed' });
     const current = ui.terminals[1];
-    assert(current.element && current.chunks.length === 1 && ui.get('transcript-select').value === 'log', 'reset did not restore the selected viewer');
+    assert(current.element && current.chunks.length === 1 &&
+      ui.get('transcript-tabs').children[0]['aria-selected'] === 'true', 'reset did not restore the selected viewer');
   }, { stallTranscript: true });
   await check('docked terminal leaves prompt and conversation live', async ui => {
     const frame = openTerminal(ui);

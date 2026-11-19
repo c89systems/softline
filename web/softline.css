@@ -24,10 +24,15 @@
 #workspace{height:calc(100dvh - 64px);display:flex;flex-direction:column;overflow:hidden}#workspace #chat{height:auto;flex:1;min-height:0}#terminal-panel{flex:none;min-height:0;border-top:1px solid var(--line);overflow:hidden;animation:terminal-slide-up .18s ease-out}.terminal-frame{display:block;width:100%;height:100%;border:0;background:var(--bg)}#composer[data-disabled="1"] .input-row{opacity:.45}#composer[data-disabled="1"] #prompt{cursor:default}@keyframes terminal-slide-up{from{transform:translateY(100%)}to{transform:translateY(0)}}@media(max-width:640px){#workspace{height:calc(100dvh - 54px)}}@media(prefers-reduced-motion:reduce){#terminal-panel{animation:none}}
 #workspace{flex-direction:row}
 #conversation-pane{display:flex;flex-direction:column;flex:1;min-height:0;min-width:0}
-#transcript-toggle,.transcript-heading select{background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:6px;padding:3px 8px;font-size:12px}
+#transcript-toggle{background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:6px;padding:3px 8px;font-size:12px}
 #transcripts{display:flex;flex-direction:column;flex:0 0 clamp(220px,42%,720px);min-width:0;min-height:0;border-left:1px solid var(--line)}
-.transcript-heading{display:flex;align-items:center;gap:8px;padding:8px 12px;color:var(--muted);font-size:12px;border-bottom:1px solid var(--line)}
-.transcript-heading select{min-width:0;max-width:100%}
+.transcript-header{display:flex;align-items:center;gap:4px;padding:0 6px 0 0;border-bottom:1px solid var(--line)}
+#transcript-tabs{display:flex;flex:1;min-width:0;overflow-x:auto;scrollbar-width:thin;scrollbar-color:var(--scroll) transparent}
+.transcript-tab{flex:none;max-width:11rem;padding:8px 12px;border-bottom:2px solid transparent;background:transparent;color:var(--muted);font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.transcript-tab:hover{background:var(--hover);color:var(--text)}
+.transcript-tab[aria-selected="true"]{background:var(--panel);color:var(--text);border-bottom-color:var(--accent)}
+.transcript-tab:focus-visible{outline-offset:-3px}
+#transcript-close{flex:none;width:30px;height:30px}
 #transcript-screen{flex:1;min-height:0;overflow:auto;overscroll-behavior:contain;scrollbar-width:thin;scrollbar-color:var(--scroll) transparent}
 .transcript-stage{padding:6px;font-size:13px}
 .transcript-stage .xterm{width:max-content;min-width:100%}

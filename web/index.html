@@ -56,7 +56,10 @@
   <section id="terminal-panel" aria-label="Server terminal panel" hidden></section>
   </div>
   <aside id="transcripts" aria-label="Read-only terminal transcripts" hidden>
-    <label class="transcript-heading">Transcript <select id="transcript-select" aria-label="Transcript"><option value="">Close transcripts</option></select></label>
+    <div class="transcript-header">
+      <div id="transcript-tabs" role="tablist" aria-label="Transcripts"></div>
+      <button id="transcript-close" class="icon-button" type="button" aria-label="Close transcript pane" title="Close transcript pane"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
+    </div>
     <div id="transcript-screen" tabindex="0" aria-label="Transcript screen"></div>
   </aside>
   </div>

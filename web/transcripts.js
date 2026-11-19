@@ -16,12 +16,16 @@ export class Transcripts {
     this.window = window;
     this.toggle = document.getElementById('transcript-toggle');
     this.panel = document.getElementById('transcripts');
-    this.select = document.getElementById('transcript-select');
+    this.tabs = document.getElementById('transcript-tabs');
     this.screen = document.getElementById('transcript-screen');
     this.views = new Map();
     this.active = '';
+    this.serial = 0;
     this.toggle.addEventListener('click', () => this.cycle());
-    this.select.addEventListener('change', () => this.show(this.select.value));
+    document.getElementById('transcript-close').addEventListener('click', () => {
+      this.toggle.focus({ preventScroll: true });
+      this.show('');
+    });
     window.addEventListener('keydown', event => {
       if (event.defaultPrevented || event.key !== 'F8' || event.repeat ||
           event.isComposing || event.altKey || event.ctrlKey || event.metaKey ||
@@ -45,16 +49,30 @@ export class Transcripts {
     }
   }
 
-  show(id) {
+  show(id, focusTab = false) {
     const next = this.views.get(id);
     const previous = this.views.get(this.active);
-    if (previous && previous !== next) previous.stage.hidden = true;
+    const focused = this.document.activeElement;
+    if (previous && previous !== next) {
+      previous.stage.hidden = true;
+      previous.tab.tabIndex = -1;
+      previous.tab.setAttribute('aria-selected', 'false');
+    }
     this.active = next ? id : '';
-    this.select.value = this.active;
     this.panel.hidden = !next;
     this.toggle.setAttribute('aria-expanded', String(!!next));
-    if (!next) return;
+    if (!next) {
+      if (this.panel.contains(focused)) this.toggle.focus({ preventScroll: true });
+      return;
+    }
     next.stage.hidden = false;
+    next.tab.tabIndex = 0;
+    next.tab.setAttribute('aria-selected', 'true');
+    if (focusTab || (next !== previous &&
+        (this.tabs.contains(focused) || previous?.stage.contains(focused)))) {
+      next.tab.focus({ preventScroll: true });
+    }
+    if (next !== previous) next.tab.scrollIntoView({ block: 'nearest', inline: 'nearest' });
     if (next.terminal && !next.terminal.element) next.terminal.open(next.stage);
     else if (next.terminal) next.terminal.refresh(0, next.terminal.rows - 1);
   }
@@ -62,6 +80,21 @@ export class Transcripts {
   cycle() {
     const ids = [...this.views.keys()];
     this.show(ids[ids.indexOf(this.active) + 1] || '');
+  }
+
+  tabKey(event, id) {
+    if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey || event.isComposing) return;
+    const keys = [...this.views.keys()];
+    let index = keys.indexOf(id);
+    switch (event.key) {
+      case 'ArrowLeft': index = (index + keys.length - 1) % keys.length; break;
+      case 'ArrowRight': index = (index + 1) % keys.length; break;
+      case 'Home': index = 0; break;
+      case 'End': index = keys.length - 1; break;
+      default: return;
+    }
+    event.preventDefault();
+    this.show(keys[index], true);
   }
 
   createTerminal(view) {
@@ -82,7 +115,7 @@ export class Transcripts {
     if (this.active === id) this.show('');
     view.terminal?.dispose();
     view.stage.remove();
-    view.option.remove();
+    view.tab.remove();
     this.views.delete(id);
     this.toggle.hidden = !this.views.size;
   }
@@ -136,13 +169,25 @@ export class Transcripts {
       const stage = this.document.createElement('div');
       stage.className = 'transcript-stage';
       stage.hidden = true;
-      const option = this.document.createElement('option');
-      option.value = id;
-      option.textContent = event.title.slice(0, 80);
-      const entry = { ...geometry, stage, option };
+      stage.id = `transcript-panel-${++this.serial}`;
+      stage.setAttribute('role', 'tabpanel');
+      const tab = this.document.createElement('button');
+      tab.className = 'transcript-tab';
+      tab.type = 'button';
+      tab.id = `transcript-tab-${this.serial}`;
+      tab.textContent = event.title.slice(0, 80);
+      tab.title = tab.textContent;
+      tab.tabIndex = -1;
+      tab.setAttribute('role', 'tab');
+      tab.setAttribute('aria-controls', stage.id);
+      tab.setAttribute('aria-selected', 'false');
+      stage.setAttribute('aria-labelledby', tab.id);
+      tab.addEventListener('click', () => this.show(id));
+      tab.addEventListener('keydown', event => this.tabKey(event, id));
+      const entry = { ...geometry, stage, tab };
       this.createTerminal(entry);
       this.screen.append(stage);
-      this.select.append(option);
+      this.tabs.append(tab);
       this.views.set(id, entry);
       this.toggle.hidden = false;
     } else if (view) {

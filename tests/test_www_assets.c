@@ -175,6 +175,8 @@ int main(int argc, char **argv) {
     const char *conversation = strstr(html, "id=\"conversation-pane\"");
     const char *transcripts = strstr(html, "<aside id=\"transcripts\"");
     CHECK(conversation && transcripts && conversation < transcripts);
+    CHECK(strstr(transcripts, "id=\"transcript-tabs\" role=\"tablist\"") &&
+          strstr(transcripts, "aria-label=\"Close transcript pane\""));
     CHECK(strstr(css, "#workspace{flex-direction:row}") &&
           strstr(css, "#workspace{flex-direction:column-reverse}"));
   }
