@@ -14,7 +14,8 @@ const state = { socket: null, online: false, follow: true, messages: new Map(),
   view: randomId(), generation: 0, imageLimit: 32 * 1024 * 1024,
   queueDelay: 500, queueTimer: null, pending: new Map(), failed: [], epoch: null,
   images: true, attachments: [], requestSeq: 0, approval: null, edit: null,
-  editPending: null, canEdit: false, terminal: '', promptDisabled: false, restorePromptAfterTerminal: false };
+  editPending: null, canEdit: false, terminal: '', promptDisabled: false, restorePromptAfterTerminal: false,
+  promptExplicitDisabled: false, promptReason: '', terminalPromptLock: false, terminalHandoffs: 0 };
 const icon = () => $('copy-icon').content.cloneNode(true);
 let toastTimer;
 function toast(text) { $('toast').textContent = text; $('toast').hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => { $('toast').hidden = true; }, 3500); }
@@ -219,14 +220,19 @@ const terminalPanel = new TerminalPanel({ document, window, closed: () => {
   if (state.restorePromptAfterTerminal) scroll.focus({ preventScroll: true });
 } });
 function promptState(disabled, text = '') {
+  state.promptExplicitDisabled = disabled; state.promptReason = text;
+  updatePromptState();
+}
+function updatePromptState() {
+  const disabled = state.promptExplicitDisabled || (state.terminalPromptLock && state.terminalHandoffs > 0);
   const wasDisabled = state.promptDisabled;
   state.promptDisabled = disabled; prompt.readOnly = disabled;
   prompt.setAttribute('aria-disabled', String(disabled));
-  prompt.title = disabled ? text || 'The host has paused prompt input.' : '';
+  prompt.title = disabled ? state.promptExplicitDisabled ? state.promptReason || 'The host has paused prompt input.' : 'A terminal handoff is active.' : '';
   $('composer').dataset.disabled = disabled ? '1' : '0';
   $('plus').disabled = $('image-input').disabled = disabled;
-  if (disabled) editor.suspend();
-  else if (wasDisabled) {
+  if (disabled && !wasDisabled) editor.suspend();
+  else if (!disabled && wasDisabled) {
     if (state.online) editor.connected();
     editor.focus(!(state.restorePromptAfterTerminal && document.activeElement === scroll));
     state.restorePromptAfterTerminal = false;
@@ -388,6 +394,11 @@ function receive(event) {
       if (state.stagingQueue) { for (const item of state.stagingQueue.values()) item.text += item.decoder.decode(); state.queue = state.stagingQueue; state.stagingQueue = null; queue(); } break;
     case 'status': state.busy = e.busy === '1'; $('activity').textContent = e.text || ''; $('activity').title = e.text || ''; break;
     case 'prompt_state': promptState(e.disabled === '1', e.text); break;
+    case 'terminal_state': {
+      if (typeof e.active !== 'string' || !/^(0|[1-9]\d*)$/u.test(e.active) || !Number.isSafeInteger(Number(e.active)) || !['0', '1'].includes(e.disable_prompt)) break;
+      state.terminalHandoffs = Number(e.active); state.terminalPromptLock = e.disable_prompt === '1';
+      updatePromptState(); break;
+    }
     case 'limits': if (Number(e.image_bytes) > 0) state.imageLimit = Number(e.image_bytes); break;
     case 'completion_provider': case 'complete': case 'complete_end': editor.receive(e); break;
     case 'draft': {
@@ -399,6 +410,7 @@ function receive(event) {
     case 'session':
       if (state.epoch && state.epoch !== e.id) {
         terminalPanel.close();
+        state.terminalHandoffs = 0; state.terminalPromptLock = false;
         promptState(false);
         state.seq = ''; clearConversation();
         editResult(state.editPending, 'The host restarted. This edit was not sent again.');

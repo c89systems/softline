@@ -110,6 +110,18 @@ static int control(void *context, const char *action, const char *id,
   sl_queue_result_t result;
   (void)id;
   (void)revision;
+  if (!strcmp(action, "terminal-policy-on") ||
+      !strcmp(action, "terminal-policy-off")) {
+    demo_www_set_terminal_prompt_lock(demo_web_listener(app->web),
+                                      !strcmp(action, "terminal-policy-on"));
+    return SL_OK;
+  }
+  if (!strncmp(action, "terminal-fixture-", 17) && action[17] >= '0' &&
+      action[17] <= '2' && !action[18]) {
+    demo_www_set_terminal_handoffs(demo_web_listener(app->web),
+                                   (size_t)(action[17] - '0'));
+    return SL_OK;
+  }
   if (!strcmp(action, "consume-front")) {
     char *text = NULL;
     int status = sl_prompt_queue_take(app->sl, 0, &text);
@@ -202,7 +214,8 @@ static void child_server(int output, const char *directory) {
   ops.edit = edit;
   ops.snapshot = snapshot;
   if (chdir(directory) || setenv("SOFTLINE_WEB", "1", 1) ||
-      setenv("SOFTLINE_WEB_PORT", "0", 1))
+      setenv("SOFTLINE_WEB_PORT", "0", 1) ||
+      setenv("SOFTLINE_WEB_DISABLE_PROMPT_DURING_TERMINAL", "0", 1))
     _exit(2);
   unsetenv("SOFTLINE_CHAT_IMAGE_DIR");
   unsetenv("SOFTLINE_CHAT_IMAGE_MAX_BYTES");
@@ -725,7 +738,8 @@ int main(int argc, char **argv) {
   int pipes[2] = {-1, -1}, fd = -1, one = -1, two = -1, status, opcode,
       failed = 1;
   pid_t child = -1, owner = -1;
-  int slave = -1, dual, charts, edits, approvals, terminal, gate[2] = {-1, -1};
+  int slave = -1, dual, charts, edits, approvals, terminal, terminal_lock,
+      handoff, failed_handoff, gate[2] = {-1, -1};
   demo_link_t approval_link;
   char epoch[96];
   const char *mode = argc >= 4 ? argv[3] : "";
@@ -737,10 +751,25 @@ int main(int argc, char **argv) {
   (void)signal(SIGPIPE, SIG_IGN);
   demo_link_init(&approval_link, -1);
   CHECK((argc == 2 || argc == 4 || argc == 5) && data && http);
+  if (argc == 2) {
+    int enabled;
+    unsetenv("SOFTLINE_WEB_DISABLE_PROMPT_DURING_TERMINAL");
+    CHECK(!demo_www_terminal_lock_environment(&enabled) && !enabled);
+    CHECK(!setenv("SOFTLINE_WEB_DISABLE_PROMPT_DURING_TERMINAL", "1", 1));
+    CHECK(!demo_www_terminal_lock_environment(&enabled) && enabled);
+    CHECK(!setenv("SOFTLINE_WEB_DISABLE_PROMPT_DURING_TERMINAL", "0", 1));
+    CHECK(!demo_www_terminal_lock_environment(&enabled) && !enabled);
+    CHECK(!setenv("SOFTLINE_WEB_DISABLE_PROMPT_DURING_TERMINAL", "invalid", 1));
+    CHECK(demo_www_terminal_lock_environment(&enabled) < 0 && errno == EINVAL);
+    unsetenv("SOFTLINE_WEB_DISABLE_PROMPT_DURING_TERMINAL");
+  }
   charts = !strncmp(mode, "charts-", 7);
   edits = !strncmp(mode, "edits-", 6);
   approvals = !strncmp(mode, "approvals-", 10);
   terminal = !strncmp(mode, "terminal-", 9);
+  terminal_lock = !strncmp(mode, "terminal-lock-", 14);
+  handoff = !strncmp(mode, "handoff-", 8);
+  failed_handoff = !strncmp(mode, "handoff-failed-", 15);
   if (charts)
     mode += 7;
   if (edits)
@@ -748,7 +777,9 @@ int main(int argc, char **argv) {
   if (approvals)
     mode += 10;
   if (terminal)
-    mode += 9;
+    mode += terminal_lock ? 14 : 9;
+  if (handoff)
+    mode += failed_handoff ? 15 : 8;
   dual = !strcmp(mode, "dual") || !strcmp(mode, "remote");
   CHECK(snprintf(root, sizeof(root), "%s/www-mock-XXXXXX", argv[1]) <
             (int)sizeof(root) &&
@@ -785,6 +816,8 @@ int main(int argc, char **argv) {
         _exit(2);
       close(pipes[0]);
       setenv("SOFTLINE_WEB", "0", 1);
+      setenv("SOFTLINE_WEB_DISABLE_PROMPT_DURING_TERMINAL", handoff ? "1" : "0",
+             1);
       if (edits)
         inherited_gate(gate);
       execl(argv[4], argv[4], "0", (char *)NULL);
@@ -835,6 +868,13 @@ int main(int argc, char **argv) {
           setenv("SOFTLINE_HISTORY_DIR", root, 1) ||
           setenv("SOFTLINE_CHAT_APPROVAL_DEMO", approvals ? "1" : "0", 1) ||
           setenv("SOFTLINE_CHAT_CHAR_MS", "0", 1))
+        _exit(2);
+      if (setenv("SOFTLINE_WEB_DISABLE_PROMPT_DURING_TERMINAL",
+                 terminal_lock || (handoff && argc != 5) ? "1" : "0", 1))
+        _exit(2);
+      if (handoff &&
+          setenv("SHELL",
+                 failed_handoff ? "/softline-no-such-shell" : "/bin/sh", 1))
         _exit(2);
       if (approvals && (setenv("SOFTLINE_CHAT_APPROVAL_MS", "50", 1) ||
                         setenv("SOFTLINE_CHAT_APPROVAL_SEED", "1", 1)))
@@ -950,13 +990,44 @@ int main(int argc, char **argv) {
     }
   }
   if (terminal) {
-    CHECK(!terminal_roundtrip(port, queue_port, one, root, data,
+    CHECK(!terminal_roundtrip(port, queue_port, one, root, terminal_lock, data,
                               SL_WWW_FRAME_MAX + 1));
+    failed = 0;
+    goto cleanup;
+  }
+  if (handoff) {
+    CHECK(!terminal_state_wait(one, data, SL_WWW_FRAME_MAX + 1, 0, 1));
+    CHECK(!terminal_state_wait(two, data, SL_WWW_FRAME_MAX + 1, 0, 1));
+    CHECK(terminal_fd >= 0 && write(terminal_fd, "\033s", 2) == 2);
+    CHECK(!terminal_state_wait(one, data, SL_WWW_FRAME_MAX + 1, 1, 1));
+    CHECK(!terminal_state_wait(two, data, SL_WWW_FRAME_MAX + 1, 1, 1));
+    if (!failed_handoff)
+      CHECK(write(terminal_fd, "exit\n", 5) == 5);
+    CHECK(!terminal_state_wait(one, data, SL_WWW_FRAME_MAX + 1, 0, 1));
+    CHECK(!terminal_state_wait(two, data, SL_WWW_FRAME_MAX + 1, 0, 1));
     failed = 0;
     goto cleanup;
   }
   if (argc == 2)
     CHECK(ws_open_route(port, "/terminal/events", "") < 0);
+  if (argc == 2) {
+    static const char *const commands[] = {
+        "terminal-fixture-1", "terminal-policy-on",  "terminal-fixture-2",
+        "terminal-fixture-1", "terminal-policy-off", "terminal-policy-on",
+        "terminal-fixture-0", "terminal-policy-off"};
+    static const int counts[] = {1, 1, 2, 1, 1, 1, 0, 0};
+    static const int policies[] = {0, 1, 1, 1, 0, 1, 1, 0};
+    size_t index;
+    for (index = 0; index < sizeof(counts) / sizeof(counts[0]); ++index) {
+      char request[128];
+      (void)snprintf(request, sizeof(request), "action=%s", commands[index]);
+      CHECK(!ws_text(one, request));
+      CHECK(!terminal_state_wait(one, data, SL_WWW_FRAME_MAX + 1,
+                                 (size_t)counts[index], policies[index]));
+      CHECK(!terminal_state_wait(two, data, SL_WWW_FRAME_MAX + 1,
+                                 (size_t)counts[index], policies[index]));
+    }
+  }
   if (charts) {
     CHECK(!chart_turns(one, data, SL_WWW_FRAME_MAX + 1));
     failed = 0;

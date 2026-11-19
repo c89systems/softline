@@ -38,7 +38,8 @@ enum demo_message {
   DEMO_IMAGE_ABORT,
   DEMO_IMAGE_DONE,
   DEMO_IMAGE_READY,
-  DEMO_IMAGE_RESULT
+  DEMO_IMAGE_RESULT,
+  DEMO_TERMINAL_STATE /* Text: conversation handoff count and prompt policy. */
 };
 typedef struct demo_packet {
   unsigned char *data;

@@ -74,6 +74,8 @@ struct demo_www {
   int publishing_state;
   int terminal_enabled;
   size_t terminal_count;
+  int terminal_prompt_lock, published_prompt_lock;
+  size_t external_handoffs, published_handoffs;
   terminal_entry_t *retired;
 };
 const char *demo_www_epoch(const demo_www_t *w) { return w->epoch; }
@@ -89,6 +91,65 @@ void demo_www_enable_terminal(demo_www_t *w) {
 }
 int demo_www_terminal_enabled(const demo_www_t *w) {
   return w && w->terminal_enabled;
+}
+static size_t terminal_handoffs(const demo_www_t *w) {
+  size_t i, count = w->external_handoffs;
+  for (i = 0; i < PEERS; ++i)
+    if (w->peers[i].terminal &&
+        demo_web_terminal_active(w->peers[i].terminal->value))
+      ++count;
+  return count;
+}
+static int terminal_state(demo_www_t *w, demo_www_peer_t *peer) {
+  char active[32];
+  sl_www_field_t fields[2] = {{"active", NULL, 0}, {"disable_prompt", NULL, 0}};
+  size_t count = terminal_handoffs(w);
+  fields[0].value = active;
+  (void)snprintf(active, sizeof(active), "%lu", (unsigned long)count);
+  fields[1].value = w->terminal_prompt_lock ? "1" : "0";
+  if (peer)
+    return demo_www_reply(peer, "terminal_state", fields, 2);
+  if (count == w->published_handoffs &&
+      w->terminal_prompt_lock == w->published_prompt_lock)
+    return SL_OK;
+  if (demo_www_publish(w, "terminal_state", fields, 2) != SL_OK)
+    return SL_ERROR;
+  w->published_handoffs = count;
+  w->published_prompt_lock = w->terminal_prompt_lock;
+  return SL_OK;
+}
+void demo_www_set_terminal_prompt_lock(demo_www_t *w, int enabled) {
+  if (!w)
+    return;
+  w->terminal_prompt_lock = !!enabled;
+  (void)terminal_state(w, NULL);
+}
+void demo_www_set_terminal_handoffs(demo_www_t *w, size_t active) {
+  if (!w || active > (size_t)-1 - PEERS)
+    return;
+  w->external_handoffs = active;
+  (void)terminal_state(w, NULL);
+}
+void demo_www_set_terminal_state(demo_www_t *w, size_t active, int enabled) {
+  if (!w || active > (size_t)-1 - PEERS)
+    return;
+  w->external_handoffs = active;
+  w->terminal_prompt_lock = !!enabled;
+  (void)terminal_state(w, NULL);
+}
+void demo_www_terminal_status(const demo_www_t *w, size_t *active,
+                              int *enabled) {
+  *active = w ? terminal_handoffs(w) : 0;
+  *enabled = w ? w->terminal_prompt_lock : 0;
+}
+int demo_www_terminal_lock_environment(int *enabled) {
+  const char *value = getenv("SOFTLINE_WEB_DISABLE_PROMPT_DURING_TERMINAL");
+  *enabled = value && !strcmp(value, "1");
+  if (value && strcmp(value, "0") && strcmp(value, "1")) {
+    errno = EINVAL;
+    return -1;
+  }
+  return 0;
 }
 int demo_www_timeout(const demo_www_t *w, int timeout) {
   size_t i;
@@ -337,6 +398,7 @@ static int replay(void *context, void *peer, const char *after) {
   demo_www_peer_t *p = peer;
   record_t *r;
   unsigned long seq = 0;
+  int status;
   char *end;
   if (after && !strncmp(after, w->epoch, strlen(w->epoch)) &&
       after[strlen(w->epoch)] == '.') {
@@ -360,9 +422,10 @@ static int replay(void *context, void *peer, const char *after) {
   p->replay_before = w->sequence;
   while (p->cursor && p->cursor->state && p->cursor->seq <= p->replay_before)
     p->cursor = p->cursor->next;
-  return w->host.replay
-             ? w->host.replay(w->host.context, peer, seq ? after : "")
-             : SL_OK;
+  status = w->host.replay
+               ? w->host.replay(w->host.context, peer, seq ? after : "")
+               : SL_OK;
+  return status == SL_OK ? terminal_state(w, p) : status;
 }
 static int action(void *context, const sl_www_request_t *r) {
   demo_www_t *w = context;
@@ -738,6 +801,7 @@ int demo_www_poll(demo_www_t *w, int timeout_ms) {
     }
     interest(p);
   }
+  (void)terminal_state(w, NULL);
   w->polling = 0;
   return 0;
 }
@@ -886,7 +950,8 @@ int demo_www_publish(demo_www_t *w, const char *type,
     return SL_ERROR_FULL;
   (void)snprintf(seq, sizeof(seq), "%s.%lu", w->epoch, ++w->sequence);
   w->publishing_state =
-      type && (!strncmp(type, "queue_", 6) || !strcmp(type, "status"));
+      type && (!strncmp(type, "queue_", 6) || !strcmp(type, "status") ||
+               !strcmp(type, "terminal_state"));
   return sl_www_emit(save_record, w, type, seq, fields, count);
 }
 void demo_www_begin(demo_www_t *w, const char *id, const char *role) {

@@ -14,6 +14,14 @@ unsigned short demo_www_port(const demo_www_t *);
 const char *demo_www_epoch(const demo_www_t *);
 void demo_www_enable_terminal(demo_www_t *);
 int demo_www_terminal_enabled(const demo_www_t *);
+/* Conversation-wide policy, default off; both setters may change during chat.
+ * External handoffs are a host-owned snapshot (e.g. native TUI sessions),
+ * added to browser sessions tracked by this listener. Neither pauses work. */
+void demo_www_set_terminal_prompt_lock(demo_www_t *, int enabled);
+void demo_www_set_terminal_handoffs(demo_www_t *, size_t active);
+void demo_www_set_terminal_state(demo_www_t *, size_t active, int enabled);
+void demo_www_terminal_status(const demo_www_t *, size_t *active, int *enabled);
+int demo_www_terminal_lock_environment(int *enabled);
 int demo_www_timeout(const demo_www_t *, int);
 int demo_www_poll(demo_www_t *, int timeout_ms);
 /* Append to a host's poll set; dispatch with poll(..., 0) after readiness. */

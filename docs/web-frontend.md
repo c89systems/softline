@@ -131,6 +131,7 @@ Replies may omit `seq`.
 | `queue_text` | `id`, `encoding=base64`, `data`; bounded text chunks |
 | `status` | Host-owned `text`, `busy=0/1`; a reserved single-line slot keeps layout stable, with long text ellipsized and available in its title |
 | `prompt_state` | Host-owned `disabled=0/1`, optional tooltip `text`; dim/lock the composer while retaining the draft, scrolling and feed. Send current state during reconnect/replay; optional `view` targets one browser |
+| `terminal_state` | Atomic host snapshot: `active` is the conversation-wide active/initializing handoff count, `disable_prompt=0/1` selects automatic prompt locking (default `0`). Count both TUI and browser sessions; publish on lifecycle or policy changes and replay current state |
 | `completion_provider` | Host registration: one-character `trigger`, `scope=start/word`, `strip=0/1`, `expand=0/1`; send on each connection |
 | `complete` | `request`, raw full `candidate` including trigger; explicit `+` menu also uses canonical `value`, `label`, `description`, UTF-8 byte `start`/`end`, optional `continue=1` |
 | `complete_end` | `request`, `status=ok/error`; completes one provider snapshot, including empty results |
@@ -210,9 +211,14 @@ the [browser terminal](web-terminal.md) at `/terminal` on its existing web port
 (8081 by default). Ctrl+` and the `+` menu open the locally served xterm.js view
 in a bottom panel; closing it terminates its shell, and shell exit closes it.
 The conversation and prompt stay above the panel. Opening it leaves chat and
-input enabled. Hosts can explicitly dim/lock the composer with a `prompt_state`
+input enabled by default. Set `SOFTLINE_WEB_DISABLE_PROMPT_DURING_TERMINAL=1`
+in the examples to automatically lock every conversation web prompt while any
+TUI or browser handoff is active. A `terminal_state` snapshot changes that policy
+at runtime; the host owns lifecycle counts and propagation across its views.
+Hosts can explicitly dim/lock the composer with a `prompt_state`
 event (`disabled="1"`, optional tooltip `text`) and unlock with `disabled="0"`.
-They own the current state and its replay; the panel never overrides that lock.
+Explicit and automatic locks combine: ending the last handoff releases only
+the automatic lock. The panel never overrides the server's shared state.
 Each connection owns a new server PTY in the server's working directory;
 chat and other terminal sessions remain independent. The other chat examples
 leave this endpoint disabled. A host can advertise its own mounted terminal page

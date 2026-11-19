@@ -113,13 +113,15 @@ await uiCheck('terminal docks below the composer and fits short and tall viewpor
     assert(terminal.getBoundingClientRect().height>0,'terminal has no visible grid');
     if(height===1400){await waitFor(()=>metrics);assert(terminal.getBoundingClientRect().height>=25*metrics.rowHeight-1,'tall viewport lost terminal rows')}
   }
-  event({type:'prompt_state',disabled:'1',text:'Agent waiting for shell'});
+  event({type:'terminal_state',active:'2',disable_prompt:'1'});
   assert(p.readOnly&&doc.querySelector('#composer').dataset.disabled==='1'&&!doc.querySelector('#scroll').inert,'lock disabled conversation scrolling');
   terminalFrame.contentDocument.querySelector('#terminal-close').click();
   await waitFor(()=>panel.hidden&&!panel.querySelector('iframe'));
   assert(p.readOnly,'closing terminal overrode host lock');
+  event({type:'terminal_state',active:'1',disable_prompt:'1'});assert(p.readOnly,'another active handoff lost its lock');
+  event({type:'terminal_state',active:'0',disable_prompt:'1'});assert(!p.readOnly,'last handoff did not unlock prompt');
   }finally{
-    event({type:'capabilities',terminal:''});event({type:'prompt_state',disabled:'0'});frame.style.height='500px';w.removeEventListener('message',measured);
+    event({type:'capabilities',terminal:''});event({type:'terminal_state',active:'0',disable_prompt:'0'});event({type:'prompt_state',disabled:'0'});frame.style.height='500px';w.removeEventListener('message',measured);
   }
 });
 await uiCheck('thinking slot stays reserved across status changes',async()=>{

@@ -55,6 +55,7 @@ struct chat_state {
   unsigned int reconnect_ms;
   double connecting_since;
   demo_web_chat_t *web;
+  size_t terminal_upstream;
   int web_only, null_fd;
   char web_bytes[64];
   size_t web_length;
@@ -134,9 +135,16 @@ static int sync_queue_readiness(struct chat_state *state, int at_seam) {
 static int run_shell(struct chat_state *state, int preserve_draft) {
   int status, exit_status = -1;
   char message[128] = {0};
+  demo_www_t *web = demo_web_listener(state->web);
+  demo_www_set_terminal_handoffs(web, state->terminal_upstream + 1);
+  if (web)
+    (void)demo_www_poll(web, 0);
   status = state->remote
                ? demo_client_terminal(state->remote, state->sl, &exit_status)
                : sl_terminal_local(state->sl, NULL, &exit_status);
+  demo_www_set_terminal_handoffs(web, state->terminal_upstream);
+  if (web)
+    (void)demo_www_poll(web, 0);
   if (exit_status > 0 && status != SL_TERMINAL_ESCAPED)
     (void)snprintf(message, sizeof(message),
                    "shell exited unsuccessfully (exit %d)\n", exit_status);
@@ -894,6 +902,23 @@ static int remote_event(void *context, int kind, const char *text) {
   size_t i;
   int unavailable;
   switch (kind) {
+  case DEMO_TERMINAL_STATE: {
+    unsigned long active;
+    int enabled;
+    char *end;
+    if (!text || *text < '0' || *text > '9')
+      return SL_ERROR_INVALID;
+    errno = 0;
+    active = strtoul(text, &end, 10);
+    if (errno || active > (size_t)-1 - DEMO_WWW_FDS || *end != ' ' ||
+        (end[1] != '0' && end[1] != '1') || end[2])
+      return SL_ERROR_INVALID;
+    enabled = end[1] == '1';
+    state->terminal_upstream = (size_t)active;
+    demo_www_set_terminal_state(demo_web_listener(state->web), (size_t)active,
+                                enabled);
+    return SL_OK;
+  }
   case DEMO_IMAGE_STARTED:
   case DEMO_IMAGE_STORING:
     state->image_active = 1;

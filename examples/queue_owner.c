@@ -51,6 +51,8 @@ typedef struct owner {
   client_t web_client, *request_client;
   sl_queue_result_status_t web_status;
   int web_reasoning;
+  int terminal_policy, terminal_sent, sent_terminal_policy;
+  size_t sent_handoffs;
   demo_image_store_t image;
   demo_terminal_server_t *terminal, *closed_terminals;
   demo_link_t link;
@@ -127,9 +129,11 @@ static void disconnect(owner_t *o) {
     o->terminal->next = o->closed_terminals;
     o->closed_terminals = o->terminal;
     o->terminal = NULL;
+    demo_www_set_terminal_handoffs(demo_web_listener(o->web), 0);
   }
   demo_link_close(&o->link);
   o->client = NULL;
+  o->terminal_sent = 0;
   o->gated = o->shell_pending = o->shell_requested = 0;
   o->input_empty = 1;
 }
@@ -168,6 +172,23 @@ static void text_event(owner_t *o, int kind, const char *text) {
   demo_put_number(&p, (unsigned long)kind);
   demo_put_string(&p, text);
   send_packet(o, &p);
+}
+static void terminal_snapshot(owner_t *o) {
+  size_t active = o->terminal && !o->terminal->eof ? 1 : 0;
+  int enabled = o->terminal_policy;
+  char text[64];
+  if (!o->client || o->shell_pending)
+    return;
+  if (o->web)
+    demo_www_terminal_status(demo_web_listener(o->web), &active, &enabled);
+  if (o->terminal_sent && o->sent_handoffs == active &&
+      o->sent_terminal_policy == enabled)
+    return;
+  (void)snprintf(text, sizeof(text), "%lu %d", (unsigned long)active, enabled);
+  text_event(o, DEMO_TERMINAL_STATE, text);
+  o->terminal_sent = o->client != NULL;
+  o->sent_handoffs = active;
+  o->sent_terminal_policy = enabled;
 }
 static void handoff_shell(owner_t *o, const char *text) {
   text_event(o, DEMO_SEGMENT_END, NULL);
@@ -984,6 +1005,11 @@ int main(int argc, char **argv) {
   }
   o->stall_hello_once = getenv("SOFTLINE_CHAT_TEST_STALL_HELLO") != NULL;
   o->input_empty = 1;
+  if (demo_www_terminal_lock_environment(&o->terminal_policy)) {
+    perror("terminal prompt policy");
+    free(o);
+    return 1;
+  }
   (void)snprintf(o->web_client.name, sizeof(o->web_client.name), "web");
   if (gate) {
     long fd = strtol(gate, &end, 10);
@@ -1126,6 +1152,8 @@ int main(int argc, char **argv) {
       disconnect(o);
     if (o->terminal && demo_terminal_server_pump(o->terminal, &o->link))
       disconnect(o);
+    demo_www_set_terminal_handoffs(demo_web_listener(o->web),
+                                   o->terminal && !o->terminal->eof ? 1 : 0);
     {
       demo_terminal_server_t **at = &o->closed_terminals;
       while (*at) {
@@ -1139,6 +1167,7 @@ int main(int argc, char **argv) {
     }
     if (demo_web_tick(o->web))
       break;
+    terminal_snapshot(o);
     pump(o, now);
     if (o->demo_enabled && now >= o->next_injection) {
       schedule_injection(o, now);

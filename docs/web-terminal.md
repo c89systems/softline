@@ -42,23 +42,57 @@ The TUI's Alt-S remote terminal and browser terminals can remain open and run
 concurrently. They use separate PTYs with independent shell state, dimensions
 and lifetimes; closing or resizing one does not affect the other.
 
-Opening a browser terminal does not pause chat, the agent, or prompt input.
+By default, opening a browser terminal does not pause chat, the agent, or prompt input.
 The example continues servicing chat while the shell runs, including when
 terminal output is blocked by flow control. A downstream host such as CAI may
 choose to pause its **agent** until shell exit. It must still service its I/O
 event loop to move terminal bytes, process close/exit and serve conversation
 scrolling/replay. Softline does not impose an agent scheduling policy.
 
-To dim and lock the composer during that pause, emit the host-controlled chat
+Concurrent prompt and terminal is the default. To enable automatic locking in
+the examples, start with `SOFTLINE_WEB_DISABLE_PROMPT_DURING_TERMINAL=1` (only
+`0` and `1` are accepted). The server counts browser PTYs automatically, and
+the native handoff paths report their activity to the same conversation owner.
+Every browser prompt locks while any handoff is initializing or running, then
+unlocks after the last exits, disconnects or fails. Cleanup/reaping does not
+retain a stale UI lock. The same state is sent to late-joining/reconnecting views.
+The queue owner forwards this snapshot through the demo transport to remote
+clients serving their own web UI. Configure the queue owner's policy; its
+snapshot is authoritative for those mirrored views, including when the owner's
+own web listener is off. A local TUI handoff retains the host's existing native
+relay pause; hosts needing live I/O during that pause must keep servicing their
+event loop.
+
+This is a live policy: the example host can call
+`demo_www_set_terminal_prompt_lock(listener, enabled)` during chat, including
+while shells are open. `demo_www_set_terminal_handoffs(listener, count)` supplies
+the host's current non-browser handoff count, added to the listener's browser
+sessions. The examples wire both native and browser lifecycle paths; the setters
+are example integration helpers, not part of the installed library API.
+`demo_www_set_terminal_state(listener, count, enabled)` updates a mirrored
+count/policy atomically, and `demo_www_terminal_status()` reads current state.
+
+Other hosts publish the atomic event
+`{"type":"terminal_state","active":"2","disable_prompt":"1"}` through
+`sl_www_emit()` to all views of that conversation. Update it whenever the active
+handoff count or policy changes, and replay the current snapshot after `session`.
+Do not replay historical counts as current state. Turning the policy off while
+sessions remain open immediately permits input again. Hosts serving one
+conversation through multiple listeners must propagate the same authoritative
+state to those listeners. This carries host scheduling policy without making
+the web receiver own PTYs, sockets, a conversation registry or an agent loop.
+
+To explicitly dim and lock the composer independently of that policy, emit the host-controlled chat
 event `{"type":"prompt_state","disabled":"1","text":"Agent waiting for terminal"}`
 through `sl_www_emit()`. Send `disabled="0"` when input may resume. `text` is an
 optional tooltip, not a new status row. The draft and selection are retained;
 typing, completion acceptance, sending/steering and adding images are blocked,
 while conversation scrolling, output rendering and the terminal continue.
 The lock does not affect queue/approval controls. It is independent of terminal
-visibility: panel closure never overrides the host's lock. Keyboard terminal
+visibility: panel closure never overrides the host's lock or the server's shared
+handoff count. Keyboard terminal
 toggle remains available while the composer is locked. A new host session
-epoch clears a stale lock and closes any old terminal panel.
+epoch clears stale locks/policy and closes any old terminal panel.
 
 The host chooses whether to send that state to one view or every conversation
 view, and supplies its current state during replay/reconnect. Reconnection to
@@ -121,6 +155,12 @@ EOF/exit status, output backpressure with simultaneous chat, and invalid credit.
 It also keeps the TUI's native TCP PTY open alongside the browser PTY, verifies
 native I/O while browser output is blocked, and checks independent shell state
 and exit status after a browser shell closes.
+`softline_www_terminal_lock` repeats the real native/browser lifecycle with the
+automatic policy enabled, including multiple views and a late join. Local Alt-S
+and failed-launch tests verify the native chat hooks. The remote handoff test
+verifies that the backend policy overrides the frontend's local default and
+reaches both browser views. The mock test changes
+policy live while handoffs remain active and verifies both browser connections.
 `softline_www_terminal_adapter` verifies blocked input, cancellation, failed
 launch and child reaping. `softline_www_terminal_client` checks browser transport
 logic with xterm/DOM doubles, including acknowledgements after consumption,

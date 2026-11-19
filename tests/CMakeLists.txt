@@ -132,6 +132,9 @@ if(UNIX)
   add_test(NAME softline_www_terminal_owner COMMAND test_www_mock "${PROJECT_BINARY_DIR}"
     "$<TARGET_FILE:example_queue_owner>" terminal-owner)
   set_tests_properties(softline_www_terminal_owner PROPERTIES LABELS "integration;web;terminal;memcheck" TIMEOUT 30)
+  add_test(NAME softline_www_terminal_lock COMMAND test_www_mock "${PROJECT_BINARY_DIR}"
+    "$<TARGET_FILE:example_queue_owner>" terminal-lock-owner)
+  set_tests_properties(softline_www_terminal_lock PROPERTIES LABELS "integration;web;terminal;memcheck" TIMEOUT 30)
   add_test(NAME softline_www_charts_owner COMMAND test_www_mock "${PROJECT_BINARY_DIR}"
     "$<TARGET_FILE:example_queue_owner>" charts-owner)
   add_test(NAME softline_www_edits_owner COMMAND test_www_mock "${PROJECT_BINARY_DIR}"
@@ -143,6 +146,11 @@ if(UNIX)
   set_tests_properties(softline_www_charts_owner PROPERTIES LABELS "integration;web;libmdf" TIMEOUT 90)
   set_tests_properties(softline_www_queue_owner PROPERTIES LABELS "integration;web;clipboard;example-smoke;memcheck" TIMEOUT 30)
   if(TARGET example_chat)
+    add_test(NAME softline_www_terminal_local_handoff COMMAND test_www_mock "${PROJECT_BINARY_DIR}"
+      "$<TARGET_FILE:example_chat>" handoff-dual)
+    add_test(NAME softline_www_terminal_failed_handoff COMMAND test_www_mock "${PROJECT_BINARY_DIR}"
+      "$<TARGET_FILE:example_chat>" handoff-failed-dual)
+    set_tests_properties(softline_www_terminal_local_handoff softline_www_terminal_failed_handoff PROPERTIES LABELS "integration;web;terminal;memcheck" TIMEOUT 15)
     foreach(mode local dual)
       add_test(NAME softline_www_approvals_${mode} COMMAND test_www_mock "${PROJECT_BINARY_DIR}"
         "$<TARGET_FILE:example_chat>" "approvals-${mode}")
@@ -170,6 +178,9 @@ if(UNIX)
       "$<TARGET_FILE:example_chat>" dual)
     add_test(NAME softline_www_remote COMMAND test_www_mock "${PROJECT_BINARY_DIR}"
       "$<TARGET_FILE:example_chat_remote>" remote "$<TARGET_FILE:example_queue_owner>")
+    add_test(NAME softline_www_terminal_remote_handoff COMMAND test_www_mock "${PROJECT_BINARY_DIR}"
+      "$<TARGET_FILE:example_chat_remote>" handoff-remote "$<TARGET_FILE:example_queue_owner>")
+    set_tests_properties(softline_www_terminal_remote_handoff PROPERTIES LABELS "integration;web;terminal;memcheck" TIMEOUT 20)
     set_tests_properties(softline_www_dual softline_www_remote PROPERTIES LABELS "integration;web;clipboard;example-smoke;memcheck" TIMEOUT 30)
   endif()
 endif()

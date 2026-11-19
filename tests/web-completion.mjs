@@ -378,6 +378,49 @@ export async function runWebCompletionTests(source, completionSource, promptSour
     ui.event({ type: 'prompt_state', disabled: '0' }); ui.prompt.setSelectionRange(15, 15); ui.key('Enter'); await ui.idle();
     assert(ui.sent() === 'keep this draft' && !ui.prompt.readOnly && !ui.get('plus').disabled, 'host unlock did not restore input');
   }, { images: true });
+  const terminalState = (ui, active, enabled) => ui.event({ type: 'terminal_state', active: String(active), disable_prompt: enabled ? '1' : '0' });
+  await check('terminal policy defaults to concurrent input and can change while shells run', async ui => {
+    await ui.type('independent draft');
+    terminalState(ui, 2, false); assert(!ui.prompt.readOnly, 'default terminal policy disabled input');
+    terminalState(ui, 2, true); assert(ui.prompt.readOnly && ui.get('terminal-panel').hidden, 'another view handoff did not lock this prompt');
+    terminalState(ui, 2, false); assert(!ui.prompt.readOnly && ui.prompt.value === 'independent draft', 'live policy change failed to restore the draft');
+    terminalState(ui, 2, true); assert(ui.prompt.readOnly, 'live policy change did not relock');
+    terminalState(ui, 1, true); assert(ui.prompt.readOnly, 'first shell exit unlocked another active handoff');
+    terminalState(ui, 0, true); assert(!ui.prompt.readOnly, 'last shell exit retained automatic lock');
+  });
+  await check('terminal policy and explicit host locks remain independent', async ui => {
+    ui.event({ type: 'prompt_state', disabled: '1', text: 'Host maintenance' });
+    terminalState(ui, 1, true); terminalState(ui, 0, true);
+    assert(ui.prompt.readOnly && ui.prompt.title === 'Host maintenance', 'shell exit cleared explicit lock');
+    terminalState(ui, 1, true); ui.event({ type: 'prompt_state', disabled: '0' });
+    assert(ui.prompt.readOnly, 'clearing explicit lock overrode terminal policy');
+    terminalState(ui, 1, false); assert(!ui.prompt.readOnly, 'disabling automatic policy retained its lock');
+  });
+  await check('closing a browser panel cannot unlock a handoff in another view', async ui => {
+    openTerminal(ui); terminalState(ui, 2, true);
+    terminalEvent(ui, { type: 'softline-terminal-closed' });
+    assert(ui.prompt.readOnly, 'panel closure bypassed server state');
+    terminalState(ui, 1, true); assert(ui.prompt.readOnly, 'remaining native handoff lost its lock');
+    terminalState(ui, 0, true); assert(!ui.prompt.readOnly && ui.document.activeElement === ui.prompt, 'last handoff failed to restore prompt');
+  });
+  await check('late join and same-host reconnect use the shared terminal snapshot', async ui => {
+    terminalState(ui, 3, true);
+    ui.socket.close(); ui.timeout(1000); ui.event({ type: 'session', id: 'initial' });
+    assert(ui.prompt.readOnly, 'same-host reconnect cleared active handoffs');
+    terminalState(ui, 0, true); assert(!ui.prompt.readOnly, 'current replay snapshot did not unlock');
+    terminalState(ui, 1, true); ui.event({ type: 'session', id: 'replacement-host' });
+    assert(!ui.prompt.readOnly, 'new host inherited old active handoffs/policy');
+    terminalState(ui, 0, false); assert(!ui.prompt.readOnly, 'new host default was not concurrent');
+  });
+  await check('invalid terminal snapshots cannot bypass the automatic lock', async ui => {
+    terminalState(ui, 1, true);
+    for (const fields of [{ active: '-1', disable_prompt: '1' }, { active: '0oops', disable_prompt: '0' }, { active: '9007199254740992', disable_prompt: '0' }, { active: '0' }, { active: '0', disable_prompt: 'false' }]) {
+      ui.event({ type: 'terminal_state', ...fields }); assert(ui.prompt.readOnly, 'invalid state cleared lock');
+    }
+    ui.event({ type: 'terminal_state', active: '0', disable_prompt: '0', view: 'different-view' });
+    assert(ui.prompt.readOnly, 'another view override cleared lock');
+    terminalState(ui, 0, true); assert(!ui.prompt.readOnly, 'valid final snapshot did not unlock');
+  });
   await check('host lock invalidates pending completion edits across an unlock', async ui => {
     ui.input('@R'); ui.key('Tab'); ui.key(' ');
     const pending = ui.queries()[0];

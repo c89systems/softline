@@ -14,6 +14,7 @@ int demo_web_terminal_message(demo_web_terminal_t *, int binary, const void *,
 int demo_web_terminal_pump(demo_web_terminal_t *);
 void demo_web_terminal_descriptor(demo_web_terminal_t *, struct pollfd *);
 void demo_web_terminal_close(demo_web_terminal_t *);
+int demo_web_terminal_active(const demo_web_terminal_t *);
 /* NOT_READY retains ownership until the host loop has reaped the child. */
 int demo_web_terminal_destroy(demo_web_terminal_t *);
 #endif

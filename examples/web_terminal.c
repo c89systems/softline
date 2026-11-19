@@ -121,6 +121,9 @@ int demo_web_terminal_message(demo_web_terminal_t *t, int is_binary,
              ? sl_www_binary(t->receiver, t, bytes, length, text_write, t)
              : sl_www_message(t->receiver, t, bytes, length, text_write, t);
 }
+int demo_web_terminal_active(const demo_web_terminal_t *t) {
+  return t && t->opened && !t->closed && !t->eof;
+}
 int demo_web_terminal_pump(demo_web_terminal_t *t) {
   sl_terminal_event_t event;
   char output[SL_TERMINAL_SESSION_CHUNK_MAX], code[32];

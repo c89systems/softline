@@ -150,7 +150,8 @@ static int receive(peer_t *p) {
   } else if (kind == DEMO_PROMPT || kind == DEMO_OUTPUT ||
              kind == DEMO_OUTPUT_END || kind == DEMO_RESPONSE_BEGIN ||
              kind == DEMO_SEGMENT_END || kind == DEMO_MESSAGE ||
-             kind == DEMO_NOTE || kind == DEMO_SHELL || kind == DEMO_QUIT) {
+             kind == DEMO_NOTE || kind == DEMO_SHELL || kind == DEMO_QUIT ||
+             kind == DEMO_TERMINAL_STATE) {
     const char *text = demo_string(&packet);
     if (kind == DEMO_RESPONSE_BEGIN)
       p->active = 1;

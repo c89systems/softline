@@ -723,6 +723,7 @@ demo_web_chat_t *demo_web_open(sl_t *editor, const demo_web_ops_t *ops,
                                void *context, unsigned short default_port,
                                int *enabled) {
   const char *on = getenv("SOFTLINE_WEB"), *port = getenv("SOFTLINE_WEB_PORT");
+  int terminal_lock;
   demo_web_chat_t *w;
   sl_www_config_t config;
   unsigned long number = default_port;
@@ -734,6 +735,8 @@ demo_web_chat_t *demo_web_open(sl_t *editor, const demo_web_ops_t *ops,
     return NULL;
   }
   if (!*enabled)
+    return NULL;
+  if (demo_www_terminal_lock_environment(&terminal_lock))
     return NULL;
   if (port) {
     errno = 0;
@@ -786,6 +789,7 @@ demo_web_chat_t *demo_web_open(sl_t *editor, const demo_web_ops_t *ops,
   (void)snprintf(w->session, sizeof(w->session), "%s", demo_www_epoch(w->www));
   if (ops->terminal)
     demo_www_enable_terminal(w->www);
+  demo_www_set_terminal_prompt_lock(w->www, terminal_lock);
   return w;
 }
 void demo_web_close(demo_web_chat_t *w) {

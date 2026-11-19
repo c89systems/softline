@@ -162,15 +162,23 @@ static int native_terminal_input(demo_link_t *link, const char *text) {
   }
   return native_terminal_flush(link);
 }
+static int terminal_state_wait(int peer, char *data, size_t cap, size_t active,
+                               int disabled) {
+  char expected[96];
+  (void)snprintf(expected, sizeof(expected),
+                 "\"active\":\"%lu\",\"disable_prompt\":\"%d\"",
+                 (unsigned long)active, disabled);
+  return until(peer, data, cap, expected);
+}
 static int terminal_roundtrip(unsigned short port, unsigned short queue_port,
-                              int chat, const char *root, char *data,
-                              size_t cap) {
+                              int chat, const char *root, int policy,
+                              char *data, size_t cap) {
   terminal_client_t *t = calloc(1, sizeof(*t));
   terminal_client_t *native = calloc(1, sizeof(*native));
   demo_link_t native_link;
   const char *command;
   const unsigned char raw[] = {0xe2, 0x82, 0xac, 255, 0, 'X'};
-  int failed = 1, frames;
+  int failed = 1, frames, observer = -1;
   size_t before;
   struct pollfd wait;
   demo_link_init(&native_link, -1);
@@ -182,6 +190,11 @@ static int terminal_roundtrip(unsigned short port, unsigned short queue_port,
       fprintf(stderr, "terminal line %d: %s\n", __LINE__, #c);                 \
       goto cleanup;                                                            \
     }                                                                          \
+  } while (0)
+#define TERMINAL_STATE(n)                                                      \
+  do {                                                                         \
+    TERMINAL_CHECK(!terminal_state_wait(chat, data, cap, n, policy));          \
+    TERMINAL_CHECK(!terminal_state_wait(observer, data, cap, n, policy));      \
   } while (0)
   TERMINAL_CHECK(t && native);
   TERMINAL_CHECK(!terminal_open(t, port, data, cap));
@@ -204,6 +217,9 @@ static int terminal_roundtrip(unsigned short port, unsigned short queue_port,
       "'NATIVE-%s\\n' READY; stty size\n"));
   TERMINAL_CHECK(!native_terminal_wait(&native_link, native, "NATIVE-READY"));
   TERMINAL_CHECK(!native_terminal_wait(&native_link, native, "31 93"));
+  observer = ws_open(port);
+  TERMINAL_CHECK(observer >= 0);
+  TERMINAL_STATE(2);
   command = "stty -echo; export SOFTLINE_WEB_TERMINAL_ISOLATION=first; printf "
             "'\\124\\105\\122\\115\\055\\122\\105\\101\\104\\131\\n'; pwd; "
             "stty size\n";
@@ -249,7 +265,9 @@ static int terminal_roundtrip(unsigned short port, unsigned short queue_port,
   TERMINAL_CHECK(poll(&wait, 1, 100) == 0);
   close(t->fd);
   t->fd = -1;
+  TERMINAL_STATE(1);
   TERMINAL_CHECK(!terminal_open(t, port, data, cap));
+  TERMINAL_STATE(2);
   command = "printf 'FRESH-%s\\n' "
             "\"${SOFTLINE_WEB_TERMINAL_ISOLATION-unset}\"; pwd\n";
   TERMINAL_CHECK(!terminal_input(t, data, cap, command, strlen(command)));
@@ -259,6 +277,7 @@ static int terminal_roundtrip(unsigned short port, unsigned short queue_port,
   while (!t->exited)
     TERMINAL_CHECK(!terminal_next(t, data, cap, 1));
   TERMINAL_CHECK(t->status == 7);
+  TERMINAL_STATE(1);
   native->used = 0;
   TERMINAL_CHECK(!native_terminal_input(
       &native_link, "stty size; printf 'SURVIVED-%s\\n' "
@@ -270,13 +289,18 @@ static int terminal_roundtrip(unsigned short port, unsigned short queue_port,
   while (!native->exited)
     TERMINAL_CHECK(!native_terminal_next(&native_link, native));
   TERMINAL_CHECK(native->status == 9);
+  TERMINAL_STATE(0);
   close(t->fd);
   t->fd = -1;
   TERMINAL_CHECK(!terminal_open(t, port, data, cap));
+  TERMINAL_STATE(1);
   TERMINAL_CHECK(!ws_text(t->fd, "action=ack&bytes=999999"));
   TERMINAL_CHECK(!until(t->fd, data, cap, "\"type\":\"error\""));
+  TERMINAL_STATE(0);
   failed = 0;
 cleanup:
+  if (observer >= 0)
+    close(observer);
   demo_link_close(&native_link);
   if (t && t->fd >= 0)
     close(t->fd);
@@ -284,4 +308,5 @@ cleanup:
   free(native);
   return failed;
 #undef TERMINAL_CHECK
+#undef TERMINAL_STATE
 }
