@@ -167,14 +167,24 @@ The `+` menu also exposes queue and approval actions with shortcut hints:
 
 | Action | Browser shortcut (Control on every platform) |
 | --- | --- |
+| Return focus to the prompt | Esc (outside other text fields, selectors and dialogs) |
 | Open the host's terminal page | Ctrl+` |
 | Edit focused approval, otherwise newest queued entry | Ctrl+Shift+Enter |
 | Focus the oldest pending approval | Ctrl+Shift+1 |
 | Approve the focused request | Ctrl+Shift+2 |
 | Reject the focused request | Ctrl+Shift+3 |
 
-These apply in the prompt and focused approval row and avoid Chrome/Chromium's
+Queue and terminal shortcuts apply in the prompt and focused approval row and avoid Chrome/Chromium's
 Alt menu bindings and tab-search shortcut.
+
+The prompt focuses on startup, before configuration or connection completes,
+and after sending. Returning to the window restores prompt focus only when
+the page body has focus; theme/font controls, text fields and open dialogs
+retain their focus. Esc elsewhere on the page closes the action menu and focuses
+the prompt without changing the draft, selection or conversation scroll position,
+and without cancelling generation. Inside the prompt, Esc keeps its existing
+completion/cancellation behavior. The `+` menu also includes **Focus prompt**.
+
 Keyboard approval decisions require explicit focus; Escape leaves that focus, decisions
 clear it, and key repeat cannot approve or reject subsequent requests. Approval
 rows have **Approve · Edit · Reject** buttons; later approval rows stay disabled

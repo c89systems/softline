@@ -122,6 +122,7 @@ function actionItems() {
   const oldest = [...state.queue.values()].find(item => item.held === '1');
   const focused = state.approval && state.queue.get(state.approval.id);
   return [
+    { id: 'focus', label: 'Focus prompt', description: 'Esc' },
     { id: 'terminal', label: 'Open terminal', description: state.terminal ? 'Ctrl+`' : 'Ctrl+` · host terminal unavailable', disabled: !state.online || !state.terminal },
     { id: 'edit', label: 'Edit queued message', description: 'Ctrl+Shift+Enter', disabled: !state.online || !state.canEdit || ![...state.queue.values()].some(item => item.mode !== 'pending') },
     { id: 'approvals', label: 'Focus approvals', description: 'Ctrl+Shift+1', disabled: !oldest },
@@ -130,7 +131,9 @@ function actionItems() {
   ];
 }
 function promptAction(action) {
-  if (action === 'approvals') {
+  if (action === 'focus') {
+    editor.focus();
+  } else if (action === 'approvals') {
     const item = [...state.queue.values()].find(candidate => candidate.held === '1');
     if (!item) { toast('No approvals are waiting.'); return; }
     state.approval = { id: item.id, revision: item.revision }; queue();
@@ -206,6 +209,7 @@ const editor = new Prompt({
     else if (state.busy) send('cancel');
   }
 });
+window.addEventListener('focus', () => editor.focus(true));
 function submit(steer = false) {
   if (state.attachments.length) return;
   editor.finish();
@@ -215,7 +219,7 @@ function submit(steer = false) {
   const request = randomId(), action = steer ? 'steer' : 'send', fields = { text: prompt.value, request, request_seq: ++state.requestSeq };
   if (send(action, fields)) {
     state.pending.set(request, { action, fields, text: fields.text });
-    prompt.value = ''; prompt.setSelectionRange(0, 0); editor.reset(); started(); state.follow = true; resizePrompt();
+    prompt.value = ''; prompt.setSelectionRange(0, 0); editor.reset(); started(); state.follow = true; resizePrompt(); editor.focus();
   }
 }
 $('composer').addEventListener('submit', event => { event.preventDefault(); editor.enqueue(() => submit()); });

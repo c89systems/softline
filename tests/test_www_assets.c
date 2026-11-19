@@ -154,6 +154,7 @@ int main(int argc, char **argv) {
   CHECK(!depth && strstr(css, "scrollbar-color") &&
         strstr(css, ".welcome-state #composer-area"));
   CHECK(strstr(html, "aria-autocomplete=\"inline\"") &&
+        strstr(html, "aria-keyshortcuts=\"Escape\"") &&
         strstr(html, "id=\"prompt-projection\" aria-hidden=\"true\" hidden") &&
         strstr(css, "#completion-ghost{color:var(--muted)}") &&
         !strstr(js, "fileCompletion") && !strstr(js, "completionQuery"));

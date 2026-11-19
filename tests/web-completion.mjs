@@ -28,12 +28,12 @@ export async function runWebCompletionTests(source, completionSource, promptSour
     getBoundingClientRect() { return this.rect || { left: 0, top: 0, right: 400, bottom: 36, width: 400, height: 36 }; }
     getClientRects() { return this.rects || [this.getBoundingClientRect()]; }
     get childElementCount() { return this.children.length; }
-    focus() { if (this.ownerDocument) this.ownerDocument.activeElement = this; this.fire('focus'); }
+    focus(options) { this.focusOptions = options; if (this.ownerDocument) this.ownerDocument.activeElement = this; this.fire('focus'); }
     showModal() { this.beforeModal = this.ownerDocument?.activeElement; this.open = true; }
     close() { this.open = false; this.fire('close'); this.beforeModal?.focus(); }
     contains(other) { return this === other || this.children.some(child => typeof child === 'object' && (child === other || child.contains?.(other))); }
     closest(selector) {
-      if (selector.split(',').some(part => part.startsWith('#') ? part.slice(1) === this.id : part.startsWith('.') && !part.includes(' ') && (this.className || '').split(' ').includes(part.slice(1)))) return this;
+      if (selector.split(',').some(part => part.startsWith('#') ? part.slice(1) === this.id : part.startsWith('.') ? !part.includes(' ') && (this.className || '').split(' ').includes(part.slice(1)) : part.startsWith('[contenteditable]') ? this.contenteditable !== undefined && this.contenteditable !== 'false' : part.toUpperCase() === this.tagName)) return this;
       return this.parent?.closest(selector) || null;
     }
     scrollIntoView() {}
@@ -78,12 +78,20 @@ export async function runWebCompletionTests(source, completionSource, promptSour
     window.open = (...args) => opened.push(args);
     window.innerWidth = 1024; window.innerHeight = 768;
     document.getElementById = id => {
-      if (!elements.has(id)) { const element = new Element(); element.id = id; element.ownerDocument = document; elements.set(id, element); }
+      if (!elements.has(id)) {
+        const element = new Element(); element.id = id; element.ownerDocument = document;
+        element.tagName = { prompt: 'TEXTAREA', 'queue-edit-text': 'TEXTAREA', theme: 'SELECT', font: 'SELECT', 'image-input': 'INPUT', 'queue-editor': 'DIALOG', 'image-viewer': 'DIALOG' }[id] || 'DIV';
+        elements.set(id, element);
+      }
       return elements.get(id);
     };
     document.documentElement = { dataset: {} };
+    document.body = document.getElementById('body');
+    document.activeElement = options.initialFocus ? document.getElementById(options.initialFocus) : document.body;
+    document.hidden = !!options.hidden;
+    document.querySelector = selector => selector === 'dialog[open]' ? [...elements.values()].find(element => element.tagName === 'DIALOG' && element.open) || null : null;
     document.createElement = tag => {
-      const element = new Element(); element.ownerDocument = document;
+      const element = new Element(); element.ownerDocument = document; element.tagName = tag.toUpperCase();
       if (tag === 'canvas') {
         canvases.push(element);
         element.getContext = () => options.noCanvas ? null : { drawImage: image => { element.drawn = image; } };
@@ -131,7 +139,7 @@ export async function runWebCompletionTests(source, completionSource, promptSour
       crypto: { getRandomValues(array) { return array.fill(++serial); } }, localStorage: { getItem() {}, setItem() {} },
       ResizeObserver: class { observe() {} }, performance: { now: () => 0 },
       MarkdownStream: class { write() {} end() {} },
-      fetch: async () => ({ ok: true, json: async () => ({ images: options.images ? '1' : '0', ...options.config }) }),
+      fetch: async () => { options.beforeConfig?.(document); return { ok: true, json: async () => ({ images: options.images ? '1' : '0', ...options.config }) }; },
       setTimeout: (fn, delay) => { const id = ++serial; timers.set(id, { fn, delay }); return id; },
       clearTimeout: id => timers.delete(id)
     };
@@ -235,6 +243,79 @@ export async function runWebCompletionTests(source, completionSource, promptSour
   }
   const shortcut = (ui, action, extra = {}) => ui.key({ approvals: '!', approve: '@', reject: '#', edit: 'Enter', terminal: '`' }[action],
     { ctrlKey: true, shiftKey: action !== 'terminal', code: { approvals: 'Digit1', approve: 'Digit2', reject: 'Digit3', edit: 'Enter', terminal: 'Backquote' }[action], ...extra });
+  await check('startup focuses the prompt before configuration or connection finishes', async ui => {
+    assert(ui.document.activeElement === ui.prompt && ui.prompt.focusOptions.preventScroll, 'startup did not focus the prompt without scrolling');
+  }, { beforeConfig(document) { assert(document.activeElement === document.getElementById('prompt'), 'startup focus waited for configuration'); } });
+  for (const id of ['theme', 'font', 'queue-edit-text']) await check('startup and window return preserve focus on ' + id, async ui => {
+    assert(ui.document.activeElement === ui.get(id), 'startup stole existing focus');
+    ui.window.fire('focus');
+    assert(ui.document.activeElement === ui.get(id), 'window return stole control focus');
+    ui.event({ type: 'status', busy: '1', text: 'Thinking' });
+    ui.event({ type: 'session', id: 'initial' });
+    assert(ui.document.activeElement === ui.get(id), 'server updates stole focus');
+  }, { initialFocus: id });
+  await check('returning to an idle page restores prompt focus without altering its selection', async ui => {
+    await ui.type('keep this draft'); ui.prompt.setSelectionRange(2, 7);
+    ui.document.body.focus(); ui.window.fire('focus');
+    assert(ui.document.activeElement === ui.prompt && ui.prompt.value === 'keep this draft' && ui.prompt.selectionStart === 2 && ui.prompt.selectionEnd === 7, 'window return altered the draft or selection');
+  });
+  await check('hidden pages wait until window return before focusing the prompt', async ui => {
+    assert(ui.document.activeElement === ui.document.body, 'hidden startup focused the prompt');
+    ui.document.hidden = false; ui.window.fire('focus');
+    assert(ui.document.activeElement === ui.prompt, 'visible window did not regain prompt focus');
+  }, { hidden: true });
+  await check('Escape returns to the prompt without changing draft or cancelling generation', async ui => {
+    await ui.type('keep this draft'); ui.prompt.setSelectionRange(2, 7);
+    ui.event({ type: 'status', busy: '1', text: 'Thinking' });
+    ui.get('scroll').scrollTop = 123; ui.get('scroll').focus();
+    const event = ui.document.fire('keydown', { target: ui.get('scroll'), key: 'Escape' });
+    assert(event.defaultPrevented && ui.document.activeElement === ui.prompt && ui.prompt.focusOptions.preventScroll, 'Escape did not focus without scrolling');
+    assert(ui.prompt.value === 'keep this draft' && ui.prompt.selectionStart === 2 && ui.prompt.selectionEnd === 7 && ui.get('scroll').scrollTop === 123, 'Escape changed the draft, selection or conversation scroll');
+    assert(!ui.socket.sent.some(frame => frame.get('action') === 'cancel'), 'returning focus cancelled generation');
+    ui.get('scroll').focus();
+    assert(ui.document.fire('keydown', { key: 'Escape' }).defaultPrevented && ui.document.activeElement === ui.prompt, 'document-level Escape failed to focus');
+  });
+  await check('Escape leaves other editors, selectors, modifiers and composition alone', async ui => {
+    for (const id of ['theme', 'font', 'queue-edit-text', 'image-input', 'host-editable']) {
+      const control = ui.get(id);
+      if (id === 'host-editable') control.setAttribute('contenteditable', 'true');
+      control.focus();
+      const event = ui.document.fire('keydown', { target: control, key: 'Escape' });
+      assert(!event.defaultPrevented && ui.document.activeElement === control, 'Escape stole focus from ' + id);
+    }
+    for (const fields of [{ ctrlKey: true }, { altKey: true }, { metaKey: true }, { shiftKey: true }, { isComposing: true }, { defaultPrevented: true }]) {
+      ui.get('scroll').focus();
+      ui.document.fire('keydown', { target: ui.get('scroll'), key: 'Escape', ...fields });
+      assert(ui.document.activeElement === ui.get('scroll'), 'modified or handled Escape stole focus');
+    }
+  });
+  for (const id of ['queue-editor', 'image-viewer']) await check('open ' + id + ' keeps focus during window return and Escape', async ui => {
+    const dialog = ui.get(id); dialog.showModal(); dialog.focus();
+    ui.window.fire('focus');
+    const event = ui.document.fire('keydown', { target: dialog, key: 'Escape' });
+    assert(!event.defaultPrevented && dialog.open && ui.document.activeElement === dialog, 'focus recovery interfered with the modal');
+  });
+  await check('Escape closes the plus menu and its focus action restores the prompt', async ui => {
+    ui.get('plus').focus(); ui.get('plus').click(); await ui.idle();
+    const item = ui.get('completions').children.find(item => item.textContent.includes('Focus prompt'));
+    assert(item?.textContent.includes('Esc'), 'focus action or shortcut hint missing');
+    item.focus(); item.click();
+    assert(ui.document.activeElement === ui.prompt && ui.get('completions').hidden, 'focus action did not close the menu and restore focus');
+    ui.get('plus').focus(); ui.get('plus').click(); await ui.idle();
+    const event = ui.document.fire('keydown', { target: ui.get('plus'), key: 'Escape' });
+    assert(event.defaultPrevented && ui.document.activeElement === ui.prompt && ui.get('completions').hidden, 'Escape left the plus menu focused/open');
+  });
+  await check('sending through the form returns focus to the prompt', async ui => {
+    await ui.type('send this'); ui.get('send').focus(); ui.form(); await ui.idle();
+    assert(ui.sent() === 'send this' && !ui.prompt.value && ui.document.activeElement === ui.prompt, 'successful send did not return focus');
+  });
+  await check('returning focus stays immediate while a completion provider is pending', async ui => {
+    ui.input('@R'); ui.key('Tab'); ui.get('scroll').focus();
+    const event = ui.document.fire('keydown', { target: ui.get('scroll'), key: 'Escape' });
+    assert(event.defaultPrevented && ui.document.activeElement === ui.prompt && ui.prompt.value === '@R', 'pending completion delayed focus or changed the draft');
+    ui.reply(ui.queries()[0]); await ui.idle();
+    assert(ui.document.activeElement === ui.prompt, 'late completion displaced prompt focus');
+  }, { manual: true });
   await check('native navigation collapses selections and preserves platform modifiers', async ui => {
     await ui.type('abcdefghij');
     ui.prompt.setSelectionRange(2, 7);

@@ -37,6 +37,21 @@ export class Prompt {
     new ResizeObserver(() => this.render()).observe(get('plus').parentElement || this.input);
     get('plus').addEventListener('click', () => this.openMenu());
     options.document.addEventListener('click', event => { if (!event.target.closest('#completions,#plus')) this.hideMenu(); });
+    options.document.addEventListener('keydown', event => {
+      if (event.defaultPrevented || event.isComposing || event.key !== 'Escape' || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+      const active = options.document.activeElement;
+      if (active === this.input || event.target.closest?.('input,textarea,select,[contenteditable]:not([contenteditable="false"])')) return;
+      if (this.focus()) event.preventDefault();
+    });
+    this.focus(true);
+  }
+  focus(automatic = false) {
+    const document = this.options.document, active = document.activeElement;
+    if (document.querySelector('dialog[open]')) return false;
+    if (automatic && (document.hidden || active && active !== document.body && active !== document.documentElement)) return false;
+    this.hideMenu();
+    this.input.focus({ preventScroll: true });
+    return true;
   }
   current() { return { text: this.input.value, cursor: this.input.selectionStart, end: this.input.selectionEnd }; }
   apply(text, cursor, edit = {}) {
