@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "softline/softline.h"
+#include "softline/transcript.h"
 
 #include <libmdf/mdf.h>
 
@@ -21,6 +22,7 @@
 #include "queue_demo_client.h"
 #include "queue_demo_timer.h"
 #include "queue_demo_wire.h"
+#include "transcript_demo.h"
 #include "web_chat.h"
 
 struct chat_state {
@@ -59,6 +61,7 @@ struct chat_state {
   int web_only, null_fd;
   char web_bytes[64];
   size_t web_length;
+  sl_transcript_id_t transcripts[2];
 };
 
 static int start_operation(struct chat_state *state);
@@ -165,7 +168,26 @@ static int sink_to_softline(void *userdata, const char *bytes, size_t length) {
   state = (struct chat_state *)userdata;
   if (!state || (!bytes && length > 0))
     return -1;
+  if (sl_transcript_visible(state->sl))
+    return 0;
   return sl_output_stream_write(state->sl, bytes, length) == SL_OK ? 0 : -1;
+}
+
+static int refresh_transcripts(struct chat_state *state) {
+  int i;
+  for (i = 0; i < 2; ++i) {
+    char frame[160];
+    if (!state->transcripts[i])
+      continue;
+    demo_transcript_frame(i, (unsigned long)state->response_documents, frame,
+                          sizeof(frame));
+    if (sl_transcript_reset(state->sl, state->transcripts[i]) != SL_OK ||
+        sl_transcript_write(state->sl, state->transcripts[i],
+                            i ? SL_TRANSCRIPT_VT : SL_TRANSCRIPT_TEXT, frame,
+                            strlen(frame)) != SL_OK)
+      return -1;
+  }
+  return 0;
 }
 
 static int shell_editor_key(sl_t *sl, sl_key_t key, void *userdata,
@@ -268,6 +290,8 @@ static int render_note(struct chat_state *state, const char *note) {
 static int render_user_prompt(struct chat_state *state, const char *line) {
   web_flush(state);
   demo_web_message(state->web, "user", line);
+  if (sl_transcript_visible(state->sl))
+    return 0;
   return sl_output_stream_write_quoted_prompt(state->sl, line) == SL_OK ? 0
                                                                         : -1;
 }
@@ -315,13 +339,14 @@ static int finish_response_document(struct chat_state *state) {
     return -1;
   state->response_open = 0;
   state->response_documents++;
-  return 0;
+  return refresh_transcripts(state);
 }
 
 static int command_message(struct chat_state *state, const char *message) {
   demo_web_status(state->web, message, state->busy);
   return set_chat_message(state->sl, message) == SL_OK &&
-                 sl_output_stream_reconcile(state->sl) == SL_OK
+                 (sl_transcript_visible(state->sl) ||
+                  sl_output_stream_reconcile(state->sl) == SL_OK)
              ? 0
              : -1;
 }
@@ -1407,6 +1432,22 @@ int main(int argc, char **argv) {
   }
   if (interactive)
     (void)signal(SIGINT, keep_chat_on_interrupt);
+  if (interactive && !state.web_only) {
+    int i;
+    for (i = 0; i < 2; ++i)
+      if (sl_transcript_add(state.sl, demo_transcript_titles[i],
+                            DEMO_TRANSCRIPT_ROWS, DEMO_TRANSCRIPT_COLUMNS,
+                            &state.transcripts[i]) != SL_OK) {
+        report_failure(&state, "transcript setup");
+        exit_code = 1;
+        goto cleanup;
+      }
+    if (refresh_transcripts(&state)) {
+      report_failure(&state, "transcript content");
+      exit_code = 1;
+      goto cleanup;
+    }
+  }
   if ((interactive &&
        ((!state.remote && sl_set_prompt_queue(state.sl, 1, 64, 3) != SL_OK) ||
         sl_set_prompt_queue_profile(

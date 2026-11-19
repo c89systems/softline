@@ -139,7 +139,7 @@ add_custom_command(OUTPUT "${_sl_web_assets}"
   COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/scripts/embed-web-assets.py"
     "${CMAKE_CURRENT_SOURCE_DIR}" "${_sl_web_assets}"
   DEPENDS scripts/embed-web-assets.py web/index.html web/softline.css web/softline.js
-          web/completion.js web/prompt.js web/images.js web/image-viewer.js
+          web/completion.js web/prompt.js web/images.js web/image-viewer.js web/transcripts.js
           web/terminal.html web/terminal.js web/terminal-panel.js web/terminal.css vendor/xterm/xterm.mjs
           vendor/xterm/addon-fit.mjs vendor/xterm/xterm.css vendor/xterm/LICENSE vendor/xterm/LICENSE.addon-fit
     web/markdown.js vendor/streaming-markdown/smd.js vendor/streaming-markdown/LICENSE
@@ -156,11 +156,12 @@ target_include_directories(sl_lib_obj
 )
 softline_apply_warnings(sl_lib_obj)
 include(cmake/softline_resolver.cmake)
+include(cmake/softline_vterm.cmake)
 
 if(SL_BUILD_STATIC)
   add_library(softline_static STATIC)
   target_sources(softline_static PRIVATE $<TARGET_OBJECTS:sl_lib_obj>
-    ${SL_PRIVATE_RESOLVER_OBJECTS})
+    ${SL_PRIVATE_RESOLVER_OBJECTS} ${SL_PRIVATE_TRANSCRIPT_OBJECTS})
   target_include_directories(softline_static
     PUBLIC
       $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -211,7 +212,7 @@ if(SL_BUILD_SHARED)
 
   add_library(softline_shared SHARED)
   target_sources(softline_shared PRIVATE $<TARGET_OBJECTS:sl_lib_obj>
-    ${SL_PRIVATE_RESOLVER_OBJECTS})
+    ${SL_PRIVATE_RESOLVER_OBJECTS} ${SL_PRIVATE_TRANSCRIPT_OBJECTS})
   target_include_directories(softline_shared
     PUBLIC
       $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -346,7 +347,7 @@ if(SL_INSTALL)
     install(FILES LICENSE README.md
       DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/doc/softline
     )
-    install(FILES docs/web-frontend.md docs/web-terminal.md docs/terminal-handoff-design.md
+    install(FILES docs/web-frontend.md docs/web-terminal.md docs/terminal-handoff-design.md docs/transcripts.md
       DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/doc/softline)
     install(FILES vendor/streaming-markdown/LICENSE vendor/streaming-markdown/README.softline
       DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/doc/softline/streaming-markdown)

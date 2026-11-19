@@ -120,3 +120,9 @@ sl_image_paste_pump
 sl_image_paste_resume
 sl_image_paste_complete
 sl_image_paste_cancel
+sl_transcript_add
+sl_transcript_write
+sl_transcript_resize
+sl_transcript_reset
+sl_transcript_remove
+sl_transcript_visible

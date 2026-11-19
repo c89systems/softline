@@ -10,6 +10,7 @@ assets = [
     ("/softline.js", "text/javascript; charset=utf-8", "web/softline.js"),
     ("/completion.js", "text/javascript; charset=utf-8", "web/completion.js"),
     ("/prompt.js", "text/javascript; charset=utf-8", "web/prompt.js"),
+    ("/transcripts.js", "text/javascript; charset=utf-8", "web/transcripts.js"),
     ("/images.js", "text/javascript; charset=utf-8", "web/images.js"),
     ("/image-viewer.js", "text/javascript; charset=utf-8", "web/image-viewer.js"),
     ("/markdown.js", "text/javascript; charset=utf-8", "web/markdown.js"),

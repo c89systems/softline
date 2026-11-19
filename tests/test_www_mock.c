@@ -974,6 +974,15 @@ int main(int argc, char **argv) {
   CHECK(one >= 0 && two >= 0);
   CHECK(until(one, data, SL_WWW_FRAME_MAX + 1, "\"type\":\"session\"") == 0);
   CHECK(!json_field(data, "id", epoch, sizeof(epoch)));
+  CHECK(
+      !until(one, data, SL_WWW_FRAME_MAX + 1, "\"type\":\"transcript_open\"") &&
+      strstr(data, "\"id\":\"run-log\""));
+  CHECK(
+      !until(one, data, SL_WWW_FRAME_MAX + 1, "\"type\":\"transcript_open\"") &&
+      strstr(data, "\"id\":\"worker-screen\""));
+  CHECK(
+      !until(one, data, SL_WWW_FRAME_MAX + 1, "\"type\":\"transcript_data\"") &&
+      strstr(data, "\"encoding\":\"base64\""));
   if (handoff || terminal || argc == 2) {
     CHECK(!until(one, data, SL_WWW_FRAME_MAX + 1, "\"type\":\"capabilities\""));
     if (argc == 2)
@@ -1072,7 +1081,18 @@ int main(int argc, char **argv) {
     CHECK(ws_send(one, 0, 1, tail, strlen(tail)) == 0);
   }
   CHECK(until(one, data, SL_WWW_FRAME_MAX + 1, "\"type\":\"accepted\"") == 0);
-  CHECK(until(two, data, SL_WWW_FRAME_MAX + 1, "aGVsbG8gd29ybGQ=") == 0);
+  {
+    int reply = 0, transcript = 0, i;
+    for (i = 0; i < 200 && (!reply || !transcript); ++i) {
+      CHECK(ws_read(two, data, SL_WWW_FRAME_MAX + 1, &opcode) >= 0);
+      if (opcode != 1)
+        continue;
+      reply |= strstr(data, "aGVsbG8gd29ybGQ=") != NULL;
+      transcript |= strstr(data, "\"type\":\"transcript_data\"") != NULL &&
+                    strstr(data, "Responses received: 1") != NULL;
+    }
+    CHECK(reply && transcript);
+  }
   CHECK(!replay_cursors(port, epoch, data, SL_WWW_FRAME_MAX + 1));
   CHECK(ws_send(one, 9, 1, "p", 1) == 0);
   do {

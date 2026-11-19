@@ -2,6 +2,7 @@
 #include "web_chat.h"
 #include "completion_resolve.h"
 #include "queue_demo_image.h"
+#include "transcript_demo.h"
 #include <errno.h>
 #include <limits.h>
 #include <stdio.h>
@@ -50,6 +51,7 @@ struct demo_web_chat {
   void *context;
   web_view_t *views;
   unsigned long serial;
+  unsigned long transcript_turns;
   char response[40], session[96];
   char *status;
   int busy;
@@ -246,6 +248,43 @@ static int service_image(web_view_t *v) {
   }
   return SL_OK;
 }
+static void transcript_frames(demo_web_chat_t *w, demo_www_peer_t *peer,
+                              int announce) {
+  int i;
+  for (i = 0; i < 2; ++i) {
+    char frame[160], encoded[216];
+    char rows[12], columns[12];
+    const char *id = i ? "worker-screen" : "run-log";
+    sl_www_field_t open[] = {{"id", NULL, 0},
+                             {"title", NULL, 0},
+                             {"rows", NULL, 0},
+                             {"columns", NULL, 0}};
+    sl_www_field_t text[] = {{"id", NULL, 0}, {"text", NULL, 0}};
+    sl_www_field_t vt[] = {
+        {"id", NULL, 0}, {"encoding", "base64", 0}, {"data", NULL, 0}};
+    open[0].value = text[0].value = vt[0].value = id;
+    if (announce) {
+      (void)snprintf(rows, sizeof(rows), "%d", DEMO_TRANSCRIPT_ROWS);
+      (void)snprintf(columns, sizeof(columns), "%d", DEMO_TRANSCRIPT_COLUMNS);
+      open[1].value = demo_transcript_titles[i];
+      open[2].value = rows;
+      open[3].value = columns;
+      (void)demo_www_reply(peer, "transcript_open", open, 4);
+    }
+    (void)demo_www_reply(peer, "transcript_reset", open, 1);
+    demo_transcript_frame(i, w->transcript_turns, frame, sizeof(frame));
+    if (i) {
+      vt[2].value = encoded;
+      vt[2].length =
+          demo_www_base64((const unsigned char *)frame, strlen(frame), encoded);
+      (void)demo_www_reply(peer, "transcript_data", vt, 3);
+    } else {
+      text[1].value = frame;
+      (void)demo_www_reply(peer, "transcript_data", text, 2);
+    }
+  }
+}
+
 static void closed(void *context, demo_www_peer_t *peer) {
   demo_web_chat_t *w = context;
   web_view_t *v = demo_www_peer_get(peer), **at;
@@ -289,6 +328,7 @@ static int replay(void *context, void *peer, const char *after) {
   demo_www_peer_data(peer, v);
   f.value = w->session;
   (void)demo_www_reply(peer, "session", &f, 1);
+  transcript_frames(w, peer, 1);
   {
     sl_www_field_t capabilities[3] = {{"edit", NULL, 0},
                                       {"terminal", NULL, 0},
@@ -1082,7 +1122,11 @@ void demo_web_response(demo_web_chat_t *w, const void *bytes, size_t length) {
 }
 void demo_web_response_end(demo_web_chat_t *w) {
   if (w && w->response[0]) {
+    web_view_t *view;
     demo_www_end(w->www, w->response);
     w->response[0] = 0;
+    ++w->transcript_turns;
+    for (view = w->views; view; view = view->next)
+      transcript_frames(w, view->peer, 0);
   }
 }

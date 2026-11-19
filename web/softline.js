@@ -2,6 +2,7 @@ import { MarkdownStream } from './markdown.js';
 import { Prompt } from './prompt.js';
 import { ImagePreviews } from './images.js';
 import { TerminalPanel } from './terminal-panel.js';
+import { Transcripts } from './transcripts.js';
 
 function randomId() {
   return Array.from(crypto.getRandomValues(new Uint32Array(4)), value => value.toString(16).padStart(8, '0')).join('');
@@ -28,7 +29,7 @@ function preference(id, fallback) {
   $(id).addEventListener('change', () => {
     document.documentElement.dataset[id] = $(id).value;
     try { localStorage.setItem(`softline.${id}`, $(id).value); } catch {}
-    if (id === 'theme') terminalPanel.theme();
+    if (id === 'theme') { terminalPanel.theme(); transcripts.theme(); }
   });
 }
 preference('theme', 'default'); preference('font', 'sans');
@@ -224,6 +225,7 @@ const terminalPanel = new TerminalPanel({ document, window, closed: () => {
   state.restorePromptAfterTerminal = !editor.focus();
   if (state.restorePromptAfterTerminal) scroll.focus({ preventScroll: true });
 } });
+const transcripts = new Transcripts(document, window);
 function promptState(disabled, text = '') {
   state.promptExplicitDisabled = disabled; state.promptReason = text;
   updatePromptState();
@@ -364,6 +366,7 @@ $('composer').addEventListener('dragleave', event => { if (!$('composer').contai
 $('composer').addEventListener('drop', event => { event.preventDefault(); $('composer').classList.remove('dragging'); addImages(event.dataTransfer.files); });
 prompt.addEventListener('paste', event => { const files = [...(event.clipboardData?.files || [])]; if (files.length) { event.preventDefault(); addImages(files); } });
 function clearConversation() {
+  transcripts.clear();
   previews.hide(); previews.viewer.close();
   for (const m of state.messages.values()) m.stream?.end();
   state.messages.clear(); messages.replaceChildren(); state.queue.clear(); state.stagingQueue = null;
@@ -417,6 +420,8 @@ function receive(event) {
       state.terminalHandoffs = Number(e.active); state.terminalPromptLock = e.disable_prompt === '1';
       updatePromptState(); break;
     }
+    case 'transcript_open': case 'transcript_data': case 'transcript_resize':
+    case 'transcript_reset': case 'transcript_remove': transcripts.receive(e); break;
     case 'limits': if (Number(e.image_bytes) > 0) state.imageLimit = Number(e.image_bytes); break;
     case 'completion_provider': case 'complete': case 'complete_end': editor.receive(e); break;
     case 'draft': {

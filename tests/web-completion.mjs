@@ -1,6 +1,6 @@
 // Logical client tests: execute the shipped module with DOM/transport doubles.
 // Actual browser layout and selection integration remain in web-browser.html.
-export async function runWebCompletionTests(source, completionSource, promptSource, fixture, imagesSource, viewerSource, panelSource) {
+export async function runWebCompletionTests(source, completionSource, promptSource, fixture, imagesSource, viewerSource, panelSource, transcriptsSource) {
   const checks = [];
   function assert(value, message) { if (!value) throw new Error(message); }
   class Target {
@@ -76,6 +76,22 @@ export async function runWebCompletionTests(source, completionSource, promptSour
     const elements = new Map(), timers = new Map(), observers = [];
     let serial = 0, socket, previews;
     const document = new Target(), window = new Target(), revoked = [], blobs = [], copiedImages = [], clipboardCalls = [], canvases = [], decoded = [], pendingDecodes = [], opened = [];
+    const terminals = [];
+    const Terminal = class {
+      constructor(options) {
+        this.options = options; this.chunks = []; this.osc = new Set();
+        this.parser = { registerOscHandler: (code, fn) => { if (fn()) this.osc.add(code); } };
+        terminals.push(this);
+      }
+      open(stage) { this.element = new Element(); stage.append(this.element); }
+      get rows() { return this.options.rows; }
+      write(bytes, done) { this.chunks.push(bytes); if (!options.stallTranscript) done(); }
+      resize(cols, rows) { this.options.cols = cols; this.options.rows = rows; }
+      refresh() {}
+      dispose() { this.disposed = true; this.element?.remove(); }
+    };
+    const Transcripts = new Function('Terminal', stripImports(transcriptsSource) + '\nreturn Transcripts;')(Terminal);
+    window.getComputedStyle = () => ({ getPropertyValue: () => '#141414' });
     window.open = (...args) => opened.push(args);
     window.innerWidth = 1024; window.innerHeight = 768;
     document.getElementById = id => {
@@ -110,7 +126,8 @@ export async function runWebCompletionTests(source, completionSource, promptSour
       remove() { if (this.parent) this.parent.children = this.parent.children.filter(child => child !== this); }
     });
     const get = document.getElementById;
-    get('workspace').rect = { top: 64, height: 704 };
+    get('transcripts').hidden = get('transcript-toggle').hidden = true;
+    get('conversation-pane').rect = { top: 64, height: 704 };
     get('composer-area').rect = { top: 600, height: 120 };
     get('image-preview').append(get('image-preview-content'));
     get('theme').options = [{ value: 'default' }]; get('font').options = [{ value: 'sans' }];
@@ -138,7 +155,7 @@ export async function runWebCompletionTests(source, completionSource, promptSour
       close() { this.readyState = 0; this.fire('close'); }
     }
     const env = {
-      document, window, TerminalPanel, ImagePreviews: class extends ImagePreviews { constructor(...args) { super(...args); previews = this; } },
+      document, window, TerminalPanel, Transcripts, ImagePreviews: class extends ImagePreviews { constructor(...args) { super(...args); previews = this; } },
       WebSocket: Socket, TextEncoder: Encoder, TextDecoder: Decoder, URLSearchParams: Params,
       URL: class extends globalThis.URL { static createObjectURL() { const url = 'blob:test-image-' + (++serial); blobs.push(url); return url; } static revokeObjectURL(url) { revoked.push(url); } }, location: { href: 'http://localhost/', protocol: 'http:', origin: 'http://localhost' },
       crypto: { getRandomValues(array) { return array.fill(++serial); } }, localStorage: { getItem() {}, setItem() {} },
@@ -231,7 +248,7 @@ export async function runWebCompletionTests(source, completionSource, promptSour
       event({ type: 'image_done', id, path }); await idle();
       return { id, url, file: get('image-input').files[0] };
     }
-    const ui = { get, prompt, input, type, key, idle, queries, reply, event, sent, socket, document, window, revoked, blobs, upload, previews, opened,
+    const ui = { get, prompt, input, type, key, idle, queries, reply, event, sent, socket, document, window, revoked, blobs, upload, previews, opened, terminals,
       socketURL: () => socket.url,
       copiedImages, clipboardCalls, canvases, decoded, finishDecode: () => pendingDecodes.shift()?.(),
       resize: target => { for (const observer of observers) if (observer.targets.includes(target)) observer.fn(); },
@@ -311,6 +328,46 @@ export async function runWebCompletionTests(source, completionSource, promptSour
   function terminalEvent(ui, data, source = ui.get('terminal-panel').children[0]?.contentWindow, origin = 'http://localhost') {
     ui.window.fire('message', { data, source, origin });
   }
+  function transcript(ui, id, type = 'open', fields = {}) {
+    ui.event({ type: 'transcript_' + type, id, title: id, rows: '24', columns: '80', ...fields });
+  }
+  await check('read-only transcripts retain independent geometry and do not interrupt chat', async ui => {
+    const decode = bytes => Array.from(bytes, byte => String.fromCharCode(byte)).join('');
+    assert(ui.get('transcript-toggle').hidden && !ui.window.fire('keydown', { key: 'F8' }).defaultPrevented, 'empty registry intercepted F8');
+    transcript(ui, 'invalid', 'open', { rows: '201' });
+    transcript(ui, 'log'); transcript(ui, 'pty', 'open', { rows: '40', columns: '140' });
+    const [log, pty] = ui.terminals;
+    assert(ui.terminals.length === 2 && log.options.disableStdin && pty.options.disableStdin && pty.osc.has(52) && pty.osc.has(8), 'viewer accepted input or unsafe side effects');
+    transcript(ui, 'log', 'data', { text: 'line\n\x00next' });
+    transcript(ui, 'pty', 'data', { encoding: 'base64', data: btoa('\x1b[?1049h') });
+    assert(decode(log.chunks[0]) === 'line\r\nnext' && decode(pty.chunks[0]) === '\x1b[?1049h', 'text and VT routing lost bytes');
+    ui.prompt.value = 'unsent draft';
+    assert(ui.window.fire('keydown', { key: 'F8' }).defaultPrevented && ui.get('transcript-select').value === 'log', 'F8 failed to open first transcript');
+    assert(!ui.get('transcripts').hidden && ui.get('transcript-toggle')['aria-expanded'] === 'true', 'transcript panel did not open');
+    ui.get('transcript-toggle').click();
+    assert(ui.get('transcript-select').value === 'pty' && pty.options.cols === 140 && pty.options.rows === 40, 'cycling changed the source geometry');
+    transcript(ui, 'pty', 'resize', { rows: '25', columns: '110' });
+    assert(pty.options.cols === 110 && pty.options.rows === 25, 'producer resize was lost');
+    ui.event({ type: 'delta', id: 'm', role: 'user', text: 'chat stayed live' });
+    assert(ui.get('messages').children.at(-1).children[0].textContent === 'chat stayed live' && ui.prompt.value === 'unsent draft' && !ui.prompt.readOnly, 'transcript interrupted chat');
+    ui.window.fire('keydown', { key: 'F8' });
+    assert(ui.get('transcripts').hidden && !ui.get('transcript-toggle').hidden, 'cycling did not return to chat');
+    transcript(ui, 'log', 'remove');
+    assert(log.disposed, 'removed transcript retained its terminal');
+    ui.event({ type: 'session', id: 'restarted' });
+    assert(pty.disposed && ui.get('transcript-toggle').hidden, 'old transcript survived host restart');
+  });
+  await check('read-only transcript bounds pending bytes and recovers on host reset', async ui => {
+    transcript(ui, 'log');
+    ui.window.fire('keydown', { key: 'F8' });
+    for (let i = 0; i < 17; i++) transcript(ui, 'log', 'data', { text: 'x'.repeat(16 * 1024) });
+    const old = ui.terminals[0];
+    assert(old.disposed && old.chunks.length === 16 && ui.get('transcript-screen').textContent.includes('fell behind'), 'bounded delivery failed');
+    transcript(ui, 'log', 'reset');
+    transcript(ui, 'log', 'data', { text: 'replayed' });
+    const current = ui.terminals[1];
+    assert(current.element && current.chunks.length === 1 && ui.get('transcript-select').value === 'log', 'reset did not restore the selected viewer');
+  }, { stallTranscript: true });
   await check('docked terminal leaves prompt and conversation live', async ui => {
     const frame = openTerminal(ui);
     assert(frame && !ui.opened.length && !ui.prompt.readOnly && !ui.get('terminal-panel').hidden, 'terminal opening blocked prompt or opened another tab');
@@ -326,12 +383,22 @@ export async function runWebCompletionTests(source, completionSource, promptSour
     assert(ui.get('terminal-panel').style.height === '491px', 'initial panel still reserves the old header');
     terminalEvent(ui, { type: 'softline-terminal-size', rowHeight: 17, chromeHeight: 58 });
     assert(ui.get('terminal-panel').style.height === '484px', 'panel did not reserve 25 measured rows plus chrome and border');
-    ui.window.innerHeight = 1800; ui.get('workspace').rect.height = 1736; ui.window.fire('resize');
+    ui.window.innerHeight = 1800; ui.get('conversation-pane').rect.height = 1736; ui.window.fire('resize');
     assert(ui.get('terminal-panel').style.height === '600px', 'large viewport did not reserve a third');
-    ui.window.innerHeight = 420; ui.get('workspace').rect.height = 356; ui.window.fire('resize');
+    ui.window.innerHeight = 420; ui.get('conversation-pane').rect.height = 356; ui.window.fire('resize');
     assert(parseFloat(ui.get('terminal-panel').style.height) <= 165, 'short viewport hid the prompt');
     ui.get('composer-area').rect.height = 200; ui.resize(ui.get('composer-area'));
     assert(parseFloat(ui.get('terminal-panel').style.height) <= 85, 'growing prompt overflowed the viewport');
+  });
+  await check('terminal stays below the prompt when the transcript stacks above chat', async ui => {
+    openTerminal(ui);
+    transcript(ui, 'log');
+    ui.get('transcript-toggle').click();
+    const conversation = ui.get('conversation-pane');
+    conversation.rect = { top: 350, height: 240 };
+    ui.resize(conversation);
+    assert(ui.get('terminal-panel').style.height === '72px', 'terminal sized itself against the whole viewport');
+    assert(!ui.get('transcripts').hidden && !ui.prompt.readOnly, 'opening both panes disabled the prompt');
   });
   await check('terminal messages validate source origin and bounded measurements', async ui => {
     const frame = openTerminal(ui), height = ui.get('terminal-panel').style.height;

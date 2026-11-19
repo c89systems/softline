@@ -25,6 +25,9 @@ set(dependencies "[]")
 if(SDK_TARGET MATCHES "-linux-")
   set(dependencies "[{\"name\":\"c-ares\",\"version\":\"1.34.9\",\"license\":\"MIT AND BSD-3-Clause\",\"provenance\":\"share/softline/licenses/c-ares/provenance.json\"}]")
 endif()
+string(JSON idx LENGTH "${dependencies}")
+string(JSON dependencies SET "${dependencies}" "${idx}"
+  "{\"name\":\"libvterm\",\"version\":\"0.3.3\",\"license\":\"MIT\",\"provenance\":\"share/softline/licenses/libvterm/provenance.json\"}")
 string(JSON expected_dependencies GET "${dependencies}")
 string(JSON dependency_type TYPE "${metadata}" bundled_dependencies)
 string(JSON actual_dependencies GET "${metadata}" bundled_dependencies)
@@ -37,12 +40,20 @@ if(NOT IS_DIRECTORY "${SDK_ROOT}/lib")
   set(libdir lib64)
 endif()
 set(files include/softline/softline.h include/softline/softline_version.h
+  include/softline/terminal.h include/softline/transcript.h include/softline/www.h
   ${libdir}/libsoftline.a ${libdir}/pkgconfig/softline.pc
   ${libdir}/cmake/softline/softlineConfig.cmake
   ${libdir}/cmake/softline/softlineConfigVersion.cmake
   ${libdir}/cmake/softline/softlineTargets.cmake
   ${libdir}/cmake/softline/softlineTargets-release.cmake
   share/doc/softline/LICENSE share/doc/softline/README.md
+  share/doc/softline/web-frontend.md share/doc/softline/web-terminal.md
+  share/doc/softline/terminal-handoff-design.md share/doc/softline/transcripts.md
+  share/doc/softline/streaming-markdown/LICENSE share/doc/softline/streaming-markdown/README.softline
+  share/doc/softline/jetbrains-mono/OFL.txt share/doc/softline/jetbrains-mono/README.softline
+  share/doc/softline/xterm/LICENSE share/doc/softline/xterm/LICENSE.addon-fit share/doc/softline/xterm/README.softline
+  share/softline/licenses/libvterm/LICENSE share/softline/licenses/libvterm/README.softline.md
+  share/softline/licenses/libvterm/provenance.json
   share/softline/package-metadata.json)
 if(SDK_TARGET MATCHES "-linux-")
   list(APPEND files ${libdir}/libsoftline.so ${libdir}/libsoftline.so.${SDK_ABI}

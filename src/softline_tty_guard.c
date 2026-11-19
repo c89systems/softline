@@ -3,6 +3,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <poll.h>
 #include <signal.h>
 #include <stdlib.h>
 #include <string.h>
@@ -12,10 +13,12 @@
 
 /* Foreground terminal ownership is process-wide. Slots and saved attributes
  * remain at stable addresses while a signal runs. No allocation, transport,
- * child wait, stdio or terminal output is used by the signal path. */
+ * child wait or stdio is used by the signal path. A viewer may register a
+ * fixed, best-effort alternate-screen exit on the guarded output. */
 #define GUARDS 64
 struct sl_tty_guard {
   volatile sig_atomic_t active;
+  volatile sig_atomic_t alternate;
   int fd[2], flags[2], tty[2], resume_flags[2], resume_valid[2];
   struct termios original[2], resume[2];
 };
@@ -71,6 +74,90 @@ static int set_flags(int fd, int flags) {
   } while (result < 0 && errno == EINTR);
   return result;
 }
+static ssize_t write_available(int fd, const char *bytes, size_t length) {
+  int flags = fcntl(fd, F_GETFL);
+  int failure;
+  ssize_t written;
+  if (flags < 0 || set_flags(fd, flags | O_NONBLOCK) != 0)
+    return -1;
+  written = write(fd, bytes, length);
+  failure = errno;
+  if (set_flags(fd, flags) != 0)
+    return -1;
+  errno = failure;
+  return written;
+}
+
+static int leave_alternate(sl_tty_guard_t *g) {
+  static const char leave[] = "\030\033[0m\033[?1049l\033[?25h";
+  if (g->alternate && write_available(g->fd[1], leave, sizeof(leave) - 1) !=
+                          (ssize_t)(sizeof(leave) - 1))
+    return -1;
+  g->alternate = 0;
+  return 0;
+}
+
+int sl_tty_guard_alternate(sl_tty_guard_t *g, int enabled) {
+  static const char enter[] = "\030\033[?1049h\033[?25l";
+  sigset_t all, saved;
+  int status;
+  if (!g || !g->active || !g->tty[1])
+    return -1;
+  sigfillset(&all);
+  if (sigprocmask(SIG_BLOCK, &all, &saved))
+    return -1;
+  if (enabled && !g->alternate) {
+    g->alternate = 1;
+    status = write_available(g->fd[1], enter, sizeof(enter) - 1) ==
+                     (ssize_t)(sizeof(enter) - 1)
+                 ? 0
+                 : -1;
+    if (status)
+      (void)leave_alternate(g);
+  } else
+    status = enabled ? 0 : leave_alternate(g);
+  (void)sigprocmask(SIG_SETMASK, &saved, NULL);
+  return status;
+}
+
+int sl_tty_guard_in_alternate(const sl_tty_guard_t *g) {
+  return g && g->active && g->alternate;
+}
+
+int sl_tty_guard_write_alternate(sl_tty_guard_t *g, const char *bytes,
+                                 size_t length) {
+  sigset_t all, saved;
+  struct pollfd output;
+  ssize_t written;
+  int result, error;
+  /* A signal may have restored the primary screen since the last row.
+   * Check ownership and write together without blocking under the mask. */
+  sigfillset(&all);
+  output.fd = g->fd[1];
+  output.events = POLLOUT;
+  while (length) {
+    if (sigprocmask(SIG_BLOCK, &all, &saved))
+      return -1;
+    if (!sl_tty_guard_in_alternate(g)) {
+      (void)sigprocmask(SIG_SETMASK, &saved, NULL);
+      return 1;
+    }
+    written = write_available(output.fd, bytes, length);
+    error = errno;
+    (void)sigprocmask(SIG_SETMASK, &saved, NULL);
+    if (written > 0) {
+      bytes += written;
+      length -= (size_t)written;
+      continue;
+    }
+    if (!written || (error != EINTR && error != EAGAIN && error != EWOULDBLOCK))
+      return -1;
+    result = poll(&output, 1, 20);
+    if (result <= 0)
+      return !result || errno == EINTR ? 1 : -1;
+  }
+  return 0;
+}
 static int restore(sl_tty_guard_t *g, int modes, int flags) {
   int i, result = 0;
   for (i = 1; i >= 0; --i) {
@@ -87,8 +174,10 @@ static void restore_all(void) {
   if (owner != getpid())
     return;
   for (i = GUARDS - 1; i >= 0; --i)
-    if (guards[i].active)
+    if (guards[i].active) {
+      (void)leave_alternate(guards + i);
       (void)restore(guards + i, 1, 1);
+    }
 }
 static void guard_signal(int signo, siginfo_t *info, void *context);
 static struct sigaction action(void) {
@@ -298,7 +387,9 @@ int sl_tty_guard_end(sl_tty_guard_t *g, int modes, int flags) {
   sigfillset(&all);
   if (sigprocmask(SIG_BLOCK, &all, &mask))
     return -1;
-  result = restore(g, modes, flags);
+  result = leave_alternate(g);
+  if (restore(g, modes, flags) != 0)
+    result = -1;
   g->active = 0;
   --count;
   close(g->fd[0]);

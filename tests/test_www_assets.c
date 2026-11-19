@@ -27,6 +27,7 @@ int main(int argc, char **argv) {
                                 "/softline.js",
                                 "/completion.js",
                                 "/prompt.js",
+                                "/transcripts.js",
                                 "/images.js",
                                 "/image-viewer.js",
                                 "/markdown.js",
@@ -47,6 +48,7 @@ int main(int argc, char **argv) {
       "web/softline.js",
       "web/completion.js",
       "web/prompt.js",
+      "web/transcripts.js",
       "web/images.js",
       "web/image-viewer.js",
       "web/markdown.js",
@@ -63,7 +65,7 @@ int main(int argc, char **argv) {
       "vendor/xterm/LICENSE.addon-fit"};
   sl_www_config_t cfg;
   sl_www_t *w;
-  char *html, *css, *js, *md, *prompt, *at, *rule_end, *modules[3];
+  char *html, *css, *js, *md, *prompt, *at, *rule_end, *modules[4];
   size_t i;
   int depth = 0;
   CHECK(argc == 2);
@@ -100,13 +102,14 @@ int main(int argc, char **argv) {
   modules[0] = asset(w, "/images.js");
   modules[1] = asset(w, "/image-viewer.js");
   modules[2] = asset(w, "/terminal-panel.js");
+  modules[3] = asset(w, "/transcripts.js");
   CHECK(html && css && js && md && prompt && modules[0] && modules[1] &&
-        modules[2]);
+        modules[2] && modules[3]);
   CHECK(!strstr(html, "/terminal-lock") && !strstr(js, "/terminal-lock") &&
         !strstr(prompt, "/terminal-lock"));
   /* Logical DOM doubles cannot catch missing real controls. Verify the image
    * controllers' literal bindings against the actual embedded HTML as well. */
-  for (i = 0; i < 3; ++i) {
+  for (i = 0; i < sizeof(modules) / sizeof(modules[0]); ++i) {
     const char *marker = "getElementById('";
     size_t prefix = strlen(marker);
     for (at = modules[i]; (at = strstr(at, marker)) != NULL;) {
@@ -226,9 +229,8 @@ int main(int argc, char **argv) {
   free(js);
   free(md);
   free(prompt);
-  free(modules[0]);
-  free(modules[1]);
-  free(modules[2]);
+  for (i = 0; i < sizeof(modules) / sizeof(modules[0]); ++i)
+    free(modules[i]);
   sl_www_destroy(w);
   return 0;
 }

@@ -5,6 +5,7 @@ export class TerminalPanel {
     this.document = document; this.window = window; this.closed = closed;
     this.origin = window.origin || window.location.origin;
     this.panel = document.getElementById('terminal-panel');
+    this.conversation = document.getElementById('conversation-pane');
     this.rowHeight = 18; this.chromeHeight = 40;
     window.addEventListener('message', event => {
       if (!this.frame || event.source !== this.frame.contentWindow || event.origin !== this.origin) return;
@@ -18,7 +19,7 @@ export class TerminalPanel {
     window.visualViewport?.addEventListener('resize', () => this.resize());
     this.observer = new window.ResizeObserver(() => this.resize());
     this.observer.observe(document.getElementById('composer-area'));
-    this.observer.observe(document.getElementById('workspace'));
+    this.observer.observe(this.conversation);
   }
   open(path) {
     if (this.frame) { this.frame.contentWindow.focus(); return; }
@@ -36,10 +37,10 @@ export class TerminalPanel {
   }
   resize() {
     if (!this.frame) return;
-    const workspace = this.document.getElementById('workspace').getBoundingClientRect();
+    const conversation = this.conversation.getBoundingClientRect();
     const composer = this.document.getElementById('composer-area').getBoundingClientRect();
     const viewport = this.window.visualViewport?.height || this.window.innerHeight;
-    const available = Math.max(0, Math.min(workspace.height, viewport - workspace.top));
+    const available = Math.max(0, Math.min(conversation.height, viewport - conversation.top));
     const maximum = Math.max(0, available - composer.height - Math.min(80, available / 5));
     // The panel's top border is outside the iframe's measured terminal chrome.
     const height = Math.min(Math.max(Math.ceil(25 * this.rowHeight + this.chromeHeight + 1), viewport / 3), maximum);

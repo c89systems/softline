@@ -6,6 +6,7 @@
 #define _DARWIN_C_SOURCE 1
 #endif
 
+#include "softline/transcript.h"
 #include "softline_clipboard.h"
 #include "softline_internal.h"
 #include "softline_unicode.h"
@@ -1208,6 +1209,7 @@ static void sl_disable_raw(sl_t *self) {
     sl_set_error(self, "failed to restore terminal attributes");
   impl->raw_guard = NULL;
   impl->raw_active = 0;
+  (void)sl_transcript_leave(self);
 }
 
 static int sl_buf_reserve(sl_t *self, size_t need) {
@@ -4311,6 +4313,9 @@ static int sl_render_apply(sl_t *self, const char *prompt) {
   impl = sl_impl(self);
   if (!impl)
     return -1;
+  if (sl_transcript_visible(self))
+    return sl_transcript_paint(self, sl_terminal_rows(impl),
+                               sl_terminal_columns(impl));
   if (!impl->retained_prompt || strcmp(impl->retained_prompt, prompt) != 0) {
     char *copy = sl_strdup(prompt);
     if (!copy) {
@@ -5018,6 +5023,8 @@ static int sl_print_above_method(sl_t *self, sl_stream_callback_t callback,
   int previous, result;
   if (!impl)
     return SL_ERROR_INVALID;
+  if (sl_transcript_visible(self))
+    return SL_ERROR_NOT_READY;
   previous = impl->output_write_active;
   impl->output_write_active = 1;
   result = sl_print_above_method_impl(self, callback, userdata);
@@ -5032,6 +5039,8 @@ static int sl_output_stream_begin_method(sl_t *self) {
   sl_impl_t *impl;
   sl_surface_t *previous_surface;
   impl = sl_impl(self);
+  if (sl_transcript_visible(self))
+    return SL_ERROR_NOT_READY;
   if (!impl || impl->output_stream_active) {
     sl_set_error(self, "live output stream is already open");
     return SL_ERROR_INVALID;
@@ -5090,6 +5099,8 @@ failed:
 static int sl_output_stream_reconcile_method(sl_t *self) {
   sl_impl_t *impl = sl_impl(self);
   int result;
+  if (sl_transcript_visible(self))
+    return SL_ERROR_NOT_READY;
   if (!impl || !impl->output_stream_active || impl->output_write_active ||
       impl->output_reconcile_active) {
     sl_set_error(self, "reconciliation requires an open stream outside a feed");
@@ -5278,6 +5289,8 @@ static int sl_output_stream_write_method(sl_t *self, const char *bytes,
   sl_impl_t *impl;
   int result, previous;
   impl = sl_impl(self);
+  if (sl_transcript_visible(self))
+    return SL_ERROR_NOT_READY;
   if (!impl || !impl->output_stream_active || (!bytes && length > 0)) {
     sl_set_error(self, "live output write requires an open stream and bytes");
     return SL_ERROR_INVALID;
@@ -5593,6 +5606,8 @@ static int sl_output_stream_write_quoted_prompt_method(sl_t *self,
   int previous, result;
   if (!impl)
     return SL_ERROR_INVALID;
+  if (sl_transcript_visible(self))
+    return SL_ERROR_NOT_READY;
   previous = impl->output_write_active;
   impl->output_write_active = 1;
   result = sl_output_stream_write_quoted_prompt_impl(self, text);
@@ -5604,6 +5619,8 @@ static int sl_output_stream_end_method(sl_t *self) {
   sl_impl_t *impl;
   int prompt_origin;
   impl = sl_impl(self);
+  if (sl_transcript_visible(self))
+    return SL_ERROR_NOT_READY;
   if (!impl || !impl->output_stream_active) {
     sl_set_error(self, "no live output stream is open");
     return SL_ERROR_INVALID;
@@ -5827,6 +5844,7 @@ retry:
     poll_timeout_ms = 0;
   if ((poll_timeout_ms < 0 || poll_timeout_ms > SL_UI_TICK_CADENCE_MS) &&
       (impl->terminal_children || impl->idle_callback ||
+       sl_transcript_visible(self) ||
        sl_surface_is_native(impl->output_surface) ||
        (impl->statusline.enabled && impl->statusline.spinner &&
         impl->statusline.busy)))
@@ -6191,7 +6209,8 @@ static int sl_try_pin_scroll_region(sl_t *self) {
  * never within a feed call. Multiple writes in one callback stay immediate. */
 static void sl_refresh_scroll_region(sl_t *self) {
   sl_impl_t *impl = sl_impl(self);
-  if (!impl || impl->output_write_active || !impl->scroll_region_probe_pending)
+  if (!impl || impl->output_write_active ||
+      !impl->scroll_region_probe_pending || sl_transcript_visible(self))
     return;
   impl->scroll_region_probe_pending = 0;
   if (impl->live_scroll_region && !sl_prompt_uses_absolute_rows(impl))
@@ -7457,6 +7476,30 @@ static char *sl_readline_impl(sl_t *self, const char *prompt,
       key = sl_read_paste_input(self, paste_bytes, &paste_len);
     else
       key = sl_read_key(self);
+    if ((key != SL_KEY_NONE && sl_transcript_visible(self)) ||
+        (key == SL_KEY_CTRL_T && !impl->bracketed_paste && !waiting_edit &&
+         !impl->control_x_pending &&
+         !sl_find_key_binding(impl, SL_KEY_CTRL_T))) {
+      int view_key = 0;
+      if (impl->bracketed_paste) {
+        if (key == SL_KEY_PASTE_END)
+          impl->bracketed_paste = 0;
+        view_key = 1;
+      } else if (key == SL_KEY_PASTE_BEGIN) {
+        impl->bracketed_paste = 1;
+        view_key = 1;
+      } else {
+        view_key = sl_transcript_key(self, key);
+      }
+      if (view_key < 0 ||
+          (view_key && sl_render_apply(self, render_prompt) != 0)) {
+        sl_set_error(self, "failed to render terminal transcript");
+        failed = 1;
+        break;
+      }
+      if (view_key)
+        continue;
+    }
     if (!impl->bracketed_paste && sl_image_pending(impl)) {
       if (key == SL_KEY_CTRL_C) {
         sl_image_invalidate(self, "image upload cancelled");
@@ -8204,6 +8247,8 @@ static char *sl_readline_impl(sl_t *self, const char *prompt,
       deferred_since_render = 0;
     }
   }
+  if (sl_transcript_leave(self))
+    failed = 1;
   if (!failed && !suspended && sl_completion_finish(self) != SL_OK)
     failed = 1;
   sl_edit_end(&impl->edit);
@@ -8452,6 +8497,7 @@ static void sl_destroy_method(sl_t *self) {
     return;
   }
   if (impl) {
+    sl_transcript_destroy(self);
     sl_image_destroy(self);
     sl_terminal_cleanup(impl);
     sl_backend_destroy(self);

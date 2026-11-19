@@ -139,6 +139,7 @@ typedef struct sl_impl {
   int image_literal;
   struct sl_pty *terminal_children;
   int terminal_active;
+  struct sl_transcripts *transcripts;
   int input_fd;
   int output_fd;
   int screen_width;
@@ -255,6 +256,10 @@ typedef struct sl_impl {
 void sl_terminal_reap(sl_impl_t *impl);
 void sl_terminal_cleanup(sl_impl_t *impl);
 void sl_terminal_abandon(sl_t *self);
+void sl_transcript_destroy(sl_t *self);
+int sl_transcript_key(sl_t *self, int key);
+int sl_transcript_paint(sl_t *self, int rows, int columns);
+int sl_transcript_leave(sl_t *self);
 
 int sl_image_start(sl_t *, sl_image_paste_id_t *);
 int sl_image_start_source(sl_t *, const sl_image_paste_source_t *,

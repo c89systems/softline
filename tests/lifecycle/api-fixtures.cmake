@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.24)
 set(work "${ROOT}/build/host-tests/api-fixture")
 file(REMOVE_RECURSE "${work}")
-set(inputs include/softline/softline.h include/softline/www.h include/softline/terminal.h cmake/softline_version.h.in
+set(inputs include/softline/softline.h include/softline/www.h include/softline/terminal.h include/softline/transcript.h cmake/softline_version.h.in
   cmake/softline.exports lua/softline_lua.c lua/README.md README.md CMakeLists.txt)
 foreach(relative IN LISTS inputs)
   get_filename_component(directory "${work}/${relative}" DIRECTORY)
@@ -32,6 +32,8 @@ function(mutate name relative before after expected)
   file(WRITE "${work}/${relative}" "${original}")
 endfunction()
 check(original "")
+mutate(transcript_declaration include/softline/transcript.h "int sl_transcript_write("
+  "int sl_transcript_fixture_only(" "C public declarations and dynamic export allowlist differ")
 mutate(terminal_declaration include/softline/terminal.h "int sl_terminal_session_dispatch("
   "int sl_terminal_fixture_only(" "C public declarations and dynamic export allowlist differ")
 mutate(terminal_receiver include/softline/terminal.h "(*dispatch)"

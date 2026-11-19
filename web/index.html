@@ -6,6 +6,7 @@
   <meta name="color-scheme" content="dark light">
   <title>softline</title>
   <link rel="stylesheet" href="./softline.css">
+  <link rel="stylesheet" href="./xterm.css">
   <script type="module" src="./softline.js"></script>
 </head>
 <body>
@@ -23,9 +24,15 @@
       </select></label>
       <label>Font <select id="font" aria-label="Font"><option value="sans">Sans</option><option value="mono">JetBrains Mono</option></select></label>
     </div>
+    <button id="transcript-toggle" type="button" aria-controls="transcripts" aria-expanded="false" aria-keyshortcuts="F8" title="Cycle transcripts (F8)" hidden>Transcripts</button>
     <span id="connection" role="status">Connecting</span>
   </header>
   <div id="workspace">
+  <aside id="transcripts" aria-label="Read-only terminal transcripts" hidden>
+    <label class="transcript-heading">Transcript <select id="transcript-select" aria-label="Transcript"><option value="">Close transcripts</option></select></label>
+    <div id="transcript-screen" tabindex="0" aria-label="Transcript screen"></div>
+  </aside>
+  <div id="conversation-pane">
   <main id="chat" class="welcome-state">
     <div id="scroll" tabindex="0" aria-label="Conversation">
       <div id="messages" role="log" aria-label="Messages" aria-live="off"></div>
@@ -51,6 +58,7 @@
     </div>
   </main>
   <section id="terminal-panel" aria-label="Server terminal panel" hidden></section>
+  </div>
   </div>
   <input id="image-input" type="file" accept="image/png,image/jpeg" multiple hidden>
   <dialog id="queue-editor" aria-labelledby="queue-editor-title">

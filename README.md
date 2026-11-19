@@ -213,6 +213,9 @@ views together; `make run-chat-web-only` serves only the browser. Queue-server
 and remote-client Make targets also enable their example web listener. The
 library opens no sockets and starts no HTTP server.
 
+[Read-only terminal transcripts](docs/transcripts.md) display host-owned
+command logs and background terminal output in the native editor and web UI.
+
 The native local queue remains the default. For a separate-process queue owner,
 start `make run-chat-queue-server` in one terminal and `make run-chat-remote` in
 another. All C chat themes accept `CHAT_QUEUE=local|remote`, for example
