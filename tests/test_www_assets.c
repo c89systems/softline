@@ -172,6 +172,13 @@ int main(int argc, char **argv) {
         strstr(css, "@keyframes terminal-slide-up") &&
         strstr(css, "#composer[data-disabled=\"1\"]"));
   {
+    const char *conversation = strstr(html, "id=\"conversation-pane\"");
+    const char *transcripts = strstr(html, "<aside id=\"transcripts\"");
+    CHECK(conversation && transcripts && conversation < transcripts);
+    CHECK(strstr(css, "#workspace{flex-direction:row}") &&
+          strstr(css, "#workspace{flex-direction:column-reverse}"));
+  }
+  {
     char *page = asset(w, "/terminal"), *style = asset(w, "/terminal.css");
     char *grid, *footer;
     CHECK(page && style);

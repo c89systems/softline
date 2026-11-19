@@ -25,11 +25,11 @@
 #workspace{flex-direction:row}
 #conversation-pane{display:flex;flex-direction:column;flex:1;min-height:0;min-width:0}
 #transcript-toggle,.transcript-heading select{background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:6px;padding:3px 8px;font-size:12px}
-#transcripts{display:flex;flex-direction:column;flex:0 0 clamp(220px,42%,720px);min-width:0;min-height:0;border-right:1px solid var(--line)}
+#transcripts{display:flex;flex-direction:column;flex:0 0 clamp(220px,42%,720px);min-width:0;min-height:0;border-left:1px solid var(--line)}
 .transcript-heading{display:flex;align-items:center;gap:8px;padding:8px 12px;color:var(--muted);font-size:12px;border-bottom:1px solid var(--line)}
 .transcript-heading select{min-width:0;max-width:100%}
 #transcript-screen{flex:1;min-height:0;overflow:auto;overscroll-behavior:contain;scrollbar-width:thin;scrollbar-color:var(--scroll) transparent}
 .transcript-stage{padding:6px;font-size:13px}
 .transcript-stage .xterm{width:max-content;min-width:100%}
 .transcript-stage .xterm-viewport{scrollbar-width:thin;scrollbar-color:var(--scroll) transparent}
-@media(max-width:640px){#workspace{flex-direction:column}#transcripts{flex-basis:38%;border-right:0;border-bottom:1px solid var(--line)}#transcript-toggle{font-size:11px;padding:3px 5px}}
+@media(max-width:640px){#workspace{flex-direction:column-reverse}#transcripts{flex-basis:38%;border-left:0;border-bottom:1px solid var(--line)}#transcript-toggle{font-size:11px;padding:3px 5px}}

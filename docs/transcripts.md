@@ -77,7 +77,7 @@ any chunks.
 
 **F8** or the **Transcripts** button cycles through viewers and closes the
 pane after the last one. The selector can jump directly to one viewer.
-The pane is to the left of the conversation on wide screens and above it
+The pane is to the right of the conversation on wide screens and above it
 on narrow screens. Each read-only xterm.js instance uses the producer's
 declared rows and columns and up to 2,000 scrollback rows. If pending input
 exceeds the viewer's 256 KiB budget, it shows a recovery
