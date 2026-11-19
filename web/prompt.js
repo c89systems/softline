@@ -22,8 +22,9 @@ export class Prompt {
     this.input.addEventListener('beforeinput', event => this.beforeInput(event));
     this.input.addEventListener('input', event => this.changed(event));
     this.input.addEventListener('keydown', event => this.key(event));
-    this.input.addEventListener('click', () => { this.model.cursor(); this.hideMenu(); });
+    this.input.addEventListener('click', () => { if (!this.input.readOnly) this.model.cursor(); this.hideMenu(); });
     const selection = () => {
+      if (this.input.readOnly) return;
       if (this.selection?.[0] !== this.input.selectionStart || this.selection?.[1] !== this.input.selectionEnd) {
         this.model.cursor(); this.hideMenu();
       }
@@ -47,7 +48,7 @@ export class Prompt {
   }
   focus(automatic = false) {
     const document = this.options.document, active = document.activeElement;
-    if (document.querySelector('dialog[open]')) return false;
+    if (this.input.readOnly || document.querySelector('dialog[open]')) return false;
     if (automatic && (document.hidden || active && active !== document.body && active !== document.documentElement)) return false;
     this.hideMenu();
     this.input.focus({ preventScroll: true });
@@ -55,6 +56,7 @@ export class Prompt {
   }
   current() { return { text: this.input.value, cursor: this.input.selectionStart, end: this.input.selectionEnd }; }
   apply(text, cursor, edit = {}) {
+    if (this.input.readOnly) return;
     if (new TextEncoder().encode(text).length > 128 * 1024) throw new Error('The prompt exceeds 128 KiB.');
     const before = this.input.value, oldEnd = this.input.selectionEnd;
     this.input.value = text;
@@ -78,7 +80,15 @@ export class Prompt {
   }
   finish() { this.model.finish(); this.hideMenu(); }
   reset() { this.model.reset(); this.before = this.input.value; this.render(); }
+  suspend() {
+    this.editGeneration = (this.editGeneration || 0) + 1; this.jobs = [];
+    const literal = this.model.session?.literal ? this.model.session : null;
+    this.model.reset();
+    if (literal) this.model.adopt(literal.start, literal.end, true);
+    this.hideMenu();
+  }
   connected() {
+    if (this.input.readOnly) return;
     const literal = this.model.session?.literal ? this.model.session : null;
     this.model.reset();
     if (literal) this.model.adopt(literal.start, literal.end, true);
@@ -106,7 +116,7 @@ export class Prompt {
     if (event.type === 'completion_provider') {
       if (typeof event.trigger === 'string' && event.trigger.length === 1 && ['start', 'word'].includes(event.scope)) {
         this.model.provider({ trigger: event.trigger, scope: event.scope, strip: event.strip === '1', expand: event.expand === '1' });
-        this.model.activate(this.input.value, this.input.selectionStart, this.literalInput);
+        if (!this.input.readOnly) this.model.activate(this.input.value, this.input.selectionStart, this.literalInput);
       }
       return;
     }
@@ -146,6 +156,7 @@ export class Prompt {
     }
   }
   beforeInput(event) {
+    if (this.input.readOnly) { event.preventDefault(); return; }
     const literal = ['insertFromPaste', 'insertFromDrop', 'insertFromPasteAsQuotation'].includes(event.inputType);
     const data = event.data ?? event.dataTransfer?.getData('text/plain');
     const replayable = ['insertText', 'insertFromPaste', 'insertFromDrop', 'insertFromPasteAsQuotation', 'insertLineBreak', 'insertParagraph', 'deleteContentBackward', 'deleteContentForward'].includes(event.inputType) &&
@@ -167,11 +178,14 @@ export class Prompt {
     this.before = this.input.value; this.hideMenu();
   }
   async editInput(type, data, literal = false) {
+    if (this.input.readOnly) return;
+    const generation = this.editGeneration || 0;
     if (literal) this.finish();
     if (type === 'insertLineBreak' || type === 'insertParagraph') data = '\n';
     if (type.startsWith('insert')) {
       for (const character of literal ? [data] : [...data]) {
         if (!literal && space(character)) await this.model.separator(character);
+        if (this.input.readOnly || generation !== (this.editGeneration || 0)) return;
         const before = this.input.value;
         this.input.setRangeText(character, this.input.selectionStart, this.input.selectionEnd, 'end');
         this.options.mutate(before, this.input.value);
@@ -211,6 +225,7 @@ export class Prompt {
       if (!event.repeat) this.options.action(shortcut);
       return;
     }
+    if (this.input.readOnly) return;
     if (control && key.toLowerCase() === 'c' && this.options.cancelImages()) { event.preventDefault(); return; }
     if (this.menuOpen && ['ArrowDown', 'ArrowUp', 'Tab'].includes(key)) {
       event.preventDefault();
@@ -253,6 +268,7 @@ export class Prompt {
   }
   hideMenu() { this.menuOpen = false; this.menuRequest = null; this.menu.hidden = true; this.get('plus').setAttribute('aria-expanded', 'false'); }
   openMenu() {
+    if (this.input.readOnly) return;
     this.finish(); this.menuOpen = true; this.menuItems = []; this.menuActive = 0;
     this.menuText = this.input.value; this.menuCursor = this.input.selectionStart; this.menuRequest = String(++this.serial);
     this.options.send('complete', { request: this.menuRequest, text: this.menuText, cursor: new TextEncoder().encode(this.menuText.slice(0, this.menuCursor)).length, all: '1' });
@@ -282,6 +298,7 @@ export class Prompt {
   }
   async choose(item) {
     if (!item || item.disabled) return;
+    if (this.input.readOnly && !item.action) return;
     this.finish();
     if (item.action) { this.options.action(item.action); return; }
     if (item.image) { this.options.imagePicker(); return; }

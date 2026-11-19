@@ -25,6 +25,7 @@
     </div>
     <span id="connection" role="status">Connecting</span>
   </header>
+  <div id="workspace">
   <main id="chat" class="welcome-state">
     <div id="scroll" tabindex="0" aria-label="Conversation">
       <div id="messages" role="log" aria-label="Messages" aria-live="off"></div>
@@ -49,6 +50,8 @@
       <div class="composer-hint"><span>Enter to send · Shift+Enter for a new line · Alt+Enter to steer</span></div>
     </div>
   </main>
+  <section id="terminal-panel" aria-label="Server terminal panel" hidden></section>
+  </div>
   <input id="image-input" type="file" accept="image/png,image/jpeg" multiple hidden>
   <dialog id="queue-editor" aria-labelledby="queue-editor-title">
     <form id="queue-edit-form">

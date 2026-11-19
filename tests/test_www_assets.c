@@ -34,6 +34,7 @@ int main(int argc, char **argv) {
                                 "/JetBrainsMono-Regular.woff2",
                                 "/terminal",
                                 "/terminal.js",
+                                "/terminal-panel.js",
                                 "/terminal.css",
                                 "/xterm.js",
                                 "/xterm-addon-fit.js",
@@ -53,6 +54,7 @@ int main(int argc, char **argv) {
       "vendor/jetbrains-mono/JetBrainsMono-Regular.woff2",
       "web/terminal.html",
       "web/terminal.js",
+      "web/terminal-panel.js",
       "web/terminal.css",
       "vendor/xterm/xterm.mjs",
       "vendor/xterm/addon-fit.mjs",
@@ -61,7 +63,7 @@ int main(int argc, char **argv) {
       "vendor/xterm/LICENSE.addon-fit"};
   sl_www_config_t cfg;
   sl_www_t *w;
-  char *html, *css, *js, *md, *prompt, *at, *rule_end, *modules[2];
+  char *html, *css, *js, *md, *prompt, *at, *rule_end, *modules[3];
   size_t i;
   int depth = 0;
   CHECK(argc == 2);
@@ -97,10 +99,12 @@ int main(int argc, char **argv) {
   prompt = asset(w, "/prompt.js");
   modules[0] = asset(w, "/images.js");
   modules[1] = asset(w, "/image-viewer.js");
-  CHECK(html && css && js && md && prompt && modules[0] && modules[1]);
+  modules[2] = asset(w, "/terminal-panel.js");
+  CHECK(html && css && js && md && prompt && modules[0] && modules[1] &&
+        modules[2]);
   /* Logical DOM doubles cannot catch missing real controls. Verify the image
    * controllers' literal bindings against the actual embedded HTML as well. */
-  for (i = 0; i < 2; ++i) {
+  for (i = 0; i < 3; ++i) {
     const char *marker = "getElementById('";
     size_t prefix = strlen(marker);
     for (at = modules[i]; (at = strstr(at, marker)) != NULL;) {
@@ -153,6 +157,15 @@ int main(int argc, char **argv) {
   }
   CHECK(!depth && strstr(css, "scrollbar-color") &&
         strstr(css, ".welcome-state #composer-area"));
+  CHECK(
+      strstr(html, "id=\"workspace\"") &&
+      strstr(
+          html,
+          "id=\"terminal-panel\" aria-label=\"Server terminal panel\" hidden"));
+  CHECK(strstr(css, "#workspace #chat{height:auto;flex:1;min-height:0}") &&
+        strstr(css, "#terminal-panel{flex:none;") &&
+        strstr(css, "@keyframes terminal-slide-up") &&
+        strstr(css, "#composer[data-disabled=\"1\"]"));
   CHECK(strstr(html, "aria-autocomplete=\"inline\"") &&
         strstr(html, "aria-keyshortcuts=\"Escape\"") &&
         strstr(html, "id=\"prompt-projection\" aria-hidden=\"true\" hidden") &&
@@ -196,6 +209,7 @@ int main(int argc, char **argv) {
   free(prompt);
   free(modules[0]);
   free(modules[1]);
+  free(modules[2]);
   sl_www_destroy(w);
   return 0;
 }

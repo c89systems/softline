@@ -1,6 +1,7 @@
 import { MarkdownStream } from './markdown.js';
 import { Prompt } from './prompt.js';
 import { ImagePreviews } from './images.js';
+import { TerminalPanel } from './terminal-panel.js';
 
 function randomId() {
   return Array.from(crypto.getRandomValues(new Uint32Array(4)), value => value.toString(16).padStart(8, '0')).join('');
@@ -13,7 +14,7 @@ const state = { socket: null, online: false, follow: true, messages: new Map(),
   view: randomId(), generation: 0, imageLimit: 32 * 1024 * 1024,
   queueDelay: 500, queueTimer: null, pending: new Map(), failed: [], epoch: null,
   images: true, attachments: [], requestSeq: 0, approval: null, edit: null,
-  editPending: null, canEdit: false, terminal: '' };
+  editPending: null, canEdit: false, terminal: '', promptDisabled: false, restorePromptAfterTerminal: false };
 const icon = () => $('copy-icon').content.cloneNode(true);
 let toastTimer;
 function toast(text) { $('toast').textContent = text; $('toast').hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => { $('toast').hidden = true; }, 3500); }
@@ -25,6 +26,7 @@ function preference(id, fallback) {
   $(id).addEventListener('change', () => {
     document.documentElement.dataset[id] = $(id).value;
     try { localStorage.setItem(`softline.${id}`, $(id).value); } catch {}
+    if (id === 'theme') terminalPanel.theme();
   });
 }
 preference('theme', 'default'); preference('font', 'sans');
@@ -40,7 +42,7 @@ function resizePrompt() {
   if (prompt.clientWidth) projection.style.width = `${prompt.clientWidth}px`;
   prompt.style.height = `${Math.min(Math.max(prompt.scrollHeight, projection.hidden ? 0 : projection.scrollHeight), 200)}px`;
   if (prompt.clientWidth) projection.style.width = `${prompt.clientWidth}px`;
-  $('send').disabled = !state.online || !prompt.value.trim() || !!state.attachments.length;
+  $('send').disabled = state.promptDisabled || !state.online || !prompt.value.trim() || !!state.attachments.length;
   previews.draft();
 }
 function follow() { if (state.follow) scroll.scrollTop = scroll.scrollHeight; }
@@ -49,7 +51,8 @@ scroll.addEventListener('scroll', () => {
   $('latest').hidden = state.follow;
 }, { passive: true });
 $('latest').addEventListener('click', () => { state.follow = true; follow(); $('latest').hidden = true; });
-new ResizeObserver(() => follow()).observe(messages);
+const followResize = new ResizeObserver(() => follow());
+followResize.observe(messages); followResize.observe(scroll);
 function started() { $('chat').classList.remove('welcome-state'); }
 function message(id, role = 'assistant') {
   if (state.messages.has(id)) return state.messages.get(id);
@@ -123,7 +126,7 @@ function actionItems() {
   const focused = state.approval && state.queue.get(state.approval.id);
   return [
     { id: 'focus', label: 'Focus prompt', description: 'Esc' },
-    { id: 'terminal', label: 'Open terminal', description: state.terminal ? 'Ctrl+`' : 'Ctrl+` · host terminal unavailable', disabled: !state.online || !state.terminal },
+    { id: 'terminal', label: terminalPanel.frame ? 'Close terminal' : 'Open terminal', description: state.terminal ? 'Ctrl+`' : 'Ctrl+` · host terminal unavailable', disabled: !terminalPanel.frame && (!state.online || !state.terminal) },
     { id: 'edit', label: 'Edit queued message', description: 'Ctrl+Shift+Enter', disabled: !state.online || !state.canEdit || ![...state.queue.values()].some(item => item.mode !== 'pending') },
     { id: 'approvals', label: 'Focus approvals', description: 'Ctrl+Shift+1', disabled: !oldest },
     { id: 'approve', label: 'Approve focused request', description: 'Ctrl+Shift+2', disabled: !state.online || !focused },
@@ -143,7 +146,8 @@ function promptAction(action) {
   } else if (action === 'edit') {
     editQueue(state.approval ? state.queue.get(state.approval.id) : [...state.queue.values()].filter(item => item.mode !== 'pending').at(-1));
   } else if (action === 'terminal') {
-    if (state.online && state.terminal) window.open(state.terminal, '_blank', 'noopener,noreferrer');
+    if (terminalPanel.frame) terminalPanel.close();
+    else if (state.online && state.terminal) terminalPanel.open(state.terminal);
     else toast('The host has not enabled a browser terminal.');
   }
 }
@@ -210,8 +214,27 @@ const editor = new Prompt({
   }
 });
 window.addEventListener('focus', () => editor.focus(true));
+const terminalPanel = new TerminalPanel({ document, window, closed: () => {
+  state.restorePromptAfterTerminal = !editor.focus();
+  if (state.restorePromptAfterTerminal) scroll.focus({ preventScroll: true });
+} });
+function promptState(disabled, text = '') {
+  const wasDisabled = state.promptDisabled;
+  state.promptDisabled = disabled; prompt.readOnly = disabled;
+  prompt.setAttribute('aria-disabled', String(disabled));
+  prompt.title = disabled ? text || 'The host has paused prompt input.' : '';
+  $('composer').dataset.disabled = disabled ? '1' : '0';
+  $('plus').disabled = $('image-input').disabled = disabled;
+  if (disabled) editor.suspend();
+  else if (wasDisabled) {
+    if (state.online) editor.connected();
+    editor.focus(!(state.restorePromptAfterTerminal && document.activeElement === scroll));
+    state.restorePromptAfterTerminal = false;
+  }
+  resizePrompt();
+}
 function submit(steer = false) {
-  if (state.attachments.length) return;
+  if (state.promptDisabled || state.attachments.length) return;
   editor.finish();
   if (!prompt.value.trim()) return;
   if (state.pending.size >= 32) { toast('Wait for the host to confirm pending prompts. Your draft is kept.'); return; }
@@ -295,10 +318,11 @@ async function uploadFile(upload) {
   editor.reset();
   for (const job of state.attachments) if (job !== upload && job.anchor >= upload.anchor) job.anchor += insertion.length;
   state.upload = null; chip.remove();
-  $('uploads').hidden = !$('uploads').childElementCount; resizePrompt(); prompt.focus();
+  $('uploads').hidden = !$('uploads').childElementCount; resizePrompt(); editor.focus();
 }
 let uploadChain = Promise.resolve();
 function addImages(files) {
+  if (state.promptDisabled) return;
   if (!state.images) { toast('This host does not accept images.'); return; }
   editor.finish();
   for (const file of files) {
@@ -363,6 +387,7 @@ function receive(event) {
     case 'queue_end':
       if (state.stagingQueue) { for (const item of state.stagingQueue.values()) item.text += item.decoder.decode(); state.queue = state.stagingQueue; state.stagingQueue = null; queue(); } break;
     case 'status': state.busy = e.busy === '1'; $('activity').textContent = e.text || ''; $('activity').title = e.text || ''; break;
+    case 'prompt_state': promptState(e.disabled === '1', e.text); break;
     case 'limits': if (Number(e.image_bytes) > 0) state.imageLimit = Number(e.image_bytes); break;
     case 'completion_provider': case 'complete': case 'complete_end': editor.receive(e); break;
     case 'draft': {
@@ -373,6 +398,8 @@ function receive(event) {
     case 'image_error': if (e.id === state.upload?.id) cancelUpload(e.text || 'Image upload failed.'); break;
     case 'session':
       if (state.epoch && state.epoch !== e.id) {
+        terminalPanel.close();
+        promptState(false);
         state.seq = ''; clearConversation();
         editResult(state.editPending, 'The host restarted. This edit was not sent again.');
         state.edit = null; $('queue-edit-save').disabled = true;
@@ -389,6 +416,7 @@ function receive(event) {
     case 'capabilities':
       state.canEdit = e.edit === '1';
       state.terminal = typeof e.terminal === 'string' && /^\/(?!\/)/u.test(e.terminal) && !/[\\\u0000-\u0020]/u.test(e.terminal) ? e.terminal : '';
+      if (!state.terminal) terminalPanel.close();
       queue(); break;
     case 'accepted': state.pending.delete(e.request); editResult(e.request); break;
     case 'error':
@@ -399,7 +427,7 @@ function receive(event) {
 }
 function connect() {
   const generation = ++state.generation;
-  const url = new URL('./events', location.href); url.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const url = new URL('./events', document.baseURI || location.href); url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
   url.searchParams.set('after', state.seq); url.searchParams.set('view', state.view);
   const socket = state.socket = new WebSocket(url);
   socket.addEventListener('open', () => { $('connection').textContent = 'Synchronizing'; });

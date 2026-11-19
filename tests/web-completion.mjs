@@ -1,6 +1,6 @@
 // Logical client tests: execute the shipped module with DOM/transport doubles.
 // Actual browser layout and selection integration remain in web-browser.html.
-export async function runWebCompletionTests(source, completionSource, promptSource, fixture, imagesSource, viewerSource) {
+export async function runWebCompletionTests(source, completionSource, promptSource, fixture, imagesSource, viewerSource, panelSource) {
   const checks = [];
   function assert(value, message) { if (!value) throw new Error(message); }
   class Target {
@@ -70,9 +70,10 @@ export async function runWebCompletionTests(source, completionSource, promptSour
   const stripImports = source => source.replace(/^import[^\n]*\n/gm, '').replace(/^export /gm, '');
   const Completion = new Function(stripImports(completionSource) + '\nreturn Completion;')();
   const ImageViewer = new Function(stripImports(viewerSource) + '\nreturn ImageViewer;')();
+  const TerminalPanel = new Function(stripImports(panelSource) + '\nreturn TerminalPanel;')();
   const { ImagePreviews, imageReferences } = new Function('ImageViewer', stripImports(imagesSource) + '\nreturn { ImagePreviews, imageReferences };')(ImageViewer);
   async function boot(options = {}) {
-    const elements = new Map(), timers = new Map();
+    const elements = new Map(), timers = new Map(), observers = [];
     let serial = 0, socket, previews;
     const document = new Target(), window = new Target(), revoked = [], blobs = [], copiedImages = [], clipboardCalls = [], canvases = [], decoded = [], pendingDecodes = [], opened = [];
     window.open = (...args) => opened.push(args);
@@ -86,12 +87,14 @@ export async function runWebCompletionTests(source, completionSource, promptSour
       return elements.get(id);
     };
     document.documentElement = { dataset: {} };
+    document.baseURI = options.baseURI;
     document.body = document.getElementById('body');
     document.activeElement = options.initialFocus ? document.getElementById(options.initialFocus) : document.body;
     document.hidden = !!options.hidden;
     document.querySelector = selector => selector === 'dialog[open]' ? [...elements.values()].find(element => element.tagName === 'DIALOG' && element.open) || null : null;
     document.createElement = tag => {
       const element = new Element(); element.ownerDocument = document; element.tagName = tag.toUpperCase();
+      if (tag === 'iframe') element.contentWindow = { messages: [], postMessage(data, origin) { this.messages.push({ data, origin }); }, focus() { element.focus(); } };
       if (tag === 'canvas') {
         canvases.push(element);
         element.getContext = () => options.noCanvas ? null : { drawImage: image => { element.drawn = image; } };
@@ -107,9 +110,11 @@ export async function runWebCompletionTests(source, completionSource, promptSour
       remove() { if (this.parent) this.parent.children = this.parent.children.filter(child => child !== this); }
     });
     const get = document.getElementById;
+    get('workspace').rect = { top: 64, height: 704 };
+    get('composer-area').rect = { top: 600, height: 120 };
     get('image-preview').append(get('image-preview-content'));
     get('theme').options = [{ value: 'default' }]; get('font').options = [{ value: 'sans' }];
-    for (const id of ['completions', 'prompt-projection', 'queue', 'uploads', 'latest', 'toast', 'image-preview']) get(id).hidden = true;
+    for (const id of ['completions', 'prompt-projection', 'queue', 'uploads', 'latest', 'toast', 'image-preview', 'terminal-panel']) get(id).hidden = true;
     function event(value) { socket.fire('message', { data: JSON.stringify(value) }); }
     function reply(query, values, status = 'ok') {
       const prefix = query.get('resolve'), request = query.get('request');
@@ -133,17 +138,18 @@ export async function runWebCompletionTests(source, completionSource, promptSour
       close() { this.readyState = 0; this.fire('close'); }
     }
     const env = {
-      document, window, ImagePreviews: class extends ImagePreviews { constructor(...args) { super(...args); previews = this; } },
+      document, window, TerminalPanel, ImagePreviews: class extends ImagePreviews { constructor(...args) { super(...args); previews = this; } },
       WebSocket: Socket, TextEncoder: Encoder, TextDecoder: Decoder, URLSearchParams: Params,
-      URL: class { constructor() { this.searchParams = new Params(); } static createObjectURL() { const url = 'blob:test-image-' + (++serial); blobs.push(url); return url; } static revokeObjectURL(url) { revoked.push(url); } }, location: { href: 'http://localhost/', protocol: 'http:' },
+      URL: class extends globalThis.URL { static createObjectURL() { const url = 'blob:test-image-' + (++serial); blobs.push(url); return url; } static revokeObjectURL(url) { revoked.push(url); } }, location: { href: 'http://localhost/', protocol: 'http:', origin: 'http://localhost' },
       crypto: { getRandomValues(array) { return array.fill(++serial); } }, localStorage: { getItem() {}, setItem() {} },
-      ResizeObserver: class { observe() {} }, performance: { now: () => 0 },
+      ResizeObserver: class { constructor(fn) { this.fn = fn; this.targets = []; observers.push(this); } observe(target) { this.targets.push(target); } }, performance: { now: () => 0 },
       MarkdownStream: class { write() {} end() {} },
       fetch: async () => { options.beforeConfig?.(document); return { ok: true, json: async () => ({ images: options.images ? '1' : '0', ...options.config }) }; },
       setTimeout: (fn, delay) => { const id = ++serial; timers.set(id, { fn, delay }); return id; },
       clearTimeout: id => timers.delete(id)
     };
     window.URL = env.URL;
+    window.location = env.location; window.ResizeObserver = env.ResizeObserver;
     window.setTimeout = env.setTimeout; window.clearTimeout = env.clearTimeout;
     window.Blob = class { constructor(parts, settings) { this.parts = parts; this.type = settings.type; } };
     window.Image = class {
@@ -226,6 +232,7 @@ export async function runWebCompletionTests(source, completionSource, promptSour
     const ui = { get, prompt, input, type, key, idle, queries, reply, event, sent, socket, document, window, revoked, blobs, upload, previews, opened,
       socketURL: () => socket.url,
       copiedImages, clipboardCalls, canvases, decoded, finishDecode: () => pendingDecodes.shift()?.(),
+      resize: target => { for (const observer of observers) if (observer.targets.includes(target)) observer.fn(); },
       form: () => get('composer').fire('submit'), ghost: () => get('completion-ghost').textContent || '',
       timeout: delay => { for (const [id, timer] of [...timers]) if (timer.delay === delay) { timers.delete(id); timer.fn(); } } };
     return ui;
@@ -294,6 +301,118 @@ export async function runWebCompletionTests(source, completionSource, promptSour
     ui.window.fire('focus');
     const event = ui.document.fire('keydown', { target: dialog, key: 'Escape' });
     assert(!event.defaultPrevented && dialog.open && ui.document.activeElement === dialog, 'focus recovery interfered with the modal');
+  });
+  function openTerminal(ui) {
+    ui.event({ type: 'capabilities', terminal: '/terminal', edit: '1' }); shortcut(ui, 'terminal');
+    return ui.get('terminal-panel').children[0];
+  }
+  function terminalEvent(ui, data, source = ui.get('terminal-panel').children[0]?.contentWindow, origin = 'http://localhost') {
+    ui.window.fire('message', { data, source, origin });
+  }
+  await check('docked terminal leaves prompt and conversation live', async ui => {
+    const frame = openTerminal(ui);
+    assert(frame && !ui.opened.length && !ui.prompt.readOnly && !ui.get('terminal-panel').hidden, 'terminal opening blocked prompt or opened another tab');
+    assert(ui.document.activeElement === frame && frame.focusOptions.preventScroll, 'opening did not focus its terminal without scrolling');
+    ui.prompt.focus();
+    await ui.type('chat while shell runs'); ui.key('Enter'); await ui.idle();
+    assert(ui.sent() === 'chat while shell runs' && ui.get('terminal-panel').children[0] === frame, 'sending interfered with shell');
+    ui.event({ type: 'delta', id: 'live', role: 'user', text: 'feed continues' });
+    assert(ui.get('messages').children.at(-1).children[0].textContent === 'feed continues', 'terminal paused the feed');
+  });
+  await check('terminal uses 25 measured rows or one third of the viewport without hiding the prompt', async ui => {
+    openTerminal(ui);
+    terminalEvent(ui, { type: 'softline-terminal-size', rowHeight: 17, chromeHeight: 58 });
+    assert(ui.get('terminal-panel').style.height === '484px', 'panel did not reserve 25 measured rows plus chrome and border');
+    ui.window.innerHeight = 1800; ui.get('workspace').rect.height = 1736; ui.window.fire('resize');
+    assert(ui.get('terminal-panel').style.height === '600px', 'large viewport did not reserve a third');
+    ui.window.innerHeight = 420; ui.get('workspace').rect.height = 356; ui.window.fire('resize');
+    assert(parseFloat(ui.get('terminal-panel').style.height) <= 165, 'short viewport hid the prompt');
+    ui.get('composer-area').rect.height = 200; ui.resize(ui.get('composer-area'));
+    assert(parseFloat(ui.get('terminal-panel').style.height) <= 85, 'growing prompt overflowed the viewport');
+  });
+  await check('terminal messages validate source origin and bounded measurements', async ui => {
+    const frame = openTerminal(ui), height = ui.get('terminal-panel').style.height;
+    for (const data of [{ type: 'softline-terminal-size', rowHeight: Infinity, chromeHeight: 20 }, { type: 'softline-terminal-size', rowHeight: 0, chromeHeight: 20 }, { type: 'softline-terminal-size', rowHeight: 18, chromeHeight: -2 }]) terminalEvent(ui, data);
+    terminalEvent(ui, { type: 'softline-terminal-closed' }, frame.contentWindow, 'http://other.example');
+    terminalEvent(ui, { type: 'softline-terminal-closed' }, {});
+    assert(ui.get('terminal-panel').children[0] === frame && ui.get('terminal-panel').style.height === height, 'untrusted event affected the panel');
+    terminalEvent(ui, { type: 'softline-terminal-closed' });
+    assert(ui.get('terminal-panel').hidden && !ui.get('terminal-panel').children.length && ui.document.activeElement === ui.prompt, 'shell exit did not remove the panel and return focus');
+    assert(frame.contentWindow.messages.some(message => message.data.type === 'softline-terminal-stop'), 'closing did not request transport teardown');
+  });
+  await check('terminal follows theme changes and closing invalidates stale frame messages', async ui => {
+    const frame = openTerminal(ui); frame.fire('load');
+    assert(frame.contentWindow.messages.at(-1).data.theme === 'default', 'initial panel theme not synchronized');
+    ui.get('theme').value = 'monogreen'; ui.get('theme').fire('change');
+    assert(frame.contentWindow.messages.at(-1).data.theme === 'monogreen', 'live theme did not reach terminal');
+    shortcut(ui, 'terminal'); const replacement = openTerminal(ui);
+    terminalEvent(ui, { type: 'softline-terminal-closed' }, frame.contentWindow);
+    assert(ui.get('terminal-panel').children[0] === replacement, 'old shell exit closed its replacement');
+  });
+  await check('changing chat height follows the latest output only while follow is enabled', async ui => {
+    openTerminal(ui);
+    const scroll = ui.get('scroll'); scroll.scrollHeight = 1000; scroll.clientHeight = 250;
+    ui.resize(scroll); assert(scroll.scrollTop === 1000, 'opening panel lost latest-output following');
+    scroll.scrollTop = 100; scroll.fire('scroll');
+    scroll.clientHeight = 200; ui.resize(scroll);
+    assert(scroll.scrollTop === 100, 'resizing panel moved the reader away from older content');
+  });
+  await check('embedded chat uses its document base for mounted conversation and terminal routes', async ui => {
+    assert(ui.socketURL().pathname === '/nested/events', 'conversation endpoint ignored document base');
+    ui.event({ type: 'capabilities', terminal: '/nested/terminal' }); shortcut(ui, 'terminal');
+    assert(ui.get('terminal-panel').children[0].src === 'http://localhost/nested/terminal', 'terminal ignored mounted route');
+  }, { baseURI: 'http://localhost/nested/' });
+  await check('host prompt lock preserves the draft and scrolling while blocking sends edits and new images', async ui => {
+    await ui.type('keep this draft'); ui.prompt.setSelectionRange(2, 7);
+    ui.event({ type: 'prompt_state', disabled: '1', text: 'Agent waiting for shell' });
+    assert(ui.prompt.readOnly && ui.prompt.title === 'Agent waiting for shell' && ui.get('composer').dataset.disabled === '1' && ui.get('plus').disabled && ui.get('send').disabled, 'host lock did not dim/disable controls');
+    ui.input('discard'); ui.key('Enter'); ui.form(); ui.key('Enter', { shiftKey: true }); ui.get('plus').click();
+    ui.get('composer').fire('drop', { dataTransfer: { files: [{ name: 'ignored.png' }] } }); await ui.idle();
+    assert(ui.prompt.value === 'keep this draft' && ui.prompt.selectionStart === 2 && ui.prompt.selectionEnd === 7 && !ui.sent() && ui.get('completions').hidden, 'locked prompt changed or submitted');
+    assert(!ui.socket.sent.some(frame => frame.get('action') === 'image_begin'), 'locked prompt accepted an image');
+    ui.get('scroll').focus(); ui.get('scroll').scrollTop = 10; ui.document.fire('keydown', { key: 'Escape' });
+    assert(ui.document.activeElement === ui.get('scroll') && ui.get('scroll').scrollTop === 10, 'prompt lock interfered with scrolling/focus');
+    ui.event({ type: 'delta', id: 'locked-feed', role: 'user', text: 'still live' });
+    assert(ui.get('messages').children.at(-1).children[0].textContent === 'still live', 'lock stopped conversation updates');
+    ui.event({ type: 'prompt_state', disabled: '0' }); ui.prompt.setSelectionRange(15, 15); ui.key('Enter'); await ui.idle();
+    assert(ui.sent() === 'keep this draft' && !ui.prompt.readOnly && !ui.get('plus').disabled, 'host unlock did not restore input');
+  }, { images: true });
+  await check('host lock invalidates pending completion edits across an unlock', async ui => {
+    ui.input('@R'); ui.key('Tab'); ui.key(' ');
+    const pending = ui.queries()[0];
+    ui.event({ type: 'prompt_state', disabled: '1' });
+    ui.event({ type: 'prompt_state', disabled: '0' });
+    ui.reply(pending); await ui.idle();
+    assert(ui.prompt.value === '@R', 'late completion or queued input changed the suspended draft');
+  }, { manual: true });
+  await check('host lock retains literal filename completion metadata', async ui => {
+    ui.get('plus').click(); await ui.idle();
+    ui.event({ type: 'complete', request: ui.queries().at(-1).get('request'), label: '@literal.txt', value: '@literal.txt', start: '0', end: '0', continue: '0' });
+    ui.get('completions').children.find(item => item.textContent.includes('@literal.txt')).click(); await ui.idle();
+    assert(ui.prompt.value === '@literal.txt', 'literal filename fixture did not insert');
+    ui.event({ type: 'prompt_state', disabled: '1' }); ui.event({ type: 'prompt_state', disabled: '0' }); await ui.idle();
+    ui.form(); await ui.idle();
+    assert(ui.sent() === '@literal.txt', 'lock/unlock turned a literal filename into completion syntax');
+  });
+  await check('unlock after shell exit leaves subsequently focused controls alone', async ui => {
+    openTerminal(ui); ui.event({ type: 'prompt_state', disabled: '1' });
+    terminalEvent(ui, { type: 'softline-terminal-closed' });
+    ui.get('font').focus(); ui.event({ type: 'prompt_state', disabled: '0' });
+    assert(ui.document.activeElement === ui.get('font'), 'delayed host unlock stole user-selected focus');
+  });
+  await check('only the host unlocks a terminal-paused prompt and a new host clears stale locks', async ui => {
+    const frame = openTerminal(ui);
+    ui.event({ type: 'prompt_state', disabled: '1' });
+    terminalEvent(ui, { type: 'softline-terminal-closed' });
+    assert(ui.prompt.readOnly && ui.get('terminal-panel').hidden && ui.document.activeElement === ui.get('scroll'), 'shell exit overrode the host lock');
+    ui.event({ type: 'prompt_state', disabled: '0' });
+    assert(ui.document.activeElement === ui.prompt, 'unlock after terminal exit did not restore prompt focus');
+    ui.event({ type: 'prompt_state', disabled: '1' });
+    openTerminal(ui); ui.event({ type: 'session', id: 'new-host' });
+    assert(ui.get('terminal-panel').hidden && !ui.prompt.readOnly && !ui.get('plus').disabled, 'host restart retained old terminal or lock');
+    terminalEvent(ui, { type: 'softline-terminal-closed' }, frame.contentWindow);
+    ui.event({ type: 'prompt_state', disabled: '1', view: 'another-browser' });
+    assert(!ui.prompt.readOnly, 'another view locked this prompt');
   });
   await check('Escape closes the plus menu and its focus action restores the prompt', async ui => {
     ui.get('plus').focus(); ui.get('plus').click(); await ui.idle();
@@ -420,9 +539,10 @@ export async function runWebCompletionTests(source, completionSource, promptSour
     let items = ui.get('completions').children;
     assert(items.some(item => item.textContent.includes('Focus approvals') && item.textContent.includes('Ctrl+Shift+1')), 'approval shortcut is undiscoverable');
     assert(items.find(item => item.textContent.includes('Open terminal')).disabled, 'unavailable terminal was enabled');
-    shortcut(ui, 'terminal'); assert(!ui.opened.length, 'terminal launched without host support');
+    shortcut(ui, 'terminal'); assert(ui.get('terminal-panel').hidden, 'terminal launched without host support');
     ui.event({ type: 'capabilities', edit: '1', terminal: '/terminal' });
-    shortcut(ui, 'terminal'); assert(ui.opened[0]?.[0] === '/terminal' && ui.opened[0][2].includes('noopener'), 'terminal did not use the host endpoint');
+    shortcut(ui, 'terminal'); assert(!ui.get('terminal-panel').hidden && ui.get('terminal-panel').children[0]?.src === 'http://localhost/terminal' && !ui.opened.length, 'terminal did not dock the host endpoint');
+    shortcut(ui, 'terminal'); assert(ui.get('terminal-panel').hidden, 'terminal shortcut did not close its panel');
     queueState(ui, [{ id: 'a', revision: '1', held: '0' }]);
     shortcut(ui, 'edit'); assert(ui.get('queue-editor').open, 'edit shortcut did not open newest entry');
     ui.get('queue-edit-cancel').click();

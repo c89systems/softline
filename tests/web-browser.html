@@ -57,6 +57,7 @@ window.WebSocket=class extends EventTarget {
   static OPEN=1;
   constructor(){super();this.readyState=1;this.sent=[];window.softlineTestSocket=this;setTimeout(()=>{
     this.dispatchEvent(new Event('open'));
+    this.reply({type:'session',id:'browser-fixture'});
     for(const [trigger,scope,strip,expand] of [['@','word','1','1'],['/','start','0','1'],['h','start','0','0'],['v','word','0','0'],['n','word','0','0']])
       this.reply({type:'completion_provider',trigger,scope,strip,expand});
   },0)}
@@ -89,6 +90,35 @@ window.WebSocket=class extends EventTarget {
 frame.srcdoc=(await (await fetch('/')).text()).replace('<head>','<head>'+bootstrap);
 await uiCheck('actual frontend starts with mock host',async()=>{await waitFor(()=>frame.contentWindow.softlineTestSocket&&frame.contentDocument.querySelector('#connection')?.textContent==='Connected')});
 function event(value){const w=frame.contentWindow;w.softlineTestSocket.dispatchEvent(new w.MessageEvent('message',{data:JSON.stringify(value)}))}
+await uiCheck('terminal docks below the composer and fits short and tall viewports',async()=>{
+  const doc=frame.contentDocument,w=frame.contentWindow,p=doc.querySelector('#prompt');
+  let metrics;
+  const measured=e=>{if(e.source===doc.querySelector('#terminal-panel iframe')?.contentWindow&&e.origin===location.origin&&e.data?.type==='softline-terminal-size')metrics=e.data};
+  w.addEventListener('message',measured);
+  try{
+  event({type:'capabilities',terminal:'/terminal'});
+  p.dispatchEvent(new w.KeyboardEvent('keydown',{key:'`',code:'Backquote',ctrlKey:true,bubbles:true,cancelable:true}));
+  const panel=doc.querySelector('#terminal-panel');
+  await waitFor(()=>!panel.hidden&&panel.querySelector('iframe')?.contentDocument?.querySelector('.xterm-screen'));
+  const terminalFrame=panel.querySelector('iframe');
+  for(const height of [1400,500]){
+    frame.style.height=`${height}px`;
+    await new Promise(resolve=>setTimeout(resolve,150));
+    const terminal=terminalFrame.contentDocument.querySelector('.xterm-screen');
+    assert(panel.getBoundingClientRect().top>=doc.querySelector('#composer-area').getBoundingClientRect().bottom-1,'terminal covers composer');
+    assert(panel.getBoundingClientRect().bottom<=w.innerHeight+1,'terminal exceeds chat viewport');
+    assert(terminal.getBoundingClientRect().height>0,'terminal has no visible grid');
+    if(height===1400){await waitFor(()=>metrics);assert(terminal.getBoundingClientRect().height>=25*metrics.rowHeight-1,'tall viewport lost terminal rows')}
+  }
+  event({type:'prompt_state',disabled:'1',text:'Agent waiting for shell'});
+  assert(p.readOnly&&doc.querySelector('#composer').dataset.disabled==='1'&&!doc.querySelector('#scroll').inert,'lock disabled conversation scrolling');
+  terminalFrame.contentDocument.querySelector('#terminal-close').click();
+  await waitFor(()=>panel.hidden&&!panel.querySelector('iframe'));
+  assert(p.readOnly,'closing terminal overrode host lock');
+  }finally{
+    event({type:'capabilities',terminal:''});event({type:'prompt_state',disabled:'0'});frame.style.height='500px';w.removeEventListener('message',measured);
+  }
+});
 await uiCheck('thinking slot stays reserved across status changes',async()=>{
   event({type:'begin',id:'status-fixture',role:'assistant'});
   for(const width of [760,360]){

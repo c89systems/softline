@@ -130,6 +130,7 @@ Replies may omit `seq`.
 | `queue_item` | `id`, `revision`, `mode=queued/steer/pending`, `held=0/1` |
 | `queue_text` | `id`, `encoding=base64`, `data`; bounded text chunks |
 | `status` | Host-owned `text`, `busy=0/1`; a reserved single-line slot keeps layout stable, with long text ellipsized and available in its title |
+| `prompt_state` | Host-owned `disabled=0/1`, optional tooltip `text`; dim/lock the composer while retaining the draft, scrolling and feed. Send current state during reconnect/replay; optional `view` targets one browser |
 | `completion_provider` | Host registration: one-character `trigger`, `scope=start/word`, `strip=0/1`, `expand=0/1`; send on each connection |
 | `complete` | `request`, raw full `candidate` including trigger; explicit `+` menu also uses canonical `value`, `label`, `description`, UTF-8 byte `start`/`end`, optional `continue=1` |
 | `complete_end` | `request`, `status=ok/error`; completes one provider snapshot, including empty results |
@@ -168,7 +169,7 @@ The `+` menu also exposes queue and approval actions with shortcut hints:
 | Action | Browser shortcut (Control on every platform) |
 | --- | --- |
 | Return focus to the prompt | Esc (outside other text fields, selectors and dialogs) |
-| Open the host's terminal page | Ctrl+` |
+| Open/close the terminal panel | Ctrl+` (also works inside the terminal) |
 | Edit focused approval, otherwise newest queued entry | Ctrl+Shift+Enter |
 | Focus the oldest pending approval | Ctrl+Shift+1 |
 | Approve the focused request | Ctrl+Shift+2 |
@@ -206,7 +207,12 @@ reused queue IDs cannot redirect that old edit into the new conversation.
 
 The examples advertise queue editing. `make run-chat-queue-server` also enables
 the [browser terminal](web-terminal.md) at `/terminal` on its existing web port
-(8081 by default). Ctrl+` and the `+` menu open the locally served xterm.js page.
+(8081 by default). Ctrl+` and the `+` menu open the locally served xterm.js view
+in a bottom panel; closing it terminates its shell, and shell exit closes it.
+The conversation and prompt stay above the panel. Opening it leaves chat and
+input enabled. Hosts can explicitly dim/lock the composer with a `prompt_state`
+event (`disabled="1"`, optional tooltip `text`) and unlock with `disabled="0"`.
+They own the current state and its replay; the panel never overrides that lock.
 Each connection owns a new server PTY in the server's working directory;
 chat and other terminal sessions remain independent. The other chat examples
 leave this endpoint disabled. A host can advertise its own mounted terminal page
