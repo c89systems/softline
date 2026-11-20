@@ -110,7 +110,6 @@ static unsigned long reply_kind(demo_link_t *link) {
   if (link->count != 1)
     return 0;
   p = link->output[0];
-  p.offset = 4;
   return demo_number(&p);
 }
 static int store_message(demo_image_store_t *s, demo_link_t *link,

@@ -9,6 +9,7 @@ export CMAKE_BUILD_PARALLEL_LEVEL ?= 4
 
 ROOT_DIR := $(CURDIR)
 BUILD_DIR := $(ROOT_DIR)/build
+CBOR_BUILD_DIR := $(BUILD_DIR)/cbor-debug
 DIST_DIR  := $(ROOT_DIR)/dist
 CACHE_DIR := $(ROOT_DIR)/.cache
 
@@ -24,9 +25,11 @@ WEB_PORT ?= 8080
 QUEUE_WEB_PORT ?= 8081
 TERMINAL_SUPERVISOR = ./build/debug/examples/softline_terminal_supervisor --
 ifeq ($(CHAT_QUEUE),local)
+CHAT_BUILD = build-debug
 CHAT_COMMAND = $(TERMINAL_SUPERVISOR) ./build/debug/examples/example_chat
 else ifeq ($(CHAT_QUEUE),remote)
-CHAT_COMMAND = $(TERMINAL_SUPERVISOR) ./build/debug/examples/example_chat_remote "$(QUEUE_HOST)" "$(QUEUE_PORT)"
+CHAT_BUILD = build-cbor-debug
+CHAT_COMMAND = "$(CBOR_BUILD_DIR)/examples/softline_terminal_supervisor" -- "$(CBOR_BUILD_DIR)/examples/example_chat_remote" "$(QUEUE_HOST)" "$(QUEUE_PORT)"
 else
 $(error CHAT_QUEUE must be local or remote)
 endif
@@ -73,12 +76,17 @@ build: ## Build debug target
 .PHONY: build-debug
 build-debug: build ## Build debug target
 
+.PHONY: build-cbor-debug
+build-cbor-debug: ## Build with the opt-in CBOR TCP demos
+	@cmake --preset debug -B "$(CBOR_BUILD_DIR)" -DSL_ENABLE_CBOR_TCP=ON $(if $(SL_CBOR_SDK_PREFIXES),-DSL_CBOR_SDK_PREFIXES="$(SL_CBOR_SDK_PREFIXES)")
+	@cmake --build "$(CBOR_BUILD_DIR)"
+
 .PHONY: run-simple
 run-simple: build-debug ## Run C simple example (THEME=default|plain|...)
 	@$(EXAMPLE_THEME_ENV) $(TERMINAL_SUPERVISOR) ./build/debug/examples/example_simple
 
 .PHONY: run-chat
-run-chat: build-debug ## Run C chat example (Gruvbox by default; THEME=... overrides)
+run-chat: $(CHAT_BUILD) ## Run C chat example (Gruvbox by default; THEME=... overrides)
 	@SOFTLINE_PROMPT_THEME="$(if $(strip $(THEME)),$(THEME),gruvbox)" $(CHAT_DEMO_ENV) $(CHAT_COMMAND)
 
 .PHONY: run-chat-local run-chat-remote run-chat-queue-server
@@ -88,8 +96,8 @@ run-chat-local: ## Run chat with the native local queue
 run-chat-remote: ## Attach chat to the separate TCP queue owner
 	@SOFTLINE_WEB=1 SOFTLINE_WEB_PORT="$(WEB_PORT)" $(MAKE) run-chat CHAT_QUEUE=remote
 
-run-chat-queue-server: build-debug ## Run queue owner plus web chat/terminal from build/ (QUEUE_PORT=7635, QUEUE_WEB_PORT=8081)
-	@cd "$(BUILD_DIR)" && SOFTLINE_WEB=1 SOFTLINE_WEB_PORT="$(QUEUE_WEB_PORT)" $(CHAT_DEMO_ENV) ./debug/examples/example_queue_owner "$(QUEUE_PORT)"
+run-chat-queue-server: build-cbor-debug ## Run CBOR queue owner plus web chat/terminal (QUEUE_PORT=7635, QUEUE_WEB_PORT=8081)
+	@cd "$(BUILD_DIR)" && SOFTLINE_WEB=1 SOFTLINE_WEB_PORT="$(QUEUE_WEB_PORT)" $(CHAT_DEMO_ENV) "$(CBOR_BUILD_DIR)/examples/example_queue_owner" "$(QUEUE_PORT)"
 
 .PHONY: run-chat-web run-chat-web-only
 run-chat-web: build-debug ## Run local ANSI and web chat together (WEB_PORT=8080)
@@ -103,35 +111,35 @@ run-web-checks: build-debug ## Serve browser Markdown/chart checks; open the pri
 	@./build/debug/tests/www_browser_fixture ./tests/web-browser.html
 
 .PHONY: run-chat-default
-run-chat-default: build-debug ## Run C chat example with the default ANSI theme
+run-chat-default: $(CHAT_BUILD) ## Run C chat example with the default ANSI theme
 	@SOFTLINE_PROMPT_THEME="default" $(CHAT_DEMO_ENV) $(CHAT_COMMAND)
 
 .PHONY: run-chat-riced
-run-chat-riced: build-debug ## Run C chat example with the riced theme
+run-chat-riced: $(CHAT_BUILD) ## Run C chat example with the riced theme
 	@SOFTLINE_PROMPT_THEME="riced" $(CHAT_DEMO_ENV) $(CHAT_COMMAND)
 
 .PHONY: run-chat-without-delay
-run-chat-without-delay: build-debug ## Run default chat with no simulated producer delay
+run-chat-without-delay: $(CHAT_BUILD) ## Run default chat with no simulated producer delay
 	@SOFTLINE_CHAT_CHAR_MS=0 SOFTLINE_PROMPT_THEME=default $(CHAT_DEMO_ENV) $(CHAT_COMMAND)
 
 .PHONY: run-chat-without-delay-riced
-run-chat-without-delay-riced: build-debug ## Run riced chat with no simulated producer delay
+run-chat-without-delay-riced: $(CHAT_BUILD) ## Run riced chat with no simulated producer delay
 	@SOFTLINE_CHAT_CHAR_MS=0 SOFTLINE_PROMPT_THEME=riced $(CHAT_DEMO_ENV) $(CHAT_COMMAND)
 
 .PHONY: run-chat-plain
-run-chat-plain: build-debug ## Run C chat example with the uncoloured plain theme
+run-chat-plain: $(CHAT_BUILD) ## Run C chat example with the uncoloured plain theme
 	@SOFTLINE_PROMPT_THEME="plain" $(CHAT_DEMO_ENV) $(CHAT_COMMAND)
 
 .PHONY: run-chat-monogreen
-run-chat-monogreen: build-debug ## Run C chat example with the monogreen theme
+run-chat-monogreen: $(CHAT_BUILD) ## Run C chat example with the monogreen theme
 	@SOFTLINE_PROMPT_THEME="monogreen" $(CHAT_DEMO_ENV) $(CHAT_COMMAND)
 
 .PHONY: run-chat-monochrome
-run-chat-monochrome: build-debug ## Run C chat example with the monochrome theme
+run-chat-monochrome: $(CHAT_BUILD) ## Run C chat example with the monochrome theme
 	@SOFTLINE_PROMPT_THEME="monochrome" $(CHAT_DEMO_ENV) $(CHAT_COMMAND)
 
 .PHONY: run-chat-synthwave
-run-chat-synthwave: build-debug ## Run C chat example with the synthwave theme
+run-chat-synthwave: $(CHAT_BUILD) ## Run C chat example with the synthwave theme
 	@SOFTLINE_PROMPT_THEME="synthwave" $(CHAT_DEMO_ENV) $(CHAT_COMMAND)
 
 .PHONY: build-release

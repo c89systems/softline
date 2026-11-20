@@ -194,6 +194,15 @@ its acknowledged absolute path. Completed images remain in `build/`; set
 `SOFTLINE_CHAT_IMAGE_DIR` on the server to select another existing directory.
 See [image handover](image-paste.md#remote-chat-example) for limits and cleanup.
 
+The TCP examples opt in to [c89.systems' libcbor](https://github.com/c89systems/libcbor).
+Install the C89Cbor 0.2 SDK and its lonejson and cpkt SDK prerequisites for the
+build target. Pass their prefixes as a semicolon-separated
+`SL_CBOR_SDK_PREFIXES` to `make build-cbor-debug` or the TCP run targets.
+Direct CMake builds use `-DSL_ENABLE_CBOR_TCP=ON` and the same SDK prefixes.
+The Make targets use `build/cbor-debug`; run its tests with
+`ctest --test-dir build/cbor-debug --output-on-failure`. The default Softline
+build and local/web examples build independently of libcbor.
+
 Both commands accept `QUEUE_PORT` (default 7635). `QUEUE_HOST` must be numeric
 `127.0.0.1`: this unauthenticated example only binds loopback. The owner is
 explicitly volatile, not a production protocol or durable service. Restarting
@@ -205,13 +214,28 @@ An attachment supplies its prior request watermark when establishing a new
 namespace, keeping outcomes lost in an owner restart unknown and preventing
 readmission under an old identity. This does not provide durable queue storage.
 
-The example sends typed messages over plain TCP. Each frame starts with a
-four-byte, big-endian payload length. The payload identifies the message type
-and carries fields or chunk bytes. The example carries queue requests and
+The example sends one CBOR array per libcbor `C89CBOR_LENGTH32` record over
+plain TCP. Its first field is the unsigned message type, followed by unsigned
+integers, text, byte strings or null. Reply deltas use byte strings so UTF-8
+characters can span records. The example carries queue requests and
 snapshots, response Markdown and lifecycle events, image uploads, and PTY
 traffic. Remote shell handoffs use a dedicated connection to the same port.
-Downstream clients can implement the Softline queue backend callbacks over
-their own transport.
+
+The queue backend callback pins the request's existing recovery storage and
+enqueues field metadata. Socket readiness drains native libcbor encoder
+spans directly, including across partial writes. The reader decodes from a
+bounded socket buffer into typed fields and delivers a request only after
+its CBOR record validates. The outbound queue accounts for bytes without
+retaining a serialized frame. Large snapshots retain their typed fields,
+and image and PTY payloads retain at most their independently bounded chunks.
+
+For an application adapter, include `<softline/cbor.h>` with
+`SOFTLINE_CBOR_IMPLEMENTATION` in one translation unit and link that unit
+with `C89Cbor::static` or `C89Cbor::shared`. `sl_cbor_drain` works with the
+native `c89cbor_encoder` and `c89cbor_sink` interfaces. Use
+`sl_queue_backend_pin_request` inside the Softline request callback to keep
+the borrowed text fields valid until your encoder drains them. Downstream
+clients can use the same backend callbacks with their own adapter.
 
 Both C executables share the current chat frontend, preserving the v0.15.1
 interaction model while adding backend adapters: Softline renders the

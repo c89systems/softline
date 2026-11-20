@@ -108,7 +108,7 @@ static int remote_callback(void *context, sl_terminal_event_t *e) {
             }
           } else
             p.failed = 1;
-          status = p.failed || p.offset != p.length ? SL_ERROR_IO : SL_OK;
+          status = !demo_packet_done(&p) ? SL_ERROR_IO : SL_OK;
           demo_packet_free(&p);
           if (status != SL_OK)
             return status;
@@ -182,8 +182,8 @@ int demo_terminal_server_input(demo_terminal_server_t *s, demo_link_t *link,
     e.columns = (unsigned int)demo_number(p);
     if (kind == DEMO_PTY_OPEN)
       term = demo_string(p);
-    if (p->failed || p->offset != p->length || !e.rows || !e.columns ||
-        e.rows > 65535 || e.columns > 65535)
+    if (!demo_packet_done(p) || !e.rows || !e.columns || e.rows > 65535 ||
+        e.columns > 65535)
       return -1;
     if (kind == DEMO_PTY_OPEN) {
       sl_terminal_session_config_t config;

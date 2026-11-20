@@ -145,7 +145,7 @@ host's current response activity without adding a row.
 The server saves images in its starting working directory by default.
 `make run-chat-queue-server` starts it inside the checkout's `build/` directory,
 so default uploads stay out of the source tree. For direct invocation after
-building, use `(cd build && ./debug/examples/example_queue_owner 7635)`. Set
+building, use `(cd build && ./cbor-debug/examples/example_queue_owner 7635)`. Set
 `SOFTLINE_CHAT_IMAGE_DIR` on the server to choose another existing directory.
 Generated `softline-image-*.png` / `*.jpeg` files have mode 0600; clipboard names
 cannot select a destination. The server streams into the destination directory,

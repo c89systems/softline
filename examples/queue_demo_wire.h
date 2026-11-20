@@ -41,20 +41,36 @@ enum demo_message {
   DEMO_IMAGE_RESULT,
   DEMO_TERMINAL_STATE /* Text: conversation handoff count and prompt policy. */
 };
+#ifdef SOFTLINE_CBOR_TCP
+#include <softline/cbor.h>
+
+#define DEMO_INLINE_FIELDS 12
+typedef struct demo_field {
+  c89cbor_type type;
+  uint64_t value;
+  const void *bytes;
+} demo_field_t;
 typedef struct demo_packet {
-  unsigned char *data;
-  size_t length, offset, capacity;
+  demo_field_t fields[DEMO_INLINE_FIELDS], *heap;
+  size_t count, capacity, offset, body_size;
+  sl_queue_request_lease_t *lease;
   int failed;
 } demo_packet_t;
 typedef struct demo_link {
   int fd;
   unsigned char header[4];
-  size_t header_length;
+  size_t header_offset, send_field;
+  c89cbor_encoder encoder;
+  c89cbor_reader reader;
+  unsigned char buffer[C89CBOR_CHUNK];
+  size_t buffered, consumed, remaining, frame_size, string_read, item_count;
+  int send_phase, read_phase, reading_string, writer_live, reader_live;
   demo_packet_t input;
   demo_packet_t output[DEMO_OUT_MAX];
   size_t count, queued_bytes, input_limit;
 } demo_link_t;
 void demo_packet_free(demo_packet_t *packet);
+int demo_packet_done(const demo_packet_t *packet);
 void demo_put_number(demo_packet_t *packet, unsigned long number);
 void demo_put_string(demo_packet_t *packet, const char *text);
 void demo_put_bytes(demo_packet_t *packet, const char *bytes, size_t length);
@@ -65,6 +81,8 @@ const unsigned char *demo_image_bytes(demo_packet_t *packet, size_t *length);
 unsigned long demo_number(demo_packet_t *packet);
 const char *demo_string(demo_packet_t *packet);
 void demo_put_request(demo_packet_t *packet, const sl_queue_request_t *request);
+void demo_put_pinned_request(demo_packet_t *, sl_t *,
+                             const sl_queue_request_t *);
 void demo_get_request(demo_packet_t *packet, sl_queue_request_t *request);
 void demo_put_result(demo_packet_t *packet, const sl_queue_result_t *result);
 void demo_get_result(demo_packet_t *packet, sl_queue_result_t *result);
@@ -81,4 +99,5 @@ int demo_link_flush(demo_link_t *link);
  * Reads never fetch bytes belonging to a second frame. */
 int demo_link_read(demo_link_t *link, demo_packet_t *packet);
 int demo_nonblock(int fd);
+#endif
 #endif

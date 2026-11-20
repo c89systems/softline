@@ -64,6 +64,14 @@ struct chat_state {
   sl_transcript_id_t transcripts[2];
 };
 
+static void destroy_remote(struct chat_state *state) {
+#ifdef SOFTLINE_CBOR_TCP
+  demo_client_destroy(state->remote);
+#else
+  (void)state;
+#endif
+}
+
 static int start_operation(struct chat_state *state);
 static int dispatch_next_turn(struct chat_state *state);
 static int sync_geometry(struct chat_state *state);
@@ -142,9 +150,12 @@ static int run_shell(struct chat_state *state, int preserve_draft) {
   demo_www_set_terminal_handoffs(web, state->terminal_upstream + 1);
   if (web)
     (void)demo_www_poll(web, 0);
-  status = state->remote
-               ? demo_client_terminal(state->remote, state->sl, &exit_status)
-               : sl_terminal_local(state->sl, NULL, &exit_status);
+#ifdef SOFTLINE_CBOR_TCP
+  if (state->remote)
+    status = demo_client_terminal(state->remote, state->sl, &exit_status);
+  else
+#endif
+    status = sl_terminal_local(state->sl, NULL, &exit_status);
   demo_www_set_terminal_handoffs(web, state->terminal_upstream);
   if (web)
     (void)demo_www_poll(web, 0);
@@ -194,6 +205,7 @@ static int shell_editor_key(sl_t *sl, sl_key_t key, void *userdata,
                             sl_key_action_t *action) {
   struct chat_state *state = (struct chat_state *)userdata;
   (void)key;
+#ifdef SOFTLINE_CBOR_TCP
   if (state->remote) {
     int result;
     *action = SL_KEY_ACTION_HANDLED;
@@ -208,6 +220,7 @@ static int shell_editor_key(sl_t *sl, sl_key_t key, void *userdata,
           "Shell is unavailable while disconnected; retrying automatically.");
     return result;
   }
+#endif
   *action = state->busy ? SL_KEY_ACTION_HANDLED : SL_KEY_ACTION_SUSPEND;
   return state->busy
              ? set_chat_message(sl, "Shell is available only between turns.")
@@ -739,12 +752,14 @@ static void approval_demo_idle(sl_t *sl, void *userdata) {
   int result = SL_OK;
   if (demo_web_tick(state->web))
     state->demo_failed = 1;
+#ifdef SOFTLINE_CBOR_TCP
   if (state->remote) {
     if (demo_client_idle(state->remote) != SL_OK)
       state->demo_failed = 1;
     demo_web_queue(state->web);
     return;
   }
+#endif
   if (now < 0)
     result = SL_ERROR_IO;
   else if (state->approval_demo && now >= state->next_injection) {
@@ -935,6 +950,7 @@ static void report_failure(struct chat_state *state, const char *operation) {
     (void)fcntl(STDERR_FILENO, F_SETFL, flags);
 }
 
+#ifdef SOFTLINE_CBOR_TCP
 static int remote_event(void *context, int kind, const char *text) {
   struct chat_state *state = context;
   size_t i;
@@ -1115,6 +1131,7 @@ static int reconnect_editor(sl_t *sl, sl_key_t key, void *context,
   return demo_client_reconnect(state->remote);
 }
 
+#endif
 static int web_submit(void *context, const char *text, int steer,
                       sl_queue_request_id_t *request_id) {
   struct chat_state *state = context;
@@ -1158,8 +1175,10 @@ static int web_control(void *context, const char *action, const char *id,
                        const char *revision) {
   struct chat_state *state = context;
   if (!strcmp(action, "cancel")) {
+#ifdef SOFTLINE_CBOR_TCP
     if (state->remote)
       return demo_client_cancel(state->remote);
+#endif
     return sl_prompt_queue_stop(state->sl) == SL_OK && !cancel_operation(state)
                ? SL_OK
                : SL_ERROR;
@@ -1186,11 +1205,13 @@ static int web_control(void *context, const char *action, const char *id,
                : sl_prompt_queue_reject(state->sl, value);
   }
 }
+#ifdef SOFTLINE_CBOR_TCP
 static int web_image(void *context, sl_t *source,
                      const sl_image_paste_event_t *event) {
   struct chat_state *state = context;
   return demo_client_image_event(state->remote, source, event);
 }
+#endif
 static int web_edit(void *context, const char *id, const char *revision,
                     const char *text, const char *token,
                     sl_prompt_queue_mode_t mode, sl_queue_request_id_t *out) {
@@ -1238,10 +1259,12 @@ static int web_edit(void *context, const char *id, const char *revision,
   }
   return SL_ERROR_CONFLICT;
 }
+#ifdef SOFTLINE_CBOR_TCP
 static void web_result(void *context, const sl_queue_result_t *result) {
   struct chat_state *state = context;
   demo_web_result(state->web, result);
 }
+#endif
 static volatile sig_atomic_t web_quit;
 static void stop_web(int signum) {
   (void)signum;
@@ -1304,6 +1327,7 @@ int main(int argc, char **argv) {
     interactive = 1;
   state.interactive = interactive;
   exit_code = 0;
+#ifdef SOFTLINE_CBOR_TCP
   if (argc == 3) {
     sl_config_t config;
     char *end;
@@ -1322,11 +1346,13 @@ int main(int argc, char **argv) {
     config.queue_backend = demo_client_backend(state.remote);
     config.queue_backend_context = state.remote;
     if (demo_client_image_config(state.remote, &config) != SL_OK) {
-      demo_client_destroy(state.remote);
+      destroy_remote(&state);
       return 1;
     }
     state.sl = sl_create_with_config(&config);
-  } else if (state.web_only) {
+  } else
+#endif
+      if (state.web_only) {
     sl_config_t config;
     state.null_fd = open("/dev/null", O_RDWR);
     if (state.null_fd < 0)
@@ -1337,12 +1363,18 @@ int main(int argc, char **argv) {
   } else if (argc == 1)
     state.sl = sl_create();
   else {
+#ifdef SOFTLINE_CBOR_TCP
     fprintf(stderr, "usage: %s [127.0.0.1 PORT | --web-only]\n", argv[0]);
+#else
+    fprintf(stderr,
+            "usage: %s [--web-only]. TCP chat requires SL_ENABLE_CBOR_TCP.\n",
+            argv[0]);
+#endif
     return 1;
   }
   if (!state.sl) {
     fprintf(stderr, "failed to create softline\n");
-    demo_client_destroy(state.remote);
+    destroy_remote(&state);
     return 1;
   }
   {
@@ -1360,7 +1392,7 @@ int main(int argc, char **argv) {
             "SOFTLINE_QUEUE_DISPLAY_DELAY_MS must be an integer from 0 to %d\n",
             INT_MAX);
         sl_destroy(state.sl);
-        demo_client_destroy(state.remote);
+        destroy_remote(&state);
         return 1;
       }
     }
@@ -1376,20 +1408,20 @@ int main(int argc, char **argv) {
       else if (strcmp(links, "auto")) {
         fprintf(stderr, "SOFTLINE_OSC8 must be off, on or auto\n");
         sl_destroy(state.sl);
-        demo_client_destroy(state.remote);
+        destroy_remote(&state);
         return 1;
       }
     }
     if (sl_set_osc8_mode(state.sl, mode) != SL_OK) {
       sl_destroy(state.sl);
-      demo_client_destroy(state.remote);
+      destroy_remote(&state);
       return 1;
     }
   }
   if (demo_completion_setup(state.sl, 1) != SL_OK) {
     report_failure(&state, "completion setup");
     sl_destroy(state.sl);
-    demo_client_destroy(state.remote);
+    destroy_remote(&state);
     return 1;
   }
   if (sl_history_open(state.sl, "softline.examples.chat",
@@ -1397,7 +1429,7 @@ int main(int argc, char **argv) {
       sl_history_set_auto_add(state.sl, 1) != SL_OK) {
     report_failure(&state, "history setup");
     sl_destroy(state.sl);
-    demo_client_destroy(state.remote);
+    destroy_remote(&state);
     return 1;
   }
   state.columns = mdf_terminal_width(STDOUT_FILENO, 80);
@@ -1409,8 +1441,10 @@ int main(int argc, char **argv) {
     ops.control = web_control;
     ops.edit = web_edit;
     ops.terminal_unlock_command = "/terminal-lock off";
+#ifdef SOFTLINE_CBOR_TCP
     if (state.remote)
       ops.image = web_image;
+#endif
     state.web = demo_web_open(state.sl, &ops, &state, 8080, &enabled);
     if ((enabled && !state.web) || (state.web_only && !enabled)) {
       fprintf(stderr, "web listener: %s\n",
@@ -1427,8 +1461,10 @@ int main(int argc, char **argv) {
     if (state.web)
       fprintf(stderr, "WEB http://127.0.0.1:%u\n",
               (unsigned int)demo_web_port(state.web));
+#ifdef SOFTLINE_CBOR_TCP
     if (state.web && state.remote)
       demo_client_results(state.remote, web_result, &state);
+#endif
   }
   if (interactive)
     (void)signal(SIGINT, keep_chat_on_interrupt);
@@ -1487,6 +1523,7 @@ int main(int argc, char **argv) {
       exit_code = 1;
       goto cleanup;
     }
+#ifdef SOFTLINE_CBOR_TCP
     if (state.remote) {
       demo_client_events(state.remote, remote_event, &state);
       demo_client_options(state.remote, character_delay_us(),
@@ -1507,6 +1544,7 @@ int main(int argc, char **argv) {
         goto cleanup;
       }
     }
+#endif
     if (render_note(
             &state,
             "Enter sends or queues; Alt-Enter steers or promotes; "
@@ -1567,6 +1605,7 @@ int main(int argc, char **argv) {
     if (!line) {
       status = sl_last_readline_status(state.sl);
       if (status == SL_READLINE_SUSPENDED) {
+#ifdef SOFTLINE_CBOR_TCP
         if (state.remote) {
           if (!state.remote_shell) {
             exit_code = 1;
@@ -1574,20 +1613,24 @@ int main(int argc, char **argv) {
           }
           demo_client_pause(state.remote);
         }
+#endif
         if (run_shell(&state, 1) != 0) {
           report_failure(&state, "shell handoff");
           exit_code = 1;
           break;
         }
+#ifdef SOFTLINE_CBOR_TCP
         if (state.remote) {
           state.remote_shell = 0;
           (void)demo_client_reconnect(state.remote);
         }
+#endif
         continue;
       }
       if (status == SL_READLINE_CANCELLED ||
           status == SL_READLINE_INTERRUPTED) {
         cancelled_busy = interactive && state.busy;
+#ifdef SOFTLINE_CBOR_TCP
         if (state.remote) {
           state.shell_requested = 0;
           if (demo_client_cancel(state.remote) != SL_OK) {
@@ -1599,6 +1642,7 @@ int main(int argc, char **argv) {
           (void)finish_response_document(&state);
           (void)set_busy(&state, 0);
         }
+#endif
         if ((cancelled_busy && !state.remote &&
              cancel_operation(&state) != 0) ||
             (interactive &&
@@ -1678,7 +1722,9 @@ int main(int argc, char **argv) {
   }
 
 cleanup:
+#ifdef SOFTLINE_CBOR_TCP
   demo_client_results(state.remote, NULL, NULL);
+#endif
   demo_web_close(state.web);
   state.web = NULL;
   if (state.reconnect_watch)
@@ -1696,7 +1742,7 @@ cleanup:
       (void)state.sl->output_stream_end(state.sl);
     sl_destroy(state.sl);
   }
-  demo_client_destroy(state.remote);
+  destroy_remote(&state);
   if (state.null_fd >= 0)
     close(state.null_fd);
   return exit_code;

@@ -14,10 +14,18 @@ typedef struct demo_image_store {
 int demo_image_limit(size_t *limit);
 int demo_image_store_init(demo_image_store_t *store);
 void demo_image_store_close(demo_image_store_t *store);
+typedef int (*demo_image_reply_fn)(void *, unsigned long, size_t, const char *,
+                                   const char *);
+int demo_image_store_apply(demo_image_store_t *, const sl_image_paste_event_t *,
+                           double now, demo_image_reply_fn, void *);
+double demo_image_store_due(const demo_image_store_t *store);
+int demo_image_store_timeout(demo_image_store_t *, double, demo_image_reply_fn,
+                             void *);
+#ifdef SOFTLINE_CBOR_TCP
 int demo_image_store_input(demo_image_store_t *store, demo_link_t *link,
                            unsigned long kind, demo_packet_t *packet,
                            double now);
-double demo_image_store_due(const demo_image_store_t *store);
 int demo_image_store_tick(demo_image_store_t *store, demo_link_t *link,
                           double now);
+#endif
 #endif

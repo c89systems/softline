@@ -152,7 +152,9 @@ static int receive(peer_t *p) {
              kind == DEMO_SEGMENT_END || kind == DEMO_MESSAGE ||
              kind == DEMO_NOTE || kind == DEMO_SHELL || kind == DEMO_QUIT ||
              kind == DEMO_TERMINAL_STATE) {
-    const char *text = demo_string(&packet);
+    size_t length;
+    const char *text = kind == DEMO_OUTPUT ? demo_bytes(&packet, &length)
+                                           : demo_string(&packet);
     if (kind == DEMO_RESPONSE_BEGIN)
       p->active = 1;
     if (kind == DEMO_OUTPUT_END)
@@ -179,7 +181,7 @@ static int receive(peer_t *p) {
     }
   } else
     goto fail;
-  if (packet.failed || packet.offset != packet.length)
+  if (!demo_packet_done(&packet))
     goto fail;
   demo_packet_free(&packet);
   return 0;
@@ -575,20 +577,21 @@ static int frontend_case(peer_t *p, unsigned short port) {
   return 0;
 }
 static int framing(void) {
+  static const unsigned char payload[] = {0x81, 0x64, 't', 'e', 's', 't'};
   int pair[2], i;
   demo_link_t link;
   demo_packet_t packet = {0}, received = {0};
   uint32_t length;
   CHECK(!socketpair(AF_UNIX, SOCK_STREAM, 0, pair) && !demo_nonblock(pair[0]));
   demo_link_init(&link, pair[0]);
-  length = htonl(4);
+  length = htonl(sizeof(payload));
   CHECK(write(pair[1], &length, 2) == 2 &&
         demo_link_read(&link, &received) == 0);
   CHECK(write(pair[1], (char *)&length + 2, 2) == 2 &&
         demo_link_read(&link, &received) == 0);
-  CHECK(write(pair[1], "test", 4) == 4 &&
+  CHECK(write(pair[1], payload, sizeof(payload)) == (ssize_t)sizeof(payload) &&
         demo_link_read(&link, &received) == 1);
-  CHECK(received.length == 4 && !memcmp(received.data, "test", 4));
+  CHECK(!strcmp(demo_string(&received), "test") && demo_packet_done(&received));
   demo_packet_free(&received);
   demo_put_number(&packet, DEMO_PTY_DATA);
   demo_put_bytes(&packet, "\000\033\377", 3);

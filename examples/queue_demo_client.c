@@ -210,7 +210,7 @@ static int image_receive(demo_client_t *c, unsigned long kind,
     path = demo_string(p);
     reason = demo_string(p);
   }
-  if (p->failed || p->offset != p->length || !id ||
+  if (!demo_packet_done(p) || !id ||
       (kind == DEMO_IMAGE_RESULT && ((!path && !reason) || (path && reason))))
     return -1;
   if (id != c->image_wire_id || !c->image_editor)
@@ -283,13 +283,23 @@ static int request(void *context, const sl_queue_request_t *r) {
   if (!c->connected)
     return SL_ERROR_NOT_READY;
   c->idle_announced = 0;
-  demo_put_request(&p, r);
+  demo_put_pinned_request(&p, c->editor, r);
+  if (p.failed) {
+    demo_packet_free(&p);
+    return SL_ERROR_FULL;
+  }
+  /* Wake before transferring the packet so a wake failure cannot leave a
+   * queued request that Softline was told had failed. */
+  if (wake(c) != SL_OK) {
+    demo_packet_free(&p);
+    return SL_ERROR_IO;
+  }
   if (demo_link_queue(&c->link, &p)) {
     demo_packet_free(&p);
     return SL_ERROR_FULL;
   }
   /* No editor calls, network waits or socket I/O on this callback path. */
-  return wake(c);
+  return SL_OK;
 }
 static void detach(void *context) {
   demo_client_t *c = context;
@@ -334,7 +344,7 @@ static int receive(demo_client_t *c, demo_packet_t *p) {
   if (kind == DEMO_RESULT) {
     sl_queue_result_t r;
     demo_get_result(p, &r);
-    if (p->failed || p->offset != p->length)
+    if (!demo_packet_done(p))
       return -1;
     status = sl_queue_backend_result(c->editor, &r);
     if (status == SL_OK && c->result)
@@ -344,7 +354,7 @@ static int receive(demo_client_t *c, demo_packet_t *p) {
   } else if (kind == DEMO_CHANGE) {
     sl_queue_change_t change;
     if (demo_get_change(p, &change, c->entries, DEMO_ITEM_MAX) ||
-        p->offset != p->length)
+        !demo_packet_done(p))
       return -1;
     status = sl_queue_backend_update(c->editor, &change);
     if (status == SL_ERROR_CONFLICT)
@@ -361,8 +371,11 @@ static int receive(demo_client_t *c, demo_packet_t *p) {
              kind == DEMO_SEGMENT_END || kind == DEMO_MESSAGE ||
              kind == DEMO_NOTE || kind == DEMO_SHELL || kind == DEMO_QUIT ||
              kind == DEMO_TERMINAL_STATE) {
-    const char *text = demo_string(p);
-    if (p->failed || p->offset != p->length ||
+    size_t length;
+    const char *text =
+        kind == DEMO_OUTPUT ? demo_bytes(p, &length) : demo_string(p);
+    if (!demo_packet_done(p) ||
+        (kind == DEMO_OUTPUT && text && memchr(text, 0, length)) ||
         (!text &&
          (kind == DEMO_PROMPT || kind == DEMO_OUTPUT || kind == DEMO_NOTE)))
       return -1;

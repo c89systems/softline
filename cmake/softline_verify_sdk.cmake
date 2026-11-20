@@ -40,7 +40,7 @@ if(NOT IS_DIRECTORY "${SDK_ROOT}/lib")
   set(libdir lib64)
 endif()
 set(files include/softline/softline.h include/softline/softline_version.h
-  include/softline/terminal.h include/softline/transcript.h include/softline/www.h
+  include/softline/cbor.h include/softline/terminal.h include/softline/transcript.h include/softline/www.h
   ${libdir}/libsoftline.a ${libdir}/pkgconfig/softline.pc
   ${libdir}/cmake/softline/softlineConfig.cmake
   ${libdir}/cmake/softline/softlineConfigVersion.cmake

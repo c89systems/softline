@@ -85,45 +85,31 @@ void demo_image_store_close(demo_image_store_t *s) {
    */
   release(s, 1);
 }
-static int reply(demo_link_t *link, unsigned long kind, unsigned long id,
-                 size_t offset, const char *path, const char *reason) {
-  demo_packet_t p = {0};
-  int result;
-  demo_put_number(&p, kind);
-  demo_put_number(&p, id);
-  if (kind == DEMO_IMAGE_READY)
-    demo_put_number(&p, (unsigned long)offset);
-  else {
-    demo_put_string(&p, path);
-    demo_put_string(&p, reason);
-  }
-  result = demo_link_queue(link, &p);
-  demo_packet_free(&p);
-  return result;
-}
-static int failure(demo_image_store_t *s, demo_link_t *link,
-                   const char *reason) {
+static int failure(demo_image_store_t *s, demo_image_reply_fn reply,
+                   void *context, const char *reason) {
   unsigned long id = s->id;
   release(s, 0);
-  return reply(link, DEMO_IMAGE_RESULT, id, 0, NULL, reason);
+  return reply(context, id, 0, NULL, reason);
 }
-int demo_image_store_input(demo_image_store_t *s, demo_link_t *link,
-                           unsigned long kind, demo_packet_t *p, double now) {
-  unsigned long id = demo_number(p);
-  if (p->failed || !id)
+int demo_image_store_apply(demo_image_store_t *s,
+                           const sl_image_paste_event_t *e, double now,
+                           demo_image_reply_fn reply, void *context) {
+  unsigned long id = e->id;
+  int kind = e->operation;
+  if (!id)
     return -1;
-  if (kind == DEMO_IMAGE_BEGIN) {
-    const char *mime = demo_string(p);
+  if (kind == SL_IMAGE_PASTE_BEGIN) {
+    const char *mime = e->media_type;
     const char *extension;
     size_t length;
-    if (p->failed || p->offset != p->length || s->id || !mime)
+    if (s->id || !mime)
       return -1;
     if (!strcmp(mime, "image/png"))
       extension = ".png";
     else if (!strcmp(mime, "image/jpeg"))
       extension = ".jpeg";
     else
-      return reply(link, DEMO_IMAGE_RESULT, id, 0, NULL,
+      return reply(context, id, 0, NULL,
                    "server accepts PNG and JPEG images only");
     s->id = id;
     s->started = s->progress = now;
@@ -132,22 +118,21 @@ int demo_image_store_input(demo_image_store_t *s, demo_link_t *link,
     s->fd = mkstemp(s->temporary);
     if (s->fd < 0) {
       s->temporary[0] = 0;
-      return failure(s, link, "server could not create image");
+      return failure(s, reply, context, "server could not create image");
     }
     if (fcntl(s->fd, F_SETFD, FD_CLOEXEC))
-      return failure(s, link, "server could not protect image descriptor");
+      return failure(s, reply, context,
+                     "server could not protect image descriptor");
     length = strlen(s->temporary);
     (void)snprintf(s->path, sizeof(s->path), "%s/softline-image-%s%s",
                    s->directory, s->temporary + length - 6, extension);
-    return reply(link, DEMO_IMAGE_READY, id, 0, NULL, NULL);
+    return reply(context, id, 0, NULL, NULL);
   }
-  if (kind == DEMO_IMAGE_ABORT || kind == DEMO_IMAGE_DONE) {
-    if (p->offset != p->length)
-      return -1;
+  if (kind == SL_IMAGE_PASTE_ABORT || kind == SL_IMAGE_PASTE_DONE) {
     if (id == s->id) {
-      if (kind == DEMO_IMAGE_DONE && !s->published)
+      if (kind == SL_IMAGE_PASTE_DONE && !s->published)
         return -1;
-      release(s, kind == DEMO_IMAGE_DONE);
+      release(s, kind == SL_IMAGE_PASTE_DONE);
     }
     return 0;
   }
@@ -155,45 +140,43 @@ int demo_image_store_input(demo_image_store_t *s, demo_link_t *link,
     /* Ignore already rejected/cancelled traffic still in the TCP stream. */
     return 0;
   }
-  if (kind == DEMO_IMAGE_DATA) {
-    unsigned long offset = demo_number(p);
-    size_t length, at = 0;
-    const unsigned char *bytes = demo_image_bytes(p, &length);
-    if (p->failed || s->published || offset != s->received)
-      return failure(s, link, "invalid image chunk or offset");
+  if (kind == SL_IMAGE_PASTE_DATA) {
+    size_t length = e->length, at = 0;
+    const unsigned char *bytes = e->data;
+    if (!length || !bytes || s->published || e->offset != s->received)
+      return failure(s, reply, context, "invalid image chunk or offset");
     if (length > s->limit - s->received)
-      return failure(s, link, "image exceeds server byte limit");
+      return failure(s, reply, context, "image exceeds server byte limit");
     while (at < length) {
       ssize_t written = write(s->fd, bytes + at, length - at);
       if (written < 0 && errno == EINTR)
         continue;
       if (written <= 0)
-        return failure(s, link, "server image write failed");
+        return failure(s, reply, context, "server image write failed");
       at += (size_t)written;
     }
     s->received += length;
     s->progress = now;
-    return reply(link, DEMO_IMAGE_READY, id, s->received, NULL, NULL);
+    return reply(context, id, s->received, NULL, NULL);
   }
-  if (kind == DEMO_IMAGE_END) {
-    unsigned long length = demo_number(p);
+  if (kind == SL_IMAGE_PASTE_END) {
+    size_t length = e->offset;
     int failed;
-    if (p->failed || p->offset != p->length || s->published ||
-        length != s->received || !length)
-      return failure(s, link, "invalid image end or byte count");
+    if (s->published || length != s->received || !length)
+      return failure(s, reply, context, "invalid image end or byte count");
     failed = fsync(s->fd);
     if (close(s->fd))
       failed = 1;
     s->fd = -1;
     /* link publishes atomically without overwriting an existing destination. */
     if (failed || linkat(AT_FDCWD, s->temporary, AT_FDCWD, s->path, 0))
-      return failure(s, link, "server image publication failed");
+      return failure(s, reply, context, "server image publication failed");
     s->published = 1;
     if (unlink(s->temporary))
-      return failure(s, link, "server image publication failed");
+      return failure(s, reply, context, "server image publication failed");
     s->temporary[0] = 0;
     s->progress = now;
-    return reply(link, DEMO_IMAGE_RESULT, id, 0, s->path, NULL);
+    return reply(context, id, 0, s->path, NULL);
   }
   return -1;
 }
@@ -205,10 +188,10 @@ double demo_image_store_due(const demo_image_store_t *s) {
    * Keep this one bounded record until DONE, ABORT or disconnect. */
   return s->id && !s->published ? due : 0;
 }
-int demo_image_store_tick(demo_image_store_t *s, demo_link_t *link,
-                          double now) {
+int demo_image_store_timeout(demo_image_store_t *s, double now,
+                             demo_image_reply_fn reply, void *context) {
   double due = demo_image_store_due(s);
-  if (!due || now < due)
-    return 0;
-  return failure(s, link, "server image upload timed out");
+  return due && now >= due
+             ? failure(s, reply, context, "server image upload timed out")
+             : 0;
 }

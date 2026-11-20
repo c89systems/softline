@@ -740,7 +740,9 @@ int main(int argc, char **argv) {
   pid_t child = -1, owner = -1;
   int slave = -1, dual, charts, edits, approvals, terminal, terminal_lock,
       handoff, failed_handoff, gate[2] = {-1, -1};
+#ifdef SOFTLINE_CBOR_TCP
   demo_link_t approval_link;
+#endif
   char epoch[96];
   const char *mode = argc >= 4 ? argv[3] : "";
   unsigned short queue_port = 0;
@@ -749,7 +751,9 @@ int main(int argc, char **argv) {
   static const unsigned char png[16] = {137, 80,  78, 71, 13, 10, 26, 10,
                                         0,   255, 1,  2,  3,  4,  5,  6};
   (void)signal(SIGPIPE, SIG_IGN);
+#ifdef SOFTLINE_CBOR_TCP
   demo_link_init(&approval_link, -1);
+#endif
   CHECK((argc == 2 || argc == 4 || argc == 5) && data && http);
   if (argc == 2) {
     int enabled;
@@ -935,6 +939,7 @@ int main(int argc, char **argv) {
     CHECK(read_all(pipes[0], &port, sizeof(port)) == 0);
   close(pipes[0]);
   pipes[0] = -1;
+#ifdef SOFTLINE_CBOR_TCP
   if (approvals && !strcmp(mode, "owner")) {
     demo_packet_t hello = {0};
     int native = connect_to(queue_port);
@@ -950,6 +955,7 @@ int main(int argc, char **argv) {
     CHECK(!demo_link_queue(&approval_link, &hello) &&
           !demo_link_flush(&approval_link));
   }
+#endif
   fd = connect_to(port);
   CHECK(fd >= 0);
   CHECK(write_all(fd, "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n", 35) == 0);
@@ -1006,9 +1012,13 @@ int main(int argc, char **argv) {
     }
   }
   if (terminal) {
+#ifdef SOFTLINE_CBOR_TCP
     CHECK(!terminal_roundtrip(port, queue_port, one, root, terminal_lock, data,
                               SL_WWW_FRAME_MAX + 1));
     failed = 0;
+#else
+    CHECK(0);
+#endif
     goto cleanup;
   }
   if (handoff) {
@@ -1454,7 +1464,9 @@ int main(int argc, char **argv) {
   }
   failed = 0;
 cleanup:
+#ifdef SOFTLINE_CBOR_TCP
   demo_link_close(&approval_link);
+#endif
   if (gate[0] >= 0)
     close(gate[0]);
   if (gate[1] >= 0)

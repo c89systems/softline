@@ -21,10 +21,9 @@ typedef struct web_view {
   size_t length, offset, expected, received;
   int begun, ended, source_closed, credit, done, aborted, inflight;
   demo_image_store_t store;
-  demo_link_t storage_reply;
-  demo_packet_t storage_pending;
-  unsigned long storage_kind;
-  int storage_paused;
+  sl_image_paste_event_t storage_pending;
+  unsigned char storage_bytes[SL_WWW_CHUNK_MAX];
+  int storage_ready, storage_paused;
 } web_view_t;
 typedef struct web_queue_item {
   char id[128], revision[128];
@@ -132,40 +131,21 @@ static const char *source_error(void *context) {
   return "browser image source failed";
 }
 static int local_image(web_view_t *v, const sl_image_paste_event_t *e) {
-  demo_packet_t p = {0};
-  unsigned long kind;
-  if (v->storage_pending.data) {
+  if (v->storage_ready) {
     if (e->operation == SL_IMAGE_PASTE_DATA) {
       v->storage_paused = 1;
       return SL_ERROR_NOT_READY;
     }
     return SL_ERROR_FULL;
   }
-  if (e->operation == SL_IMAGE_PASTE_BEGIN)
-    kind = DEMO_IMAGE_BEGIN;
-  else if (e->operation == SL_IMAGE_PASTE_DATA)
-    kind = DEMO_IMAGE_DATA;
-  else if (e->operation == SL_IMAGE_PASTE_END)
-    kind = DEMO_IMAGE_END;
-  else if (e->operation == SL_IMAGE_PASTE_ABORT)
-    kind = DEMO_IMAGE_ABORT;
-  else
-    kind = DEMO_IMAGE_DONE;
-  demo_put_number(&p, e->id);
-  if (kind == DEMO_IMAGE_BEGIN)
-    demo_put_string(&p, e->media_type);
-  else if (kind == DEMO_IMAGE_DATA) {
-    demo_put_number(&p, (unsigned long)e->offset);
-    demo_put_image_bytes(&p, e->data, e->length);
-  } else if (kind == DEMO_IMAGE_END)
-    demo_put_number(&p, (unsigned long)e->offset);
-  if (p.failed) {
-    demo_packet_free(&p);
-    return SL_ERROR_NOMEM;
+  if (e->length > sizeof(v->storage_bytes))
+    return SL_ERROR_FULL;
+  v->storage_pending = *e;
+  if (e->operation == SL_IMAGE_PASTE_DATA) {
+    memcpy(v->storage_bytes, e->data, e->length);
+    v->storage_pending.data = v->storage_bytes;
   }
-  /* Callback work is bounded copying only. The owner loop performs storage. */
-  v->storage_pending = p;
-  v->storage_kind = kind;
+  v->storage_ready = 1;
   return SL_OK;
 }
 static int image_event(void *context, const sl_image_paste_event_t *e) {
@@ -185,14 +165,25 @@ static int image_event(void *context, const sl_image_paste_event_t *e) {
     v->aborted = 1;
   return result;
 }
+static int storage_reply(void *context, unsigned long id, size_t offset,
+                         const char *path, const char *reason) {
+  web_view_t *v = context;
+  (void)offset;
+  if (id == v->image_id && (path || reason)) {
+    if (!path && v->ended != 2)
+      (void)sl_image_paste_cancel(v->image, id);
+    else
+      (void)sl_image_paste_complete(v->image, id, path, reason);
+  }
+  return 0;
+}
 static int service_storage(web_view_t *v) {
-  int result;
-  if (!v->storage_pending.data)
+  sl_image_paste_event_t e;
+  if (!v->storage_ready)
     return SL_OK;
-  result = demo_image_store_input(&v->store, &v->storage_reply, v->storage_kind,
-                                  &v->storage_pending, 0);
-  demo_packet_free(&v->storage_pending);
-  if (result)
+  e = v->storage_pending;
+  v->storage_ready = 0;
+  if (demo_image_store_apply(&v->store, &e, 0, storage_reply, v))
     return SL_ERROR_IO;
   if (v->storage_paused) {
     v->storage_paused = 0;
@@ -209,27 +200,7 @@ static int service_image(web_view_t *v) {
       return SL_ERROR;
     if (service_storage(v) != SL_OK)
       return SL_ERROR_IO;
-    while (!v->host->ops.image && v->storage_reply.count) {
-      demo_packet_t p = v->storage_reply.output[0];
-      unsigned long kind, id;
-      memmove(v->storage_reply.output, v->storage_reply.output + 1,
-              (v->storage_reply.count - 1) * sizeof(p));
-      --v->storage_reply.count;
-      v->storage_reply.queued_bytes -= p.length;
-      p.offset = 4;
-      kind = demo_number(&p);
-      id = demo_number(&p);
-      if (id == v->image_id && kind == DEMO_IMAGE_RESULT) {
-        const char *path = demo_string(&p), *reason = demo_string(&p);
-        if (!p.failed) {
-          if (!path && v->ended != 2)
-            (void)sl_image_paste_cancel(v->image, id);
-          else
-            (void)sl_image_paste_complete(v->image, id, path, reason);
-        }
-      }
-      demo_packet_free(&p);
-    }
+    /* A storage error can synchronously queue an abort. */
     if (service_storage(v) != SL_OK)
       return SL_ERROR_IO;
     if (v->done || v->aborted) {
@@ -296,8 +267,6 @@ static void closed(void *context, demo_www_peer_t *peer) {
     *at = v->next;
   sl_destroy(v->image);
   demo_image_store_close(&v->store);
-  demo_link_close(&v->storage_reply);
-  demo_packet_free(&v->storage_pending);
   free(v);
   demo_www_peer_data(peer, NULL);
 }
@@ -312,7 +281,6 @@ static int replay(void *context, void *peer, const char *after) {
   v->host = w;
   v->peer = peer;
   v->store.fd = -1;
-  demo_link_init(&v->storage_reply, -1);
   sl_config_init(&config);
   config.image_paste_callback = image_event;
   config.image_paste_context = v;

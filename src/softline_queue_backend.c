@@ -10,11 +10,15 @@ typedef struct {
 
 typedef struct {
   sl_queue_request_t value;
+  sl_queue_request_lease_t *lease;
   int64_t display_started;
   int pending, seen, want_edit, want_steer, abandoned, sync_requested;
   sl_queue_result_status_t status;
   char *reason, *result_id, *result_revision, *result_token;
 } backend_pending_t;
+struct sl_queue_request_lease {
+  size_t references;
+};
 typedef struct {
   int key;
   int binding_done;
@@ -28,6 +32,7 @@ struct sl_backend {
   backend_entry_t *entries;
   size_t count, total;
   backend_pending_t *pending;
+  backend_pending_t *active_request;
   size_t pending_count, pending_limit;
   sl_queue_request_id_t serial;
   char *revision;
@@ -125,16 +130,65 @@ static backend_entry_t *find_local(sl_backend_t *backend, sl_prompt_id_t id) {
 }
 
 static void request_free(backend_pending_t *request) {
-  free((void *)request->value.item_id);
-  free((void *)request->value.item_revision);
-  free((void *)request->value.queue_revision);
-  free((void *)request->value.edit_token);
-  free((void *)request->value.text);
+  sl_queue_backend_unpin_request(request->lease);
   free(request->reason);
   free(request->result_id);
   free(request->result_revision);
   free(request->result_token);
   memset(request, 0, sizeof(*request));
+}
+
+void sl_queue_backend_unpin_request(sl_queue_request_lease_t *lease) {
+  if (lease && !--lease->references)
+    free(lease);
+}
+
+int sl_queue_backend_pin_request(sl_t *self, const sl_queue_request_t *request,
+                                 sl_queue_request_lease_t **lease) {
+  sl_impl_t *impl = editor(self);
+  sl_backend_t *backend = impl ? impl->backend : NULL;
+  if (!lease)
+    return SL_ERROR_INVALID;
+  *lease = NULL;
+  if (!backend || !backend->active_request ||
+      request != &backend->active_request->value)
+    return SL_ERROR_INVALID;
+  *lease = backend->active_request->lease;
+  if ((*lease)->references == (size_t)-1) {
+    *lease = NULL;
+    return SL_ERROR_FULL;
+  }
+  ++(*lease)->references;
+  return SL_OK;
+}
+
+static int retain_request(backend_pending_t *pending) {
+  const char **fields[5];
+  size_t lengths[5], bytes = sizeof(*pending->lease), i;
+  char *storage;
+  fields[0] = &pending->value.item_id;
+  fields[1] = &pending->value.item_revision;
+  fields[2] = &pending->value.queue_revision;
+  fields[3] = &pending->value.edit_token;
+  fields[4] = &pending->value.text;
+  for (i = 0; i < 5; ++i) {
+    lengths[i] = *fields[i] ? strlen(*fields[i]) + 1 : 0;
+    if (lengths[i] > (size_t)-1 - bytes)
+      return -1;
+    bytes += lengths[i];
+  }
+  pending->lease = malloc(bytes);
+  if (!pending->lease)
+    return -1;
+  pending->lease->references = 1;
+  storage = (char *)(pending->lease + 1);
+  for (i = 0; i < 5; ++i)
+    if (lengths[i]) {
+      memcpy(storage, *fields[i], lengths[i]);
+      *fields[i] = storage;
+      storage += lengths[i];
+    }
+  return 0;
 }
 
 static void request_remove(sl_backend_t *backend, size_t index) {
@@ -301,30 +355,22 @@ int sl_queue_backend_request_impl(sl_t *self, const sl_queue_request_t *input,
   memset(&pending, 0, sizeof(pending));
   pending.value = *input;
   pending.value.request_id = ++backend->serial;
-  pending.value.item_id = copy(input->item_id);
-  pending.value.item_revision = copy(input->item_revision ? input->item_revision
-                                     : entry ? entry->value.revision
-                                             : NULL);
+  pending.value.item_revision = input->item_revision ? input->item_revision
+                                : entry              ? entry->value.revision
+                                                     : NULL;
   pending.value.queue_revision =
-      copy(input->queue_revision ? input->queue_revision : backend->revision);
-  pending.value.edit_token = copy(input->edit_token ? input->edit_token
-                                  : entry           ? entry->value.edit_token
-                                                    : NULL);
-  pending.value.text = copy(input->text);
-  if ((input->item_id && !pending.value.item_id) ||
-      ((input->item_revision || entry) && !pending.value.item_revision) ||
-      ((input->queue_revision || backend->revision) &&
-       !pending.value.queue_revision) ||
-      ((input->edit_token || (entry && entry->value.edit_token)) &&
-       !pending.value.edit_token) ||
-      (input->text && !pending.value.text)) {
-    request_free(&pending);
+      input->queue_revision ? input->queue_revision : backend->revision;
+  pending.value.edit_token = input->edit_token ? input->edit_token
+                             : entry           ? entry->value.edit_token
+                                               : NULL;
+  if (retain_request(&pending))
     return error(self, SL_ERROR_NOMEM, "cannot retain backend request");
-  }
   pending.pending = 1;
   pending.display_started = sl_queue_display_start(impl);
   backend->callback_active = 1;
+  backend->active_request = &pending;
   status = backend->callbacks.request(backend->context, &pending.value);
+  backend->active_request = NULL;
   backend->callback_active = 0;
   if (status != SL_OK) {
     request_free(&pending);

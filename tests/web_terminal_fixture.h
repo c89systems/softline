@@ -1,4 +1,5 @@
 /* Real WebSocket/PTY checks using the owning test's bounded wire helpers. */
+#ifdef SOFTLINE_CBOR_TCP
 typedef struct terminal_client {
   int fd, ready, credit, exited, status;
   char tail[2048];
@@ -134,7 +135,7 @@ static int native_terminal_next(demo_link_t *link, terminal_client_t *t) {
     t->exited = 1;
   } else
     failed = 1;
-  failed |= packet.failed || packet.offset != packet.length;
+  failed |= !demo_packet_done(&packet);
   demo_packet_free(&packet);
   return failed ? -1 : 0;
 }
@@ -162,6 +163,7 @@ static int native_terminal_input(demo_link_t *link, const char *text) {
   }
   return native_terminal_flush(link);
 }
+#endif
 static int terminal_state_wait(int peer, char *data, size_t cap, size_t active,
                                int disabled) {
   char expected[96];
@@ -170,6 +172,7 @@ static int terminal_state_wait(int peer, char *data, size_t cap, size_t active,
                  (unsigned long)active, disabled);
   return until(peer, data, cap, expected);
 }
+#ifdef SOFTLINE_CBOR_TCP
 static int terminal_roundtrip(unsigned short port, unsigned short queue_port,
                               int chat, const char *root, int policy,
                               char *data, size_t cap) {
@@ -324,3 +327,4 @@ cleanup:
 #undef TERMINAL_CHECK
 #undef TERMINAL_STATE
 }
+#endif

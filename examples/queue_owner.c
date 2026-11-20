@@ -171,7 +171,10 @@ static void text_event(owner_t *o, int kind, const char *text) {
   if (!o->client || o->shell_pending)
     return;
   demo_put_number(&p, (unsigned long)kind);
-  demo_put_string(&p, text);
+  if (kind == DEMO_OUTPUT)
+    demo_put_bytes(&p, text, strlen(text));
+  else
+    demo_put_string(&p, text);
   send_packet(o, &p);
 }
 static void terminal_snapshot(owner_t *o) {
@@ -757,7 +760,7 @@ static void input(owner_t *o) {
       int approvals = (int)demo_number(&p);
       unsigned long interval_ms = demo_number(&p);
       unsigned int seed = (unsigned int)demo_number(&p);
-      if (!p.failed && p.offset == p.length)
+      if (demo_packet_done(&p))
         hello(o, name, delay_us, request_high, approvals, interval_ms, seed);
       else
         disconnect(o);
@@ -765,7 +768,7 @@ static void input(owner_t *o) {
       sl_queue_request_t r;
       o->gated = 1;
       demo_get_request(&p, &r);
-      if (!p.failed && p.offset == p.length)
+      if (demo_packet_done(&p))
         handle_request(o, &r);
       else
         disconnect(o);
@@ -773,17 +776,17 @@ static void input(owner_t *o) {
                o->client && !o->shell_pending) {
       if (demo_image_store_input(&o->image, &o->link, kind, &p, milliseconds()))
         disconnect(o);
-    } else if (kind == DEMO_CANCEL && o->client && p.offset == p.length) {
+    } else if (kind == DEMO_CANCEL && o->client && demo_packet_done(&p)) {
       o->active = o->waiting_gate = o->shell_requested = 0;
       set_stopped(o, 1, 0);
       text_event(o, DEMO_OUTPUT_END, NULL);
     } else if (kind == DEMO_IDLE && o->client) {
       o->input_empty = (int)demo_number(&p);
-      if (p.failed || p.offset != p.length)
+      if (!demo_packet_done(&p))
         disconnect(o);
       else
         o->gated = 0;
-    } else if (kind == DEMO_SHELL_BEGIN && o->client && p.offset == p.length) {
+    } else if (kind == DEMO_SHELL_BEGIN && o->client && demo_packet_done(&p)) {
       o->shell_requested = 1;
     } else
       disconnect(o);

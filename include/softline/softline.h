@@ -2092,6 +2092,18 @@ const char *sl_last_error(const sl_t *self);
 int sl_queue_backend_request(sl_t *self, const sl_queue_request_t *request,
                              sl_queue_request_id_t *out_request_id);
 
+/** Opaque lease on a backend request's retained text fields. */
+typedef struct sl_queue_request_lease sl_queue_request_lease_t;
+
+/** Pin the text fields of the request passed to the active backend callback.
+ * Copy the request's scalar fields before returning from the callback. The
+ * lease keeps its strings valid across partial writes without another copy.
+ * Owner-thread only. Release all adapter leases by backend detach. */
+int sl_queue_backend_pin_request(sl_t *self, const sl_queue_request_t *request,
+                                 sl_queue_request_lease_t **lease);
+/** Release one successful pin. NULL is allowed. */
+void sl_queue_backend_unpin_request(sl_queue_request_lease_t *lease);
+
 /** Apply one deferred response without delivering/echoing model text. Duplicate
  * completed responses are harmless. Results never mutate the accepted mirror
  * or synchronously invoke the outbound callback. Native edit intent is retained
