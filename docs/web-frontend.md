@@ -77,6 +77,9 @@ connection lifetime, routing, scheduling, backpressure, history, and replay.
 Softline never calls Kore or assumes a particular server or HTTP version.
 The browser Clipboard API needs HTTPS or loopback for the copy action.
 Copy returns the original agent Markdown, including whitespace and fences.
+The browser adds the action when it creates a response from a `begin` event
+or receives its first `delta`. An `end` event finishes that message's decoder
+and Markdown parser.
 Incoming source chunks are retained alongside the rendered response; they are
 joined only when Copy is clicked. Copy during generation returns the complete
 UTF-8 prefix received so far. Other chat actions also work
@@ -215,11 +218,12 @@ The examples advertise queue editing. `make run-chat-queue-server` also enables
 the [browser terminal](web-terminal.md) at `/terminal` on its existing web port
 (8081 by default). Ctrl+` and the `+` menu open the locally served xterm.js view
 in a bottom panel; closing it terminates its shell, and shell exit closes it.
-The conversation and prompt stay above the panel. Opening it leaves chat and
-input enabled by default. Use `/terminal-lock` in the examples to toggle whether
-every conversation web prompt locks during TUI or browser handoffs. A
-`terminal_state` snapshot changes that policy
-at runtime; the host owns lifecycle counts and propagation across its views.
+The conversation and prompt stay above the panel. Drag the divider to adjust
+the terminal height, or focus it and use the arrow keys. Opening the terminal
+leaves chat and input enabled by default. Use `/terminal-lock` in the examples
+to toggle whether every conversation web prompt locks during TUI or browser
+handoffs. A `terminal_state` snapshot changes that policy at runtime.
+The host owns lifecycle counts and propagation across its views.
 Hosts can explicitly dim/lock the composer with a `prompt_state`
 event (`disabled="1"`, optional tooltip `text`) and unlock with `disabled="0"`.
 Explicit and automatic locks combine: ending the last handoff releases only

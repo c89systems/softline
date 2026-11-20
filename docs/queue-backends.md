@@ -205,6 +205,14 @@ An attachment supplies its prior request watermark when establishing a new
 namespace, keeping outcomes lost in an owner restart unknown and preventing
 readmission under an old identity. This does not provide durable queue storage.
 
+The example sends typed messages over plain TCP. Each frame starts with a
+four-byte, big-endian payload length. The payload identifies the message type
+and carries fields or chunk bytes. The example carries queue requests and
+snapshots, response Markdown and lifecycle events, image uploads, and PTY
+traffic. Remote shell handoffs use a dedicated connection to the same port.
+Downstream clients can implement the Softline queue backend callbacks over
+their own transport.
+
 Both C executables share the current chat frontend, preserving the v0.15.1
 interaction model while adding backend adapters: Softline renders the
 editor, quotes, queue, approvals, reasoning and status rows. Frontend libmdf

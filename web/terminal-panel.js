@@ -1,3 +1,5 @@
+import { PaneDivider } from './pane-divider.js';
+
 // A layout panel around the locally served terminal view. The iframe owns its
 // PTY transport; removing it closes that transport without touching chat replay.
 export class TerminalPanel {
@@ -6,6 +8,11 @@ export class TerminalPanel {
     this.origin = window.origin || window.location.origin;
     this.panel = document.getElementById('terminal-panel');
     this.conversation = document.getElementById('conversation-pane');
+    this.handle = document.getElementById('terminal-divider');
+    this.divider = new PaneDivider(this.handle, document.getElementById('workspace'), height => {
+      this.height = height;
+      this.resize();
+    });
     this.rowHeight = 18; this.chromeHeight = 40;
     window.addEventListener('message', event => {
       if (!this.frame || event.source !== this.frame.contentWindow || event.origin !== this.origin) return;
@@ -31,6 +38,7 @@ export class TerminalPanel {
     frame.addEventListener('load', () => this.theme());
     frame.src = url.href;
     this.frame = frame; this.panel.replaceChildren(frame); this.panel.hidden = false;
+    this.handle.hidden = false;
     this.document.getElementById('chat').classList.remove('welcome-state');
     this.resize();
     frame.focus({ preventScroll: true });
@@ -41,11 +49,14 @@ export class TerminalPanel {
     const composer = this.document.getElementById('composer-area').getBoundingClientRect();
     const viewport = this.window.visualViewport?.height || this.window.innerHeight;
     const available = Math.max(0, Math.min(conversation.height, viewport - conversation.top));
-    const maximum = Math.max(0, available - composer.height - Math.min(80, available / 5));
-    // The panel's top border is outside the iframe's measured terminal chrome.
-    const height = Math.min(Math.max(Math.ceil(25 * this.rowHeight + this.chromeHeight + 1), viewport / 3), maximum);
-    const value = `${Math.floor(height)}px`;
+    const maximum = Math.max(0, Math.floor(available - composer.height -
+      Math.min(80, available / 5) - this.handle.getBoundingClientRect().height));
+    const minimum = Math.min(maximum, Math.ceil(3 * this.rowHeight + this.chromeHeight));
+    const preferred = this.height ?? Math.max(25 * this.rowHeight + this.chromeHeight, viewport / 3);
+    const height = Math.floor(Math.min(maximum, Math.max(minimum, preferred)));
+    const value = `${height}px`;
     if (this.panel.style.height !== value) this.panel.style.height = value;
+    this.divider.update('y', -1, height, minimum, maximum);
   }
   theme() {
     this.frame?.contentWindow.postMessage({ type: 'softline-terminal-theme', theme: this.document.documentElement.dataset.theme }, this.origin);
@@ -54,6 +65,8 @@ export class TerminalPanel {
     if (!this.frame) return;
     const frame = this.frame; this.frame = null;
     frame.contentWindow.postMessage({ type: 'softline-terminal-stop' }, this.origin);
+    this.divider.cancel();
+    this.handle.hidden = true;
     this.panel.hidden = true; this.panel.replaceChildren();
     this.closed();
   }

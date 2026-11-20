@@ -1,4 +1,5 @@
 import { Terminal } from './xterm.js';
+import { PaneDivider } from './pane-divider.js';
 
 const maxChunk = 16 * 1024;
 const maxPending = 256 * 1024;
@@ -16,6 +17,19 @@ export class Transcripts {
     this.window = window;
     this.toggle = document.getElementById('transcript-toggle');
     this.panel = document.getElementById('transcripts');
+    this.workspace = document.getElementById('workspace');
+    this.composer = document.getElementById('composer-area');
+    this.handle = document.getElementById('transcript-divider');
+    this.stacked = window.matchMedia('(max-width: 640px)');
+    this.sizes = {};
+    this.divider = new PaneDivider(this.handle, this.workspace, (value, axis) => {
+      this.sizes[axis] = value;
+      this.resize();
+    });
+    const observer = new window.ResizeObserver(() => this.resize());
+    observer.observe(this.workspace);
+    observer.observe(this.composer);
+    this.stacked.addEventListener('change', () => this.resize());
     this.tabs = document.getElementById('transcript-tabs');
     this.screen = document.getElementById('transcript-screen');
     this.views = new Map();
@@ -49,6 +63,23 @@ export class Transcripts {
     }
   }
 
+  resize() {
+    if (this.panel.hidden) return;
+    const workspace = this.workspace.getBoundingClientRect();
+    const handle = this.handle.getBoundingClientRect();
+    const stacked = this.stacked.matches;
+    const axis = stacked ? 'y' : 'x';
+    const maximum = Math.max(0, Math.floor(stacked
+      ? workspace.height - handle.height - this.composer.getBoundingClientRect().height - 80
+      : workspace.width - handle.width - 320));
+    const minimum = Math.min(maximum, stacked ? 96 : 180);
+    const preferred = this.sizes[axis] ?? (stacked
+      ? workspace.height * .38 : Math.min(720, Math.max(220, workspace.width * .42)));
+    const size = Math.floor(Math.min(maximum, Math.max(minimum, preferred)));
+    if (this.panel.style.flexBasis !== `${size}px`) this.panel.style.flexBasis = `${size}px`;
+    this.divider.update(axis, stacked ? 1 : -1, size, minimum, maximum);
+  }
+
   show(id, focusTab = false) {
     const next = this.views.get(id);
     const previous = this.views.get(this.active);
@@ -60,11 +91,16 @@ export class Transcripts {
     }
     this.active = next ? id : '';
     this.panel.hidden = !next;
+    this.handle.hidden = !next;
     this.toggle.setAttribute('aria-expanded', String(!!next));
     if (!next) {
-      if (this.panel.contains(focused)) this.toggle.focus({ preventScroll: true });
+      this.divider.cancel();
+      if (focused === this.handle || this.panel.contains(focused)) {
+        this.toggle.focus({ preventScroll: true });
+      }
       return;
     }
+    this.resize();
     next.stage.hidden = false;
     next.tab.tabIndex = 0;
     next.tab.setAttribute('aria-selected', 'true');

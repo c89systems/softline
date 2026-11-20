@@ -36,6 +36,7 @@ int main(int argc, char **argv) {
                                 "/terminal",
                                 "/terminal.js",
                                 "/terminal-panel.js",
+                                "/pane-divider.js",
                                 "/terminal.css",
                                 "/xterm.js",
                                 "/xterm-addon-fit.js",
@@ -57,6 +58,7 @@ int main(int argc, char **argv) {
       "web/terminal.html",
       "web/terminal.js",
       "web/terminal-panel.js",
+      "web/pane-divider.js",
       "web/terminal.css",
       "vendor/xterm/xterm.mjs",
       "vendor/xterm/addon-fit.mjs",
@@ -174,12 +176,21 @@ int main(int argc, char **argv) {
   {
     const char *conversation = strstr(html, "id=\"conversation-pane\"");
     const char *transcripts = strstr(html, "<aside id=\"transcripts\"");
+    const char *transcript_divider = strstr(html, "id=\"transcript-divider\"");
+    const char *terminal_divider = strstr(html, "id=\"terminal-divider\"");
+    const char *terminal = strstr(html, "id=\"terminal-panel\"");
     CHECK(conversation && transcripts && conversation < transcripts);
+    CHECK(transcript_divider && transcript_divider < transcripts &&
+          terminal_divider && terminal && terminal_divider < terminal);
     CHECK(strstr(transcripts, "id=\"transcript-tabs\" role=\"tablist\"") &&
           strstr(transcripts, "aria-label=\"Close transcript pane\""));
     CHECK(strstr(css, "#workspace{flex-direction:row}") &&
           strstr(css, "#workspace{flex-direction:column-reverse}"));
+    CHECK(strstr(css, ".pane-divider[aria-orientation=\"vertical\"]") &&
+          strstr(css, ".pane-divider[aria-orientation=\"horizontal\"]"));
   }
+  CHECK(strstr(css, ".message-tools{display:flex;gap:4px;margin:4px 0 0}") &&
+        strstr(css, ".message:last-child{margin-bottom:0}"));
   {
     char *page = asset(w, "/terminal"), *style = asset(w, "/terminal.css");
     char *grid, *footer;

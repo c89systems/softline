@@ -140,7 +140,7 @@ add_custom_command(OUTPUT "${_sl_web_assets}"
     "${CMAKE_CURRENT_SOURCE_DIR}" "${_sl_web_assets}"
   DEPENDS scripts/embed-web-assets.py web/index.html web/softline.css web/softline.js
           web/completion.js web/prompt.js web/images.js web/image-viewer.js web/transcripts.js
-          web/terminal.html web/terminal.js web/terminal-panel.js web/terminal.css vendor/xterm/xterm.mjs
+          web/terminal.html web/terminal.js web/terminal-panel.js web/pane-divider.js web/terminal.css vendor/xterm/xterm.mjs
           vendor/xterm/addon-fit.mjs vendor/xterm/xterm.css vendor/xterm/LICENSE vendor/xterm/LICENSE.addon-fit
     web/markdown.js vendor/streaming-markdown/smd.js vendor/streaming-markdown/LICENSE
     vendor/jetbrains-mono/JetBrainsMono-Regular.woff2 vendor/jetbrains-mono/OFL.txt

@@ -54,8 +54,15 @@ scroll.addEventListener('scroll', () => {
   $('latest').hidden = state.follow;
 }, { passive: true });
 $('latest').addEventListener('click', () => { state.follow = true; follow(); $('latest').hidden = true; });
-const followResize = new ResizeObserver(() => follow());
-followResize.observe(messages); followResize.observe(scroll);
+let promptWidth = prompt.clientWidth;
+const followResize = new ResizeObserver(() => {
+  if (prompt.clientWidth !== promptWidth) {
+    promptWidth = prompt.clientWidth;
+    resizePrompt();
+  }
+  follow();
+});
+followResize.observe(messages); followResize.observe(scroll); followResize.observe(prompt);
 function started() { $('chat').classList.remove('welcome-state'); }
 function message(id, role = 'assistant') {
   if (state.messages.has(id)) return state.messages.get(id);

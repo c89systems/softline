@@ -1,6 +1,6 @@
 // Logical client tests: execute the shipped module with DOM/transport doubles.
 // Actual browser layout and selection integration remain in web-browser.html.
-export async function runWebCompletionTests(source, completionSource, promptSource, fixture, imagesSource, viewerSource, panelSource, transcriptsSource) {
+export async function runWebCompletionTests(source, completionSource, promptSource, fixture, imagesSource, viewerSource, panelSource, transcriptsSource, dividerSource) {
   const checks = [];
   function assert(value, message) { if (!value) throw new Error(message); }
   class Target {
@@ -37,6 +37,9 @@ export async function runWebCompletionTests(source, completionSource, promptSour
       return this.parent?.closest(selector) || null;
     }
     scrollIntoView() {}
+    setPointerCapture(id) { this.capturedPointer = id; }
+    hasPointerCapture(id) { return this.capturedPointer === id; }
+    releasePointerCapture(id) { if (this.hasPointerCapture(id)) this.capturedPointer = null; }
     remove() { if (this.parent) this.parent.children = this.parent.children.filter(child => child !== this); }
     click() { this.fire('click'); }
     setSelectionRange(start, end) { this.selectionStart = start; this.selectionEnd = end; }
@@ -70,7 +73,8 @@ export async function runWebCompletionTests(source, completionSource, promptSour
   const stripImports = source => source.replace(/^import[^\n]*\n/gm, '').replace(/^export /gm, '');
   const Completion = new Function(stripImports(completionSource) + '\nreturn Completion;')();
   const ImageViewer = new Function(stripImports(viewerSource) + '\nreturn ImageViewer;')();
-  const TerminalPanel = new Function(stripImports(panelSource) + '\nreturn TerminalPanel;')();
+  const PaneDivider = new Function(stripImports(dividerSource) + '\nreturn PaneDivider;')();
+  const TerminalPanel = new Function('PaneDivider', stripImports(panelSource) + '\nreturn TerminalPanel;')(PaneDivider);
   const { ImagePreviews, imageReferences } = new Function('ImageViewer', stripImports(imagesSource) + '\nreturn { ImagePreviews, imageReferences };')(ImageViewer);
   async function boot(options = {}) {
     const elements = new Map(), timers = new Map(), observers = [];
@@ -90,10 +94,13 @@ export async function runWebCompletionTests(source, completionSource, promptSour
       refresh() {}
       dispose() { this.disposed = true; this.element?.remove(); }
     };
-    const Transcripts = new Function('Terminal', stripImports(transcriptsSource) + '\nreturn Transcripts;')(Terminal);
+    const Transcripts = new Function('Terminal', 'PaneDivider', stripImports(transcriptsSource) + '\nreturn Transcripts;')(Terminal, PaneDivider);
     window.getComputedStyle = () => ({ getPropertyValue: () => '#141414' });
     window.open = (...args) => opened.push(args);
     window.innerWidth = 1024; window.innerHeight = 768;
+    const narrow = new Target();
+    narrow.matches = false;
+    window.matchMedia = () => narrow;
     document.getElementById = id => {
       if (!elements.has(id)) {
         const element = new Element(); element.id = id; element.ownerDocument = document;
@@ -127,6 +134,10 @@ export async function runWebCompletionTests(source, completionSource, promptSour
     });
     const get = document.getElementById;
     get('transcripts').hidden = get('transcript-toggle').hidden = true;
+    get('transcript-divider').hidden = get('terminal-divider').hidden = true;
+    get('workspace').rect = { width: 1024, height: 704 };
+    get('transcript-divider').rect = get('terminal-divider').rect = { width: 8, height: 8 };
+    get('copy-icon').content = { cloneNode: () => document.createElement('svg') };
     get('transcripts').append(get('transcript-tabs'), get('transcript-close'), get('transcript-screen'));
     get('conversation-pane').rect = { top: 64, height: 704 };
     get('composer-area').rect = { top: 600, height: 120 };
@@ -182,7 +193,8 @@ export async function runWebCompletionTests(source, completionSource, promptSour
       constructor(data) { this.data = data; this.types = Object.keys(data); }
       getType(type) { return Promise.resolve(this.data[type]); }
     };
-    window.navigator = { clipboard: { write: async items => {
+    const copiedText = [];
+    window.navigator = env.navigator = { clipboard: { writeText: async text => copiedText.push(text), write: async items => {
       clipboardCalls.push(items);
       if (options.clipboardFailure) throw new Error('Clipboard access denied.');
       for (const item of items) copiedImages.push(await item.getType('image/png'));
@@ -251,7 +263,7 @@ export async function runWebCompletionTests(source, completionSource, promptSour
     }
     const ui = { get, prompt, input, type, key, idle, queries, reply, event, sent, socket, document, window, revoked, blobs, upload, previews, opened, terminals,
       socketURL: () => socket.url,
-      copiedImages, clipboardCalls, canvases, decoded, finishDecode: () => pendingDecodes.shift()?.(),
+      copiedImages, copiedText, clipboardCalls, canvases, decoded, narrow, finishDecode: () => pendingDecodes.shift()?.(),
       resize: target => { for (const observer of observers) if (observer.targets.includes(target)) observer.fn(); },
       form: () => get('composer').fire('submit'), ghost: () => get('completion-ghost').textContent || '',
       timeout: delay => { for (const [id, timer] of [...timers]) if (timer.delay === delay) { timers.delete(id); timer.fn(); } } };
@@ -409,9 +421,9 @@ export async function runWebCompletionTests(source, completionSource, promptSour
   });
   await check('terminal uses 25 measured rows or one third of the viewport without hiding the prompt', async ui => {
     openTerminal(ui);
-    assert(ui.get('terminal-panel').style.height === '491px', 'initial panel still reserves the old header');
+    assert(ui.get('terminal-panel').style.height === '490px', 'initial panel still reserves the old header');
     terminalEvent(ui, { type: 'softline-terminal-size', rowHeight: 17, chromeHeight: 58 });
-    assert(ui.get('terminal-panel').style.height === '484px', 'panel did not reserve 25 measured rows plus chrome and border');
+    assert(ui.get('terminal-panel').style.height === '483px', 'panel did not reserve 25 measured rows plus chrome');
     ui.window.innerHeight = 1800; ui.get('conversation-pane').rect.height = 1736; ui.window.fire('resize');
     assert(ui.get('terminal-panel').style.height === '600px', 'large viewport did not reserve a third');
     ui.window.innerHeight = 420; ui.get('conversation-pane').rect.height = 356; ui.window.fire('resize');
@@ -426,8 +438,75 @@ export async function runWebCompletionTests(source, completionSource, promptSour
     const conversation = ui.get('conversation-pane');
     conversation.rect = { top: 350, height: 240 };
     ui.resize(conversation);
-    assert(ui.get('terminal-panel').style.height === '72px', 'terminal sized itself against the whole viewport');
+    assert(ui.get('terminal-panel').style.height === '64px', 'terminal sized itself against the whole viewport');
     assert(!ui.get('transcripts').hidden && !ui.prompt.readOnly, 'opening both panes disabled the prompt');
+  });
+  function pointer(handle, type, position) {
+    return handle.fire(type, { isPrimary: true, button: 0, pointerId: 3, ...position });
+  }
+  await check('transcript divider adjusts the shared conversation and shell column and keeps separate mobile sizing', async ui => {
+    const frame = openTerminal(ui);
+    transcript(ui, 'log');
+    ui.get('transcript-toggle').click();
+    const handle = ui.get('transcript-divider'), panel = ui.get('transcripts');
+    const workspace = ui.get('workspace'), shell = ui.get('terminal-panel');
+    assert(!handle.hidden && handle['aria-orientation'] === 'vertical' && panel.style.flexBasis === '430px', 'desktop divider did not appear');
+    assert(pointer(handle, 'pointerdown', { clientX: 586 }).defaultPrevented &&
+      handle.hasPointerCapture(3) && workspace.dataset.paneResizing === 'x', 'drag did not capture across the shell');
+    pointer(handle, 'pointermove', { clientX: 486 });
+    assert(panel.style.flexBasis === '530px' && shell.children[0] === frame && shell.style.height === '490px', 'desktop drag changed the terminal session or height');
+    pointer(handle, 'pointermove', { clientX: 0 });
+    assert(panel.style.flexBasis === '696px', 'transcript could squeeze out the conversation');
+    pointer(handle, 'pointerup', { clientX: 0 });
+    handle.fire('keydown', { key: 'ArrowRight', shiftKey: true });
+    assert(panel.style.flexBasis === '656px' && !workspace.dataset.paneResizing, 'keyboard resize or drag cleanup failed');
+    ui.narrow.matches = true;
+    ui.narrow.fire('change');
+    const start = parseInt(panel.style.flexBasis);
+    assert(handle['aria-orientation'] === 'horizontal' && start === 267, 'mobile divider did not switch axes');
+    pointer(handle, 'pointerdown', { clientY: 267 });
+    pointer(handle, 'pointermove', { clientY: 313 });
+    assert(panel.style.flexBasis === '313px', 'stacked divider did not grow the transcript downwards');
+    ui.narrow.matches = false;
+    ui.narrow.fire('change');
+    assert(panel.style.flexBasis === '656px' && !handle.hasPointerCapture(3) && !workspace.dataset.paneResizing, 'axis change left a drag active or lost desktop size');
+    ui.get('transcript-close').click();
+    assert(handle.hidden && shell.children[0] === frame, 'closing the transcript hid the terminal or left its divider visible');
+  });
+  await check('terminal divider can shrink and grow the same shell and reserves room for the composer', async ui => {
+    const frame = openTerminal(ui), panel = ui.get('terminal-panel'), handle = ui.get('terminal-divider');
+    const workspace = ui.get('workspace');
+    assert(!handle.hidden && handle['aria-orientation'] === 'horizontal', 'terminal did not show its divider');
+    pointer(handle, 'pointerdown', { clientY: 278 });
+    pointer(handle, 'pointermove', { clientY: 368 });
+    pointer(handle, 'pointercancel', { clientY: 368 });
+    assert(panel.style.height === '400px' && panel.children[0] === frame &&
+      !workspace.dataset.paneResizing && !handle.hasPointerCapture(3), 'terminal drag replaced the shell or left the drag active');
+    terminalEvent(ui, { type: 'softline-terminal-size', rowHeight: 17, chromeHeight: 58 });
+    assert(panel.style.height === '400px', 'shell measurement overrode the dragged size');
+    handle.fire('keydown', { key: 'ArrowUp' });
+    assert(panel.style.height === '410px', 'Arrow Up did not grow the terminal');
+    handle.fire('keydown', { key: 'End' });
+    assert(panel.style.height === '496px', 'End did not use the largest size available');
+    ui.get('composer-area').rect.height = 200;
+    ui.resize(ui.get('composer-area'));
+    assert(panel.style.height === '416px', 'resized terminal crowded out the composer');
+    pointer(handle, 'pointerdown', { clientY: 278 });
+    terminalEvent(ui, { type: 'softline-terminal-closed' });
+    assert(handle.hidden && !workspace.dataset.paneResizing, 'shell exit leaked the divider or capture');
+  });
+  await check('response copy belongs to the message and returns the available Markdown throughout streaming', async ui => {
+    ui.event({ type: 'begin', id: 'reply', role: 'assistant' });
+    const message = ui.get('messages').children[0];
+    const copy = message.children[1].children[0];
+    assert(copy['aria-label'] === 'Copy response', 'begin did not create a response copy action');
+    ui.event({ type: 'delta', id: 'reply', role: 'assistant', text: 'First **bold**\n' });
+    copy.click(); await ui.idle();
+    ui.event({ type: 'delta', id: 'reply', role: 'assistant', text: '\n`code`' });
+    ui.event({ type: 'end', id: 'reply' });
+    copy.click(); await ui.idle();
+    assert(ui.copiedText[0] === 'First **bold**\n' &&
+      ui.copiedText[1] === 'First **bold**\n\n`code`' && message.children[1].children.length === 1, 'copy depends on rendering or end duplicated the action');
   });
   await check('terminal messages validate source origin and bounded measurements', async ui => {
     const frame = openTerminal(ui), height = ui.get('terminal-panel').style.height;

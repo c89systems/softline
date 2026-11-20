@@ -17,6 +17,7 @@ assets = [
     ("/terminal", "text/html; charset=utf-8", "web/terminal.html"),
     ("/terminal.js", "text/javascript; charset=utf-8", "web/terminal.js"),
     ("/terminal-panel.js", "text/javascript; charset=utf-8", "web/terminal-panel.js"),
+    ("/pane-divider.js", "text/javascript; charset=utf-8", "web/pane-divider.js"),
     ("/terminal.css", "text/css; charset=utf-8", "web/terminal.css"),
     ("/xterm.js", "text/javascript; charset=utf-8", "vendor/xterm/xterm.mjs"),
     ("/xterm-addon-fit.js", "text/javascript; charset=utf-8", "vendor/xterm/addon-fit.mjs"),

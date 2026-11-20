@@ -79,9 +79,11 @@ any chunks.
 pane after the last one. Select a tab to jump directly to a viewer. Use the
 arrow keys to switch tabs when the tab bar has focus. The X closes the pane.
 The pane is to the right of the conversation on wide screens and above it
-on narrow screens. Each read-only xterm.js instance uses the producer's
-declared rows and columns and up to 2,000 scrollback rows. If pending input
-exceeds the viewer's 256 KiB budget, it shows a recovery
+on narrow screens. Drag its divider or focus it and use the arrow keys to
+adjust the space shared by the transcript and the conversation, including any
+interactive terminal under chat. Each read-only xterm.js instance uses the
+producer's declared rows and columns and up to 2,000 scrollback rows. If pending
+input exceeds the viewer's 256 KiB budget, it shows a recovery
 message until the next host reset. Host replay should pace chunks as needed.
 
 The C chat examples populate a text log and a simulated worker screen.
