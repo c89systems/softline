@@ -849,7 +849,7 @@ static int type_delay(const char **source, unsigned long maximum,
 }
 
 static void type_command(owner_t *o, const char *text) {
-  sl_prompt_simulation_options_t options = {0, 30, 0,
+  sl_prompt_simulation_options_t options = {0, 50, 1000,
                                             SL_PROMPT_QUEUE_MODE_QUEUED};
   unsigned long seconds = SL_PROMPT_SIMULATION_DELAY_MAX_MS / 1000;
   int status;
@@ -873,11 +873,11 @@ static void type_command(owner_t *o, const char *text) {
   if (!text[strspn(text, " \t\n")])
     goto usage;
   status = demo_web_simulate_prompt(o->web, text, &options);
-  text_event(o, DEMO_MESSAGE,
-             status == SL_OK ? "Prompt sent to browser."
-             : status == SL_ERROR_NOT_READY
-                 ? "No browser is available for /type."
-                 : "Could not send simulated prompt to browser.");
+  if (status != SL_OK)
+    text_event(o, DEMO_MESSAGE,
+               status == SL_ERROR_NOT_READY
+                   ? "No browser is available for /type."
+                   : "Could not send simulated prompt to browser.");
   return;
 usage:
   text_event(

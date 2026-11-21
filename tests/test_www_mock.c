@@ -587,7 +587,8 @@ static int assert_no_simulation(int fd, char *data, size_t cap) {
     return -1;
   do {
     if (ws_read(fd, data, cap, &opcode) < 0 ||
-        strstr(data, "\"type\":\"simulate_"))
+        strstr(data, "\"type\":\"simulate_") ||
+        strstr(data, "Prompt sent to browser."))
       return -1;
   } while (opcode != 10);
   return 0;
@@ -603,11 +604,15 @@ static int offer_simulation(demo_link_t *link, unsigned long id,
   return demo_link_queue(link, &packet) || demo_link_flush(link);
 }
 static int wait_simulation(int fd, char *data, size_t cap, const char *text,
-                           const char *mode) {
+                           const char *mode, int using_defaults) {
   return until(fd, data, cap, "\"type\":\"simulate_begin\"") ||
-         !strstr(data, "\"start\":\"3000\"") ||
-         !strstr(data, "\"pace\":\"30\"") ||
-         !strstr(data, "\"submit\":\"3000\"") || !strstr(data, mode) ||
+         !strstr(data,
+                 using_defaults ? "\"start\":\"0\"" : "\"start\":\"3000\"") ||
+         !strstr(data,
+                 using_defaults ? "\"pace\":\"50\"" : "\"pace\":\"30\"") ||
+         !strstr(data, using_defaults ? "\"submit\":\"1000\""
+                                      : "\"submit\":\"3000\"") ||
+         !strstr(data, mode) ||
          until(fd, data, cap, "\"type\":\"simulate_text\"") ||
          !strstr(data, text) ||
          until(fd, data, cap, "\"type\":\"simulate_end\"");
@@ -1063,20 +1068,20 @@ int main(int argc, char **argv) {
     CHECK(!until(two, data, cap, "\"type\":\"session\""));
     CHECK(!offer_simulation(&approval_link, 1, "/type {3:30:3:s} first"));
     CHECK(!wait_simulation(two, data, cap, "\"text\":\"first\"",
-                           "\"mode\":\"s\""));
+                           "\"mode\":\"s\"", 0));
     CHECK(!assert_no_simulation(one, data, cap));
     fd = ws_open(port);
     CHECK(fd >= 0 && !until(fd, data, cap, "\"type\":\"session\""));
     CHECK(!offer_simulation(&approval_link, 2, "/type {3:30:3:q} second"));
     CHECK(!wait_simulation(two, data, cap, "\"text\":\"second\"",
-                           "\"mode\":\"q\""));
+                           "\"mode\":\"q\"", 0));
     CHECK(!assert_no_simulation(fd, data, cap));
     close(two);
     two = -1;
     CHECK(!assert_no_simulation(fd, data, cap));
-    CHECK(!offer_simulation(&approval_link, 3, "/type {3:30:3:q} third"));
+    CHECK(!offer_simulation(&approval_link, 3, "/type third"));
     CHECK(!wait_simulation(fd, data, cap, "\"text\":\"third\"",
-                           "\"mode\":\"q\""));
+                           "\"mode\":\"q\"", 1));
     CHECK(!assert_no_simulation(one, data, cap));
     failed = 0;
 #else

@@ -228,7 +228,7 @@ browser on the queue owner's web listener. The browser waits 3 seconds,
 inserts one visible character every 30 ms, waits 3 more seconds, and submits
 through its normal steer action. Use `q` for an ordinary submission or set
 the middle value to `0` for one insertion. Without braces, the command uses
-`{0:30:0:q}`. The owner first selects its newest chat connection and keeps
+`{0:50:1:q}`. The owner first selects its newest chat connection and keeps
 using it until disconnect. The next command selects from the remaining live
 connections. Editing the composer or disconnecting cancels auto-submit.
 
