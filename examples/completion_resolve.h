@@ -116,6 +116,14 @@ static int demo_resolve(sl_t *sl, const char *prefix, sl_completion_emit_t emit,
       if (status != SL_OK)
         return status;
     }
+  if (prefix[0] == '/' && sl && userdata == sl) {
+    sl_queue_backend_info_t backend;
+    int status = emit("/demo", context);
+    if (status != SL_OK)
+      return status;
+    if (sl_queue_backend_info(sl, &backend) == SL_OK && backend.enabled)
+      return emit("/type", context);
+  }
   return SL_OK;
 }
 

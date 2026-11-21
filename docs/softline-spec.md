@@ -699,9 +699,9 @@ Current build surfaces include:
 - static and shared library builds
 - shared-library ABI/SOVERSION policy through the source-owned
   `SOFTLINE_ABI_VERSION`, currently `5`, decoupled from the project release
-  version and not a CMake cache option. Image-paste handover extends the public
-  configuration and receiver layouts, advancing exactly once from released
-  v0.17.0's ABI 4. Consumers must rebuild.
+  version and not a CMake cache option. Image-paste handover and timed prompt
+  submission extend public configuration and receiver layouts. ABI 5 advances
+  exactly once from released v0.17.0's ABI 4. Consumers must rebuild.
 - installed CMake package exports with canonical target `softline::softline`
 - installed pkg-config metadata
 - Lua 5.5 facade packaged as LuaRocks source artifacts

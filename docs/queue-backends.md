@@ -223,6 +223,15 @@ keeps it across client reconnects. To choose the owner's startup pace, set
 direct). Without a server setting, the owner's initial pace can follow the
 attached client's startup setting until the first `/stream` command.
 
+From the remote TUI, submit `/type {3:30:3:s} Example prompt` to drive a
+browser on the queue owner's web listener. The browser waits 3 seconds,
+inserts one visible character every 30 ms, waits 3 more seconds, and submits
+through its normal steer action. Use `q` for an ordinary submission or set
+the middle value to `0` for one insertion. Without braces, the command uses
+`{0:30:0:q}`. The owner first selects its newest chat connection and keeps
+using it until disconnect. The next command selects from the remaining live
+connections. Editing the composer or disconnecting cancels auto-submit.
+
 The example sends one CBOR array per libcbor `C89CBOR_LENGTH32` record over
 plain TCP. Its first field is the unsigned message type, followed by unsigned
 integers, text, byte strings or null. Reply deltas use byte strings so UTF-8

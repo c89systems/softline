@@ -41,6 +41,9 @@ struct chat_state {
   int exit_requested;
   unsigned int stream_initial_delay;
   enum demo_stream_mode stream_mode;
+  int prompt_demo;
+  unsigned int prompt_demo_turn;
+  double next_demo_attempt;
   unsigned int turn_index;
   demo_charts_t charts;
   size_t response_bytes;
@@ -750,6 +753,9 @@ static void schedule_injection(struct chat_state *state, double now) {
 /* The demo uses the editor's owner-thread idle hook. No timer worker or
  * competing input loop is needed; typing and stream watches keep priority. */
 static void approval_demo_idle(sl_t *sl, void *userdata) {
+  static const char *const demo_prompts[] = {
+      "Summarize the next steps.", "Show the current progress as a chart.",
+      "Which details should we verify before continuing?"};
   struct chat_state *state = userdata;
   sl_prompt_queue_delivery_t delivery;
   sl_prompt_queue_entry_info_t draft;
@@ -757,6 +763,20 @@ static void approval_demo_idle(sl_t *sl, void *userdata) {
   int result = SL_OK;
   if (demo_web_tick(state->web))
     state->demo_failed = 1;
+  if (state->prompt_demo && !state->busy && !sl_buffer(sl)[0] &&
+      now >= state->next_demo_attempt) {
+    sl_prompt_simulation_options_t options = {0};
+    options.start_delay_ms = 1000 + (unsigned long)(rand() % 2001);
+    options.character_delay_ms = (unsigned long)(rand() % 51);
+    options.submit_delay_ms = 1000 + (unsigned long)(rand() % 2001);
+    state->next_demo_attempt = now + 0.25;
+    if (sl->simulate_prompt(
+            sl,
+            demo_prompts[state->prompt_demo_turn %
+                         (sizeof(demo_prompts) / sizeof(demo_prompts[0]))],
+            &options) == SL_OK)
+      ++state->prompt_demo_turn;
+  }
 #ifdef SOFTLINE_CBOR_TCP
   if (state->remote) {
     if (demo_client_idle(state->remote) != SL_OK)
@@ -888,6 +908,23 @@ static int exit_editor_key(sl_t *sl, sl_key_t key, void *userdata,
     state->exit_requested = 1;
     *action = SL_KEY_ACTION_SUSPEND;
     return show_goodbye(state) == 0 ? SL_OK : SL_ERROR_IO;
+  }
+  if ((key == SL_KEY_ENTER || key == SL_KEY_ALT_ENTER ||
+       key == SL_KEY_CTRL_ENTER) &&
+      !strcmp(text, "/demo")) {
+    if (sl_prompt_queue_draft_info(sl, &draft) != SL_OK)
+      return SL_ERROR_IO;
+    if (!draft.id) {
+      *action = SL_KEY_ACTION_HANDLED;
+      state->prompt_demo = !state->prompt_demo;
+      state->next_demo_attempt = 0;
+      if (sl->cancel_prompt_simulation(sl) != SL_OK ||
+          sl->set_buffer(sl, "") != SL_OK ||
+          sl->set_idle_callback(sl, approval_demo_idle, state) != SL_OK)
+        return SL_ERROR_IO;
+      return set_chat_message(sl, state->prompt_demo ? "Prompt demo on."
+                                                     : "Prompt demo off.");
+    }
   }
   if (state->remote && key != SL_KEY_CTRL_D && !strcmp(text, "/quit")) {
     if (sl_prompt_queue_draft_info(sl, &draft) != SL_OK)
@@ -1511,6 +1548,9 @@ int main(int argc, char **argv) {
                     &state) != SL_OK ||
         sl_bind_key(state.sl, SL_KEY_CTRL_D, exit_editor_key, &state) !=
             SL_OK ||
+        sl_bind_key(state.sl, SL_KEY_ENTER, exit_editor_key, &state) != SL_OK ||
+        sl_bind_key(state.sl, SL_KEY_ALT_ENTER, exit_editor_key, &state) !=
+            SL_OK ||
         sl_bind_key(state.sl, SL_KEY_ALT_BASE + 'q', exit_editor_key, &state) !=
             SL_OK)) ||
       state.sl->output_stream_begin(state.sl) != SL_OK ||
@@ -1541,10 +1581,6 @@ int main(int argc, char **argv) {
           sl_set_idle_callback(state.sl, approval_demo_idle, &state) != SL_OK ||
           sl_bind_key(state.sl, SL_KEY_ALT_BASE + 'r', reconnect_editor,
                       &state) != SL_OK ||
-          sl_bind_key(state.sl, SL_KEY_ENTER, exit_editor_key, &state) !=
-              SL_OK ||
-          sl_bind_key(state.sl, SL_KEY_ALT_ENTER, exit_editor_key, &state) !=
-              SL_OK ||
           sl_bind_key(state.sl, SL_KEY_CTRL_ENTER, exit_editor_key, &state) !=
               SL_OK) {
         exit_code = 1;

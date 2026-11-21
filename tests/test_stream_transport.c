@@ -170,9 +170,10 @@ cleanup:
   return result;
 }
 
-static int no_sleep(const char *chat, const char *guard, const char *theme) {
+static int chat_commands(const char *chat, const char *guard, const char *theme,
+                         int prompt_demo) {
   int master = -1, slave = -1, status, result = 1, sent = 0, quit = 0;
-  int toggle = !strcmp(theme, "riced"), ready = 0;
+  int toggle = !strcmp(theme, "riced"), ready = 0, stopping = 0;
   pid_t child = -1;
   struct winsize size;
   struct termios attributes;
@@ -199,6 +200,7 @@ static int no_sleep(const char *chat, const char *guard, const char *theme) {
     setenv("SOFTLINE_CHAT_CHAR_MS", toggle ? "20" : "0", 1);
     setenv("SOFTLINE_PROMPT_THEME", theme, 1);
     setenv("LD_PRELOAD", guard, 1);
+    setenv("SOFTLINE_CHAT_APPROVAL_DEMO", "0", 1);
     execl(chat, chat, (char *)NULL);
     _exit(127);
   }
@@ -206,7 +208,7 @@ static int no_sleep(const char *chat, const char *guard, const char *theme) {
   slave = -1;
   descriptor.fd = master;
   descriptor.events = POLLIN;
-  deadline = now() + 4;
+  deadline = now() + (prompt_demo ? 12 : 4);
   while (now() < deadline) {
     CHECK(poll(&descriptor, 1, 20) >= 0, "poll failed");
     if (!(descriptor.revents & (POLLIN | POLLHUP)))
@@ -238,12 +240,21 @@ static int no_sleep(const char *chat, const char *guard, const char *theme) {
             "direct mode command failed");
       ready = 1;
     }
-    if (!sent && (toggle ? strstr(plain, "Streaming mode: direct.")
-                         : strstr(plain, "> "))) {
+    if (prompt_demo && !sent && strstr(plain, "> ")) {
+      CHECK(write(master, "/demo\r", 6) == 6, "enable demo failed");
+      sent = 1;
+    } else if (!prompt_demo && !sent &&
+               (toggle ? strstr(plain, "Streaming mode: direct.")
+                       : strstr(plain, "> "))) {
       CHECK(write(master, "hello\r", 6) == 6, "chat input failed");
       sent = 1;
     }
-    if (!quit && strstr(plain, "Try another prompt.")) {
+    if (prompt_demo && !stopping && strstr(plain, "Try another prompt.")) {
+      CHECK(write(master, "/demo\r", 6) == 6, "disable demo failed");
+      stopping = 1;
+    }
+    if (!quit && strstr(plain, prompt_demo ? "Prompt demo off."
+                                           : "Try another prompt.")) {
       CHECK(write(master, "/quit\r", 6) == 6, "chat quit failed");
       quit = 1;
     }
@@ -254,6 +265,10 @@ static int no_sleep(const char *chat, const char *guard, const char *theme) {
   CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0,
         "chat producer called sleep or failed");
   CHECK(sent && quit && strstr(bytes, "Goodbye."), "chat coverage missing");
+  if (prompt_demo)
+    CHECK(strstr(plain, "Summarize the next steps.") &&
+              strstr(plain, "Prompt demo on.") && stopping,
+          "the demo failed to send a simulated turn");
   result = 0;
 cleanup:
   if (child > 0) {
@@ -271,8 +286,10 @@ cleanup:
 
 int main(int argc, char **argv) {
   if (argc == 4 && strcmp(argv[1], "no_sleep") == 0)
-    return no_sleep(argv[2], argv[3], "default") ||
-           no_sleep(argv[2], argv[3], "riced");
+    return chat_commands(argv[2], argv[3], "default", 0) ||
+           chat_commands(argv[2], argv[3], "riced", 0);
+  if (argc == 4 && strcmp(argv[1], "prompt_demo") == 0)
+    return chat_commands(argv[2], argv[3], "default", 1);
   if (argc != 3)
     return 2;
   if (strcmp(argv[1], "feed") == 0)

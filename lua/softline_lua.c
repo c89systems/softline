@@ -2010,6 +2010,49 @@ static int softline_lua_submit(lua_State *L) {
   return softline_lua_status(L, sl_submit(handle->sl));
 }
 
+static int simulation_delay(lua_State *L, const char *field,
+                            unsigned long *result) {
+  lua_Integer value;
+  lua_getfield(L, 3, field);
+  value = luaL_optinteger(L, -1, 0);
+  lua_pop(L, 1);
+  if (value < 0 || (lua_Unsigned)value > SL_PROMPT_SIMULATION_DELAY_MAX_MS)
+    return 0;
+  *result = (unsigned long)value;
+  return 1;
+}
+
+static int softline_lua_simulate_prompt(lua_State *L) {
+  softline_lua_handle_t *handle = softline_lua_check(L, 1);
+  sl_prompt_simulation_options_t options = {0};
+  size_t length;
+  const char *text = luaL_checklstring(L, 2, &length);
+  if (memchr(text, '\0', length))
+    return softline_lua_status(L, SL_ERROR_INVALID);
+  if (!lua_isnoneornil(L, 3)) {
+    lua_Integer mode;
+    luaL_checktype(L, 3, LUA_TTABLE);
+    if (!simulation_delay(L, "start_delay_ms", &options.start_delay_ms) ||
+        !simulation_delay(L, "character_delay_ms",
+                          &options.character_delay_ms) ||
+        !simulation_delay(L, "submit_delay_ms", &options.submit_delay_ms))
+      return softline_lua_status(L, SL_ERROR_INVALID);
+    lua_getfield(L, 3, "mode");
+    mode = luaL_optinteger(L, -1, SL_PROMPT_QUEUE_MODE_QUEUED);
+    lua_pop(L, 1);
+    if (mode != SL_PROMPT_QUEUE_MODE_QUEUED &&
+        mode != SL_PROMPT_QUEUE_MODE_STEER)
+      return softline_lua_status(L, SL_ERROR_INVALID);
+    options.mode = (sl_prompt_queue_mode_t)mode;
+  }
+  return softline_lua_status(L, sl_simulate_prompt(handle->sl, text, &options));
+}
+
+static int softline_lua_cancel_prompt_simulation(lua_State *L) {
+  return softline_lua_status(
+      L, sl_cancel_prompt_simulation(softline_lua_check(L, 1)->sl));
+}
+
 static int softline_lua_cancel(lua_State *L) {
   softline_lua_handle_t *handle;
   handle = softline_lua_check(L, 1);
@@ -2453,6 +2496,8 @@ static const luaL_Reg softline_lua_methods[] = {
     {"cursor", softline_lua_cursor},
     {"set_cursor", softline_lua_set_cursor},
     {"submit", softline_lua_submit},
+    {"simulate_prompt", softline_lua_simulate_prompt},
+    {"cancel_prompt_simulation", softline_lua_cancel_prompt_simulation},
     {"cancel", softline_lua_cancel},
     {"suspend", softline_lua_suspend},
     {"bind_key", softline_lua_bind_key},

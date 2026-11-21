@@ -324,6 +324,14 @@ live scroll regions, status lines, and spinners are off; the theme is
   boundary when possible.
 - `sl:submit()` submits the active buffer or reverse-search match from a callback,
   applying queue admission. Idle/watch submissions have ordinary queued intent.
+- `sl:simulate_prompt(text, options)` schedules a turn on an empty TTY draft.
+  The optional table takes `start_delay_ms`, `character_delay_ms`,
+  `submit_delay_ms`, and `mode` (`softline.QUEUE_MODE_QUEUED` or
+  `softline.QUEUE_MODE_STEER`). All delays default to zero and the mode
+  defaults to queued. With zero character delay, the full prompt is inserted
+  together. Real input takes over the draft and cancels auto-submit.
+- `sl:cancel_prompt_simulation()` cancels automation and leaves visible text
+  editable.
 - `sl:cancel()` cancels the active `readline()`.
 - `sl:bind_key(key, callback)` binds a decoded key to a callback. The callback
   receives the key code and returns a `softline.KEY_ACTION_*` value, or `nil`

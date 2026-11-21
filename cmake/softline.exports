@@ -14,6 +14,7 @@ sl_www_connect
 sl_www_create
 sl_www_destroy
 sl_www_emit
+sl_www_simulate_prompt
 sl_www_field
 sl_www_message
 sl_buffer
@@ -94,6 +95,8 @@ sl_set_status_message
 sl_set_status_message_prefix
 sl_set_status_message_colors
 sl_submit
+sl_simulate_prompt
+sl_cancel_prompt_simulation
 sl_suspend
 sl_terminal_handoff
 sl_terminal_local

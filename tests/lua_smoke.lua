@@ -35,6 +35,8 @@ local prompt_methods = {
   "output_stream_end",
   "set_prompt_queue",
   "set_queue_display_delay",
+  "simulate_prompt",
+  "cancel_prompt_simulation",
   "queue_count",
   "queue_capacity",
   "queue_peek",

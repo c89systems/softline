@@ -274,4 +274,15 @@ end
 suspended("policy-45> ")
 assert(sl:buffer() == "discard\nwithout erasing" and history == before_stash_history)
 sl:close()
+local simulation = assert(softline.new())
+assert(simulation:simulate_prompt("cancelled"))
+assert(simulation:cancel_prompt_simulation())
+assert(simulation:simulate_prompt("simulated café", {
+  start_delay_ms = 10,
+  character_delay_ms = 1,
+  submit_delay_ms = 10,
+  mode = softline.QUEUE_MODE_QUEUED,
+}))
+assert(simulation:readline("simulate> ") == "simulated café")
+simulation:close()
 print("lua queue policy passed")

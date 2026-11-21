@@ -61,6 +61,26 @@ static int binary(void *context, const sl_www_request_t *request,
   ++h->binaries;
   return SL_OK;
 }
+typedef struct {
+  int frames, fail_after;
+} simulation_sink_t;
+static int simulation_frame(void *context, const void *data, size_t length) {
+  simulation_sink_t *sink = context;
+  const char *frame = data;
+  static const char *const types[] = {"simulate_begin", "simulate_text",
+                                      "simulate_text", "simulate_end"};
+  char prefix[40];
+  int n;
+  if (sink->frames == sink->fail_after)
+    return SL_ERROR_NOT_READY;
+  if (sink->frames >= 4)
+    return SL_ERROR;
+  n = snprintf(prefix, sizeof(prefix), "{\"type\":\"%s\"", types[sink->frames]);
+  if (n < 0 || length < (size_t)n || memcmp(frame, prefix, (size_t)n))
+    return SL_ERROR;
+  ++sink->frames;
+  return SL_OK;
+}
 int main(void) {
   static const char request[] = "action=send&text=a%2Bb+%26+%E2%82%AC%0A";
   static const char *bad[] = {"",
@@ -140,7 +160,7 @@ int main(void) {
                        &h) == SL_OK &&
         h.calls == 1 && h.reentrant == SL_ERROR_INVALID);
   CHECK(h.output && strstr(h.output, "\"type\":\"ack\"") &&
-        strstr(h.output, "\\u000a"));
+        strstr(h.output, "\\n"));
   for (i = 0; i < sizeof(bad) / sizeof(bad[0]); ++i)
     CHECK(sl_www_message(h.web, &h, bad[i], strlen(bad[i]), write_frame, &h) ==
           SL_ERROR_INVALID);
@@ -154,9 +174,8 @@ int main(void) {
   fields[0].value = "x\"\\\n";
   CHECK(
       sl_www_emit(write_frame, &h, "delta", "1", fields, 1) == SL_OK &&
-      !strcmp(
-          h.output,
-          "{\"type\":\"delta\",\"seq\":\"1\",\"text\":\"x\\\"\\\\\\u000a\"}"));
+      !strcmp(h.output,
+              "{\"type\":\"delta\",\"seq\":\"1\",\"text\":\"x\\\"\\\\\\n\"}"));
   fields[1] = fields[0];
   CHECK(sl_www_emit(write_frame, &h, "delta", NULL, fields, 2) ==
         SL_ERROR_INVALID);
@@ -177,6 +196,24 @@ int main(void) {
   h.fail = 1;
   CHECK(sl_www_emit(write_frame, &h, "delta", NULL, fields, 1) ==
         SL_ERROR_NOT_READY);
+  {
+    char text[SL_WWW_CHUNK_MAX + 8];
+    simulation_sink_t sink = {0, -1};
+    sl_prompt_simulation_options_t options = {1000, 30, 3000,
+                                              SL_PROMPT_QUEUE_MODE_STEER};
+    memset(text, 'a', SL_WWW_CHUNK_MAX - 1);
+    strcpy(text + SL_WWW_CHUNK_MAX - 1, "\342\202\254\nlast");
+    CHECK(h.web->simulate_prompt(h.web, simulation_frame, &sink, text,
+                                 &options) == SL_OK &&
+          sink.frames == 4);
+    sink.frames = 0;
+    sink.fail_after = 2;
+    CHECK(sl_www_simulate_prompt(h.web, simulation_frame, &sink, text,
+                                 &options) == SL_ERROR_NOT_READY &&
+          sink.frames == 2);
+    CHECK(sl_www_simulate_prompt(h.web, simulation_frame, &sink, " \t\n",
+                                 NULL) == SL_ERROR_INVALID);
+  }
   sl_www_destroy(h.web);
   free(h.output);
   {

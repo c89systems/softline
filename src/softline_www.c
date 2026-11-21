@@ -1,5 +1,6 @@
 #include "softline/softline.h"
 #include "softline/www.h"
+#include "softline_internal.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -38,6 +39,8 @@ static void quoted(json_t *j, const char *s, size_t n) {
       escape[0] = '\\';
       escape[1] = (char)c;
       append(j, escape, 2);
+    } else if (c == '\n' || c == '\t') {
+      append(j, c == '\n' ? "\\n" : "\\t", 2);
     } else if (c < 32) {
       char escape[6];
       memcpy(escape, "\\u00", 4);
@@ -312,6 +315,57 @@ static int binary(sl_www_t *self, void *peer, const void *data, size_t length,
   impl->callback_active = 0;
   return result;
 }
+static int simulate_prompt(sl_www_t *self, sl_www_write_t write, void *target,
+                           const char *text,
+                           const sl_prompt_simulation_options_t *options) {
+  static const sl_prompt_simulation_options_t defaults = {0};
+  sl_www_field_t timing[] = {{"start", NULL, 0},
+                             {"pace", NULL, 0},
+                             {"submit", NULL, 0},
+                             {"mode", NULL, 0}};
+  sl_www_field_t chunk = {"text", NULL, 0};
+  char start[16], pace[16], submit[16];
+  size_t length, offset;
+  int result;
+  www_impl_t *impl = self ? self->impl : NULL;
+  if (!options)
+    options = &defaults;
+  if (!impl || !impl->config.enabled || !write || !text ||
+      !text[strspn(text, " \t\n")] ||
+      !sl_prompt_simulation_options_valid(options))
+    return SL_ERROR_INVALID;
+  if (impl->callback_active)
+    return SL_ERROR_NOT_READY;
+  length = strlen(text);
+  if (length > 128u * 1024u)
+    return SL_ERROR_FULL;
+  if (!sl_quoted_prompt_text_valid(text) || !utf8(text, length))
+    return SL_ERROR_INVALID;
+  (void)snprintf(start, sizeof(start), "%lu", options->start_delay_ms);
+  (void)snprintf(pace, sizeof(pace), "%lu", options->character_delay_ms);
+  (void)snprintf(submit, sizeof(submit), "%lu", options->submit_delay_ms);
+  timing[0].value = start;
+  timing[1].value = pace;
+  timing[2].value = submit;
+  timing[3].value = options->mode == SL_PROMPT_QUEUE_MODE_STEER ? "s" : "q";
+  impl->callback_active = 1;
+  result = sl_www_emit(write, target, "simulate_begin", NULL, timing, 4);
+  for (offset = 0; result == SL_OK && offset < length; offset += chunk.length) {
+    size_t end = offset + SL_WWW_CHUNK_MAX;
+    if (end > length)
+      end = length;
+    while (end < length && ((unsigned char)text[end] & 192u) == 128u)
+      --end;
+    chunk.value = text + offset;
+    chunk.length = end - offset;
+    result = sl_www_emit(write, target, "simulate_text", NULL, &chunk, 1);
+  }
+  if (result == SL_OK)
+    result = sl_www_emit(write, target, "simulate_end", NULL, NULL, 0);
+  impl->callback_active = 0;
+  return result;
+}
+
 sl_www_t *sl_www_create(const sl_www_config_t *config) {
   sl_www_t *self;
   www_impl_t *impl;
@@ -347,6 +401,7 @@ sl_www_t *sl_www_create(const sl_www_config_t *config) {
   self->connect = connect_peer;
   self->binary = binary;
   self->destroy = destroy;
+  self->simulate_prompt = simulate_prompt;
   memset(fields, 0, sizeof(fields));
   fields[0].name = "title";
   fields[0].value = config->title ? config->title : "softline";
@@ -392,4 +447,12 @@ int sl_www_binary(sl_www_t *s, void *p, const void *data, size_t n,
                   sl_www_write_t write, void *context) {
   return s && s->binary ? s->binary(s, p, data, n, write, context)
                         : SL_ERROR_INVALID;
+}
+
+int sl_www_simulate_prompt(sl_www_t *self, sl_www_write_t write, void *target,
+                           const char *text,
+                           const sl_prompt_simulation_options_t *options) {
+  return self && self->simulate_prompt
+             ? self->simulate_prompt(self, write, target, text, options)
+             : SL_ERROR_INVALID;
 }

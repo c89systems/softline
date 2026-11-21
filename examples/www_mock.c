@@ -290,6 +290,13 @@ int demo_www_reply(demo_www_peer_t *p, const char *type,
              ? sl_www_emit(peer_write, p, type, NULL, fields, count)
              : SL_ERROR_INVALID;
 }
+int demo_www_simulate_prompt(demo_www_peer_t *p, const char *text,
+                             const sl_prompt_simulation_options_t *options) {
+  return p && p->fd >= 0 && p->websocket && !p->terminal_route && !p->dead
+             ? sl_www_simulate_prompt(p->server->handler, peer_write, p, text,
+                                      options)
+             : SL_ERROR_NOT_READY;
+}
 size_t demo_www_base64(const unsigned char *in, size_t n, char *out) {
   static const char alphabet[] =
       "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";

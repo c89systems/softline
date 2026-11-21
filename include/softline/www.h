@@ -113,6 +113,9 @@ struct sl_www {
   void (*destroy)(sl_www_t *);
   /** Private implementation; applications must not inspect it. */
   void *impl;
+  /** Direct timed submission to one connected browser's writer. */
+  int (*simulate_prompt)(sl_www_t *, sl_www_write_t, void *, const char *,
+                         const sl_prompt_simulation_options_t *);
 };
 
 /** Set documented defaults; enabled remains zero. */
@@ -132,6 +135,13 @@ int sl_www_message(sl_www_t *, void *, const void *, size_t, sl_www_write_t,
 /** Deliver one bounded binary image chunk; callback reentry is rejected. */
 int sl_www_binary(sl_www_t *, void *, const void *, size_t, sl_www_write_t,
                   void *);
+/** Send one transient prompt simulation to the selected chat connection.
+ * The browser applies the timing and submits through its usual send/steer
+ * action. Text is borrowed for this call. A failed writer leaves no
+ * committed simulation. Leave options NULL for immediate queued submission.
+ * Call outside receiver callbacks, on the receiver's owner thread. */
+int sl_www_simulate_prompt(sl_www_t *, sl_www_write_t, void *, const char *,
+                           const sl_prompt_simulation_options_t *);
 /** Encode one bounded event and call write once. The output is JSON, without
  * HTTP/WebSocket framing. Field names are ASCII identifiers. type and seq are
  * reserved. seq may be NULL for transient replies. See docs/web-frontend.md. */

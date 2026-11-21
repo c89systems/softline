@@ -739,7 +739,7 @@ int sl_image_valid_path(const char *path) {
   return sl_statusline_text_valid(path);
 }
 
-static int sl_quoted_prompt_text_valid(const char *text) {
+int sl_quoted_prompt_text_valid(const char *text) {
   size_t len;
   size_t pos;
   if (!text)
@@ -1343,6 +1343,7 @@ static int sl_buf_replace(sl_t *self, size_t at, size_t removed,
     memmove(impl->buf + at, text, inserted);
   impl->len = len;
   impl->buf[len] = '\0';
+  ++impl->draft_revision;
   impl->image_literal = 0;
   sl_image_changed(self, at, removed, inserted);
   sl_completion_changed(impl, at, removed, inserted, 0);
@@ -1370,6 +1371,8 @@ static int sl_buf_set(sl_t *self, const char *s) {
     sl_edit_clear_undo(&impl->edit);
   if (n > 0)
     memcpy(impl->buf, s, n);
+  if (n || impl->len)
+    ++impl->draft_revision;
   impl->buf[n] = '\0';
   impl->len = n;
   impl->cursor = n;
@@ -1630,6 +1633,120 @@ static int sl_submit_method(sl_t *self) {
   }
   impl->request_submit = 1;
   return SL_OK;
+}
+
+int sl_prompt_simulation_options_valid(
+    const sl_prompt_simulation_options_t *options) {
+  return options->start_delay_ms <= SL_PROMPT_SIMULATION_DELAY_MAX_MS &&
+         options->character_delay_ms <= SL_PROMPT_SIMULATION_DELAY_MAX_MS &&
+         options->submit_delay_ms <= SL_PROMPT_SIMULATION_DELAY_MAX_MS &&
+         (options->mode == SL_PROMPT_QUEUE_MODE_QUEUED ||
+          options->mode == SL_PROMPT_QUEUE_MODE_STEER);
+}
+
+static int sl_cancel_prompt_simulation_method(sl_t *self) {
+  sl_impl_t *impl = sl_impl(self);
+  if (!impl)
+    return SL_ERROR_INVALID;
+  free(impl->prompt_simulation.text);
+  impl->prompt_simulation.text = NULL;
+  return SL_OK;
+}
+
+static int
+sl_simulate_prompt_method(sl_t *self, const char *text,
+                          const sl_prompt_simulation_options_t *options) {
+  static const sl_prompt_simulation_options_t defaults = {0};
+  sl_impl_t *impl = sl_impl(self);
+  size_t length;
+  int64_t now;
+  if (!options)
+    options = &defaults;
+  if (!impl || !text || !text[strspn(text, " \t\n")] ||
+      !sl_prompt_simulation_options_valid(options))
+    return SL_ERROR_INVALID;
+  length = strlen(text);
+  if (length > impl->line_max_len)
+    return SL_ERROR_FULL;
+  if (!sl_quoted_prompt_text_valid(text))
+    return SL_ERROR_INVALID;
+  if (!isatty(impl->input_fd) || !isatty(impl->output_fd) ||
+      (options->mode == SL_PROMPT_QUEUE_MODE_STEER &&
+       (!sl_prompt_queue_enabled(impl) ||
+        impl->prompt_queue.keys.submit_or_promote_newest == SL_KEY_NONE)))
+    return SL_ERROR_UNSUPPORTED;
+  if (impl->len || impl->prompt_simulation.text ||
+      impl->history_search_active || impl->prompt_queue.editing.info.id ||
+      sl_image_pending(impl) || impl->terminal_active ||
+      impl->readline_suspended || impl->bracketed_paste ||
+      sl_transcript_visible(self))
+    return SL_ERROR_NOT_READY;
+  now = sl_queue_display_now();
+  if (now < 0)
+    return SL_ERROR_IO;
+  impl->prompt_simulation.text = malloc(length + 1);
+  if (!impl->prompt_simulation.text)
+    return SL_ERROR_NOMEM;
+  memcpy(impl->prompt_simulation.text, text, length + 1);
+  impl->prompt_simulation.length = length;
+  impl->prompt_simulation.offset = 0;
+  impl->prompt_simulation.deadline = now + options->start_delay_ms;
+  impl->prompt_simulation.revision = impl->draft_revision;
+  impl->prompt_simulation.options = *options;
+  return SL_OK;
+}
+
+static int sl_prompt_simulation_key(sl_t *self, int key) {
+  sl_impl_t *impl = sl_impl(self);
+  sl_prompt_simulation_options_t *options = &impl->prompt_simulation.options;
+  size_t offset = impl->prompt_simulation.offset;
+  size_t length = impl->prompt_simulation.length;
+  size_t amount;
+  int64_t now;
+  if (!impl->prompt_simulation.text)
+    return key;
+  if (impl->prompt_simulation.revision != impl->draft_revision ||
+      impl->cursor != offset || impl->history_search_active ||
+      impl->prompt_queue.editing.info.id || sl_image_pending(impl) ||
+      impl->bracketed_paste || sl_transcript_visible(self)) {
+    (void)sl_cancel_prompt_simulation_method(self);
+    return key;
+  }
+  if (key != SL_KEY_NONE) {
+    (void)sl_cancel_prompt_simulation_method(self);
+    if (key == SL_KEY_ESCAPE && sl_buf_set_public(self, "") == SL_OK)
+      return SL_KEY_UNKNOWN;
+    return key;
+  }
+  if (errno || impl->request_submit || impl->request_cancel ||
+      impl->request_suspend)
+    return key;
+  now = sl_queue_display_now();
+  if (now < 0 || now < impl->prompt_simulation.deadline)
+    return key;
+  if (offset < length) {
+    amount = options->character_delay_ms
+                 ? sl_utf8_next_cluster_len(impl->prompt_simulation.text,
+                                            length, offset)
+                 : length - offset;
+    if (sl_buf_insert(self, offset, impl->prompt_simulation.text + offset,
+                      amount) != 0) {
+      (void)sl_cancel_prompt_simulation_method(self);
+      return key;
+    }
+    impl->prompt_simulation.revision = impl->draft_revision;
+    impl->cursor = impl->prompt_simulation.offset = offset + amount;
+    impl->prompt_simulation.deadline =
+        now + (impl->cursor == length ? options->submit_delay_ms
+                                      : options->character_delay_ms);
+    if (impl->cursor != length || options->submit_delay_ms)
+      return key;
+  }
+  key = options->mode == SL_PROMPT_QUEUE_MODE_STEER
+            ? impl->prompt_queue.keys.submit_or_promote_newest
+            : SL_KEY_ENTER;
+  (void)sl_cancel_prompt_simulation_method(self);
+  return key;
 }
 
 static int sl_cancel_method(sl_t *self) {
@@ -5860,6 +5977,16 @@ retry:
     if (poll_timeout_ms < 0 || delay < poll_timeout_ms)
       poll_timeout_ms = delay;
   }
+  if (timeout_ms < 0 && impl->prompt_simulation.text) {
+    int64_t now = sl_queue_display_now();
+    int64_t remaining = impl->prompt_simulation.deadline - now;
+    int delay = now < 0               ? 100
+                : remaining <= 0      ? 0
+                : remaining > INT_MAX ? INT_MAX
+                                      : (int)remaining;
+    if (poll_timeout_ms < 0 || delay < poll_timeout_ms)
+      poll_timeout_ms = delay;
+  }
   if (count == 1) {
     ssize_t input_ready;
     input_ready = sl_read_terminal_byte(impl, ch, poll_timeout_ms);
@@ -7476,6 +7603,10 @@ static char *sl_readline_impl(sl_t *self, const char *prompt,
       key = sl_read_paste_input(self, paste_bytes, &paste_len);
     else
       key = sl_read_key(self);
+    if (waiting_edit && impl->prompt_simulation.text)
+      (void)sl_cancel_prompt_simulation_method(self);
+    else
+      key = sl_prompt_simulation_key(self, key);
     if ((key != SL_KEY_NONE && sl_transcript_visible(self)) ||
         (key == SL_KEY_CTRL_T && !impl->bracketed_paste && !waiting_edit &&
          !impl->control_x_pending &&
@@ -8497,6 +8628,7 @@ static void sl_destroy_method(sl_t *self) {
     return;
   }
   if (impl) {
+    (void)sl_cancel_prompt_simulation_method(self);
     sl_transcript_destroy(self);
     sl_image_destroy(self);
     sl_terminal_cleanup(impl);
@@ -9829,6 +9961,8 @@ static sl_t *sl_create_with_config_impl(const sl_config_t *config) {
   self->cursor = sl_cursor_method;
   self->set_cursor = sl_set_cursor_method;
   self->submit = sl_submit_method;
+  self->simulate_prompt = sl_simulate_prompt_method;
+  self->cancel_prompt_simulation = sl_cancel_prompt_simulation_method;
   self->cancel = sl_cancel_method;
   self->suspend = sl_suspend_method;
   self->print_above = sl_print_above_method;
@@ -10448,6 +10582,19 @@ int sl_submit(sl_t *self) {
   if (!self || !self->submit)
     return SL_ERROR_INVALID;
   return self->submit(self);
+}
+
+int sl_simulate_prompt(sl_t *self, const char *text,
+                       const sl_prompt_simulation_options_t *options) {
+  return self && self->simulate_prompt
+             ? self->simulate_prompt(self, text, options)
+             : SL_ERROR_INVALID;
+}
+
+int sl_cancel_prompt_simulation(sl_t *self) {
+  return self && self->cancel_prompt_simulation
+             ? self->cancel_prompt_simulation(self)
+             : SL_ERROR_INVALID;
 }
 
 int sl_cancel(sl_t *self) {

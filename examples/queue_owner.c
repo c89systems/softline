@@ -81,6 +81,9 @@ static int web_submit(void *, const char *, int, sl_queue_request_id_t *);
 static void terminal_lock_command(owner_t *, const char *);
 static int web_control(void *, const char *, const char *, const char *);
 static void web_snapshot(void *, demo_web_chat_t *);
+static int owner_command(const char *text) {
+  return is_local_command(text) || command_named(text, "/type");
+}
 static volatile sig_atomic_t quitting;
 static volatile sig_atomic_t producer_paused;
 static int completion_fd = -1;
@@ -206,7 +209,7 @@ static void handoff_shell(owner_t *o, const char *text) {
 static sl_queue_entry_t exposed(owner_t *o, size_t index) {
   sl_queue_entry_t e = o->items[index].value;
   e.ready = !e.held && !e.edit_held && !e.stopped &&
-            (is_local_command(e.text) || !o->active);
+            (owner_command(e.text) || !o->active);
   if (!o->client || strcmp(o->items[index].owner, o->client->name))
     e.edit_token = NULL;
   return e;
@@ -599,7 +602,8 @@ static int web_submit(void *context, const char *text, int steer,
     terminal_lock_command(o, text);
     return SL_OK;
   }
-  if (is_shell_command(text) || !strcmp(text, "/quit"))
+  if (is_shell_command(text) || !strcmp(text, "/quit") ||
+      command_named(text, "/type"))
     return SL_ERROR_INVALID;
   memset(&r, 0, sizeof(r));
   r.operation = SL_QUEUE_OFFER;
@@ -831,9 +835,61 @@ static void terminal_lock_command(owner_t *o, const char *text) {
              o->terminal_policy ? "Terminal prompt lock on."
                                 : "Terminal prompt lock off.");
 }
+static int type_delay(const char **source, unsigned long maximum,
+                      unsigned long *value) {
+  char *end;
+  if (**source < '0' || **source > '9')
+    return -1;
+  errno = 0;
+  *value = strtoul(*source, &end, 10);
+  if (errno || *value > maximum || *end != ':')
+    return -1;
+  *source = end + 1;
+  return 0;
+}
+
+static void type_command(owner_t *o, const char *text) {
+  sl_prompt_simulation_options_t options = {0, 30, 0,
+                                            SL_PROMPT_QUEUE_MODE_QUEUED};
+  unsigned long seconds = SL_PROMPT_SIMULATION_DELAY_MAX_MS / 1000;
+  int status;
+  text += sizeof("/type") - 1;
+  while (*text == ' ')
+    ++text;
+  if (*text == '{') {
+    ++text;
+    if (type_delay(&text, seconds, &options.start_delay_ms) ||
+        type_delay(&text, SL_PROMPT_SIMULATION_DELAY_MAX_MS,
+                   &options.character_delay_ms) ||
+        type_delay(&text, seconds, &options.submit_delay_ms) ||
+        (*text != 'q' && *text != 's') || text[1] != '}' || text[2] != ' ')
+      goto usage;
+    options.mode =
+        *text == 's' ? SL_PROMPT_QUEUE_MODE_STEER : SL_PROMPT_QUEUE_MODE_QUEUED;
+    options.start_delay_ms *= 1000;
+    options.submit_delay_ms *= 1000;
+    text += 3;
+  }
+  if (!text[strspn(text, " \t\n")])
+    goto usage;
+  status = demo_web_simulate_prompt(o->web, text, &options);
+  text_event(o, DEMO_MESSAGE,
+             status == SL_OK ? "Prompt sent to browser."
+             : status == SL_ERROR_NOT_READY
+                 ? "No browser is available for /type."
+                 : "Could not send simulated prompt to browser.");
+  return;
+usage:
+  text_event(
+      o, DEMO_MESSAGE,
+      "Usage: /type [{start-seconds:character-ms:submit-seconds:q|s}] prompt");
+}
+
 static void host_action(owner_t *o, const char *text, int at_seam, double now) {
   if (command_named(text, "/terminal-lock")) {
     terminal_lock_command(o, text);
+  } else if (command_named(text, "/type")) {
+    type_command(o, text);
   } else if (command_named(text, "/stream")) {
     unsigned int delay =
         demo_stream_delay(o->stream_mode, o->stream_initial_delay);
@@ -886,11 +942,12 @@ static int ready(owner_t *o, item_t *item, int at_seam) {
     return 0;
   /* Conversation settings can change even while prompt dispatch is gated. */
   if (command_named(item->value.text, "/terminal-lock") ||
-      command_named(item->value.text, "/stream"))
+      command_named(item->value.text, "/stream") ||
+      command_named(item->value.text, "/type"))
     return 1;
   if (o->gated)
     return 0;
-  if (is_local_command(item->value.text))
+  if (owner_command(item->value.text))
     return 1;
   if (item->value.stopped)
     return 0;
@@ -905,11 +962,11 @@ static int eligible(owner_t *o, size_t index, int at_seam) {
   size_t i;
   if (!ready(o, o->items + index, at_seam))
     return 0;
-  if (is_local_command(after->text))
+  if (owner_command(after->text))
     return 1;
   for (i = 0; i < index; ++i) {
     const sl_queue_entry_t *before = &o->items[i].value;
-    if (is_local_command(before->text) || before->stopped)
+    if (owner_command(before->text) || before->stopped)
       continue;
     if (!before->action &&
         (before->held || (after->mode == SL_PROMPT_QUEUE_MODE_STEER &&

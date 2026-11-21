@@ -113,6 +113,16 @@ never collect a complete response to simulate streaming. Each event permits
 `type` and optional `seq` are reserved. Base64 permits a producer's byte chunks
 to split UTF-8 characters while keeping each JSON frame valid.
 
+To simulate one prompt in a browser, call
+`receiver->simulate_prompt(receiver, writer, writer_context, text, options)`
+or `sl_www_simulate_prompt()` with the writer for one live chat connection.
+The shared `sl_prompt_simulation_options_t` specifies milliseconds before
+typing, between visible characters, and before submission, plus queue or
+steer intent. Zero typing delay inserts the full text in one operation.
+The browser needs an empty, unlocked composer and uses its normal send
+action after the final delay. Manual edits take over the draft. Delivery is
+transient and a disconnect cancels unfinished automation.
+
 ## Browser event contract
 
 All JSON values below are strings. Replay cursors are opaque strings assigned

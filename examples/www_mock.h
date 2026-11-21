@@ -31,6 +31,8 @@ void demo_www_peer_data(demo_www_peer_t *, void *);
 void *demo_www_peer_get(demo_www_peer_t *);
 int demo_www_reply(demo_www_peer_t *, const char *, const sl_www_field_t *,
                    size_t);
+int demo_www_simulate_prompt(demo_www_peer_t *, const char *,
+                             const sl_prompt_simulation_options_t *);
 /* Host-owned bounded replay log (16 MiB/8192 events), never transcript storage
  * in libsoftline. Live production does not wait for a slow browser. */
 int demo_www_publish(demo_www_t *, const char *, const sl_www_field_t *,

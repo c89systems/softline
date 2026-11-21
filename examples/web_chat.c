@@ -48,7 +48,7 @@ struct demo_web_chat {
   sl_t *editor;
   demo_web_ops_t ops;
   void *context;
-  web_view_t *views;
+  web_view_t *views, *simulation_target;
   unsigned long serial;
   unsigned long transcript_turns;
   char response[40], session[96];
@@ -261,6 +261,8 @@ static void closed(void *context, demo_www_peer_t *peer) {
   web_view_t *v = demo_www_peer_get(peer), **at;
   if (!v)
     return;
+  if (w->simulation_target == v)
+    w->simulation_target = NULL;
   for (at = &w->views; *at && *at != v; at = &(*at)->next) {
   }
   if (*at)
@@ -269,6 +271,15 @@ static void closed(void *context, demo_www_peer_t *peer) {
   demo_image_store_close(&v->store);
   free(v);
   demo_www_peer_data(peer, NULL);
+}
+
+int demo_web_simulate_prompt(demo_web_chat_t *w, const char *text,
+                             const sl_prompt_simulation_options_t *options) {
+  if (!w || !w->views)
+    return SL_ERROR_NOT_READY;
+  if (!w->simulation_target)
+    w->simulation_target = w->views;
+  return demo_www_simulate_prompt(w->simulation_target->peer, text, options);
 }
 static int replay(void *context, void *peer, const char *after) {
   demo_web_chat_t *w = context;

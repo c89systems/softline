@@ -580,6 +580,39 @@ static int edit_turns(int fd, unsigned short port, char *data, size_t cap,
   }
   return 0;
 }
+#ifdef SOFTLINE_CBOR_TCP
+static int assert_no_simulation(int fd, char *data, size_t cap) {
+  int opcode;
+  if (ws_send(fd, 9, 1, "p", 1))
+    return -1;
+  do {
+    if (ws_read(fd, data, cap, &opcode) < 0 ||
+        strstr(data, "\"type\":\"simulate_"))
+      return -1;
+  } while (opcode != 10);
+  return 0;
+}
+static int offer_simulation(demo_link_t *link, unsigned long id,
+                            const char *text) {
+  sl_queue_request_t request = {0};
+  demo_packet_t packet = {0};
+  request.request_id = id;
+  request.operation = SL_QUEUE_OFFER;
+  request.text = text;
+  demo_put_request(&packet, &request);
+  return demo_link_queue(link, &packet) || demo_link_flush(link);
+}
+static int wait_simulation(int fd, char *data, size_t cap, const char *text,
+                           const char *mode) {
+  return until(fd, data, cap, "\"type\":\"simulate_begin\"") ||
+         !strstr(data, "\"start\":\"3000\"") ||
+         !strstr(data, "\"pace\":\"30\"") ||
+         !strstr(data, "\"submit\":\"3000\"") || !strstr(data, mode) ||
+         until(fd, data, cap, "\"type\":\"simulate_text\"") ||
+         !strstr(data, text) ||
+         until(fd, data, cap, "\"type\":\"simulate_end\"");
+}
+#endif
 static void inherited_gate(const int *gate) {
   close(gate[1]);
   if (dup2(gate[0], 9) < 0 || setenv("SOFTLINE_CHAT_GATE_FD", "9", 1))
@@ -738,8 +771,8 @@ int main(int argc, char **argv) {
   int pipes[2] = {-1, -1}, fd = -1, one = -1, two = -1, status, opcode,
       failed = 1;
   pid_t child = -1, owner = -1;
-  int slave = -1, dual, charts, edits, approvals, terminal, terminal_lock,
-      handoff, failed_handoff, gate[2] = {-1, -1};
+  int slave = -1, dual, charts, edits, approvals, simulation, terminal,
+      terminal_lock, handoff, failed_handoff, gate[2] = {-1, -1};
 #ifdef SOFTLINE_CBOR_TCP
   demo_link_t approval_link;
 #endif
@@ -770,6 +803,7 @@ int main(int argc, char **argv) {
   charts = !strncmp(mode, "charts-", 7);
   edits = !strncmp(mode, "edits-", 6);
   approvals = !strncmp(mode, "approvals-", 10);
+  simulation = !strncmp(mode, "simulation-", 11);
   terminal = !strncmp(mode, "terminal-", 9);
   terminal_lock = !strncmp(mode, "terminal-lock-", 14);
   handoff = !strncmp(mode, "handoff-", 8);
@@ -780,6 +814,8 @@ int main(int argc, char **argv) {
     mode += 6;
   if (approvals)
     mode += 10;
+  if (simulation)
+    mode += 11;
   if (terminal)
     mode += terminal_lock ? 14 : 9;
   if (handoff)
@@ -940,7 +976,7 @@ int main(int argc, char **argv) {
   close(pipes[0]);
   pipes[0] = -1;
 #ifdef SOFTLINE_CBOR_TCP
-  if (approvals && !strcmp(mode, "owner")) {
+  if ((approvals || simulation) && !strcmp(mode, "owner")) {
     demo_packet_t hello = {0};
     int native = connect_to(queue_port);
     CHECK(native >= 0);
@@ -949,7 +985,7 @@ int main(int argc, char **argv) {
     demo_put_string(&hello, "web-approval-observer");
     demo_put_number(&hello, 0);
     demo_put_number(&hello, 0);
-    demo_put_number(&hello, 1);
+    demo_put_number(&hello, approvals ? 1 : 0);
     demo_put_number(&hello, 50);
     demo_put_number(&hello, 1);
     CHECK(!demo_link_queue(&approval_link, &hello) &&
@@ -1015,6 +1051,33 @@ int main(int argc, char **argv) {
 #ifdef SOFTLINE_CBOR_TCP
     CHECK(!terminal_roundtrip(port, queue_port, one, root, terminal_lock, data,
                               SL_WWW_FRAME_MAX + 1));
+    failed = 0;
+#else
+    CHECK(0);
+#endif
+    goto cleanup;
+  }
+  if (simulation) {
+#ifdef SOFTLINE_CBOR_TCP
+    size_t cap = SL_WWW_FRAME_MAX + 1;
+    CHECK(!until(two, data, cap, "\"type\":\"session\""));
+    CHECK(!offer_simulation(&approval_link, 1, "/type {3:30:3:s} first"));
+    CHECK(!wait_simulation(two, data, cap, "\"text\":\"first\"",
+                           "\"mode\":\"s\""));
+    CHECK(!assert_no_simulation(one, data, cap));
+    fd = ws_open(port);
+    CHECK(fd >= 0 && !until(fd, data, cap, "\"type\":\"session\""));
+    CHECK(!offer_simulation(&approval_link, 2, "/type {3:30:3:q} second"));
+    CHECK(!wait_simulation(two, data, cap, "\"text\":\"second\"",
+                           "\"mode\":\"q\""));
+    CHECK(!assert_no_simulation(fd, data, cap));
+    close(two);
+    two = -1;
+    CHECK(!assert_no_simulation(fd, data, cap));
+    CHECK(!offer_simulation(&approval_link, 3, "/type {3:30:3:q} third"));
+    CHECK(!wait_simulation(fd, data, cap, "\"text\":\"third\"",
+                           "\"mode\":\"q\""));
+    CHECK(!assert_no_simulation(one, data, cap));
     failed = 0;
 #else
     CHECK(0);

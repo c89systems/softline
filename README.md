@@ -443,6 +443,11 @@ to select a mode. Direct streams as fast as the example can deliver. LLM
 simulation sends small deltas about 80 ms apart by default. In local C chat
 the setting applies to the next response. The two `without-delay` targets
 start in direct mode with default and riced themes.
+In the C TUI examples, `/demo` toggles a repeating prompt simulation. It
+waits 1–3 seconds before typing, uses 0–50 ms between characters, then waits
+1–3 seconds before sending. An active draft takes priority. Host code can
+schedule a single turn via `editor->simulate_prompt()` or
+`sl_simulate_prompt()`, with the same timing options as the web receiver.
 `run-chat` uses Gruvbox by default; pass `THEME=...` to override it. Both C
 and Lua examples accept
 `SOFTLINE_PROMPT_THEME=default`, `plain`, `accent`, `dracula`, `gruvbox`, `monochrome`,

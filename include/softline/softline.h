@@ -561,6 +561,21 @@ typedef enum sl_prompt_queue_mode {
   SL_PROMPT_QUEUE_MODE_STEER = 1
 } sl_prompt_queue_mode_t;
 
+/** Maximum delay in milliseconds, matching the browser's timer interval. */
+#define SL_PROMPT_SIMULATION_DELAY_MAX_MS 2147483647UL
+/** Controls one scheduled prompt. Zero initialization selects immediate
+ * insertion and submission with ordinary queued intent. */
+typedef struct sl_prompt_simulation_options {
+  /** Milliseconds to wait before inserting the first character. */
+  unsigned long start_delay_ms;
+  /** Milliseconds between visible characters. Zero inserts the full prompt. */
+  unsigned long character_delay_ms;
+  /** Milliseconds to wait after insertion before submitting. */
+  unsigned long submit_delay_ms;
+  /** Use ordinary submission or the editor's configured steer action. */
+  sl_prompt_queue_mode_t mode;
+} sl_prompt_simulation_options_t;
+
 /** Optional host policy for a deliberate editor submission. All fields are
  * booleans. Zero enqueue retains the selected profile's normal behavior. */
 typedef struct sl_prompt_queue_policy {
@@ -1464,6 +1479,11 @@ struct sl {
   int (*set_osc8_mode)(sl_t *self, sl_osc8_mode_t mode);
   /** Read cached hyperlink policy/detection; see sl_get_osc8_info(). */
   int (*get_osc8_info)(const sl_t *self, sl_osc8_info_t *info);
+  /** Schedule one simulated input turn; see sl_simulate_prompt(). */
+  int (*simulate_prompt)(sl_t *, const char *,
+                         const sl_prompt_simulation_options_t *);
+  /** Cancel a pending simulation, preserving the visible draft. */
+  int (*cancel_prompt_simulation)(sl_t *);
 };
 
 /**
@@ -1906,6 +1926,17 @@ int sl_set_cursor(sl_t *self, size_t cursor);
  * Applies queue admission; idle/watch submissions have ordinary queued intent.
  */
 int sl_submit(sl_t *self);
+
+/** Copy and schedule one nonempty UTF-8 prompt on a TTY editor's owner
+ * thread. Requires an empty ordinary draft and no active simulation.
+ * The editor advances it during readline/next_prompt and submits via the
+ * normal admission path. Steer requires the editor's steer key to be
+ * configured. Real input cancels automation and takes over the
+ * draft. Escape cancels and clears the untouched simulated portion. */
+int sl_simulate_prompt(sl_t *, const char *,
+                       const sl_prompt_simulation_options_t *);
+/** Cancel automation on this editor, leaving any visible text editable. */
+int sl_cancel_prompt_simulation(sl_t *);
 
 /** Cancel the active readline() operation from inside a callback. */
 int sl_cancel(sl_t *self);

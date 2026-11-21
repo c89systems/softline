@@ -285,6 +285,55 @@ export async function runWebCompletionTests(source, completionSource, promptSour
   await check('startup focuses the prompt before configuration or connection finishes', async ui => {
     assert(ui.document.activeElement === ui.prompt && ui.prompt.focusOptions.preventScroll, 'startup did not focus the prompt without scrolling');
   }, { beforeConfig(document) { assert(document.activeElement === document.getElementById('prompt'), 'startup focus waited for configuration'); } });
+  function simulate(ui, text, pace, mode) {
+    ui.event({ type: 'simulate_begin', start: '1000', pace, submit: '2000', mode });
+    ui.event({ type: 'simulate_text', text });
+    ui.event({ type: 'simulate_end' });
+  }
+  await check('simulated browser typing waits, inserts graphemes and steers once', async ui => {
+    simulate(ui, 'e\u0301x', '30', 's');
+    assert(!ui.prompt.value && !ui.sent('steer'), 'initial grace was skipped');
+    ui.timeout(1000);
+    assert(ui.prompt.value === 'e\u0301', 'first visible character was split');
+    ui.timeout(30);
+    assert(ui.prompt.value === 'e\u0301x' && !ui.sent('steer'), 'pre-submit grace was skipped');
+    ui.timeout(2000); await ui.idle();
+    assert(ui.sent('steer') === 'e\u0301x' && !ui.prompt.value &&
+      ui.socket.sent.filter(frame => frame.get('action') === 'steer').length === 1,
+      'simulation did not use the normal steer submission');
+  });
+  await check('unpaced browser simulation inserts all text and queues once', async ui => {
+    simulate(ui, 'paste everything', '0', 'q');
+    ui.timeout(1000);
+    assert(ui.prompt.value === 'paste everything' && !ui.sent(), 'unpaced insertion or grace was wrong');
+    ui.timeout(2000); await ui.idle();
+    assert(ui.sent() === 'paste everything' && !ui.prompt.value, 'normal queue submission was skipped');
+  });
+  await check('manual input and socket closure cancel simulated auto-submit', async ui => {
+    simulate(ui, 'follows', '0', 'q');
+    ui.timeout(1000); ui.input('!');
+    ui.timeout(2000); await ui.idle();
+    assert(!ui.sent() && ui.prompt.value === 'follows!', 'manual edit was submitted or lost');
+    ui.prompt.value = '';
+    simulate(ui, 'disconnecting', '0', 'q');
+    ui.timeout(1000); ui.socket.close();
+    ui.event({ type: 'session', id: 'initial' });
+    ui.timeout(2000); await ui.idle();
+    assert(!ui.sent(), 'reconnection resumed unfinished automation');
+  });
+  await check('a prompt lock cancels simulation and existing drafts take priority', async ui => {
+    await ui.type('keep this');
+    simulate(ui, 'different', '0', 'q');
+    ui.timeout(1000); ui.timeout(2000);
+    assert(ui.prompt.value === 'keep this' && !ui.sent(), 'simulation replaced a draft');
+    ui.prompt.value = '';
+    simulate(ui, 'typing finished', '0', 'q');
+    ui.timeout(1000);
+    ui.event({ type: 'prompt_state', disabled: '1' });
+    ui.event({ type: 'prompt_state', disabled: '0' });
+    ui.timeout(2000); await ui.idle();
+    assert(ui.prompt.value === 'typing finished' && !ui.sent(), 'unlock resumed cancelled submission');
+  });
   for (const id of ['theme', 'font', 'queue-edit-text']) await check('startup and window return preserve focus on ' + id, async ui => {
     assert(ui.document.activeElement === ui.get(id), 'startup stole existing focus');
     ui.window.fire('focus');

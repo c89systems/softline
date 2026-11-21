@@ -26,6 +26,8 @@ demo_web_chat_t *demo_web_open(sl_t *, const demo_web_ops_t *, void *,
                                unsigned short default_port, int *enabled);
 void demo_web_close(demo_web_chat_t *);
 int demo_web_tick(demo_web_chat_t *);
+int demo_web_simulate_prompt(demo_web_chat_t *, const char *,
+                             const sl_prompt_simulation_options_t *);
 void demo_web_result(demo_web_chat_t *, const sl_queue_result_t *);
 int demo_web_timeout(demo_web_chat_t *, int timeout_ms);
 unsigned short demo_web_port(demo_web_chat_t *);

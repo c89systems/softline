@@ -232,6 +232,14 @@ typedef struct sl_impl {
   int readline_suspended;
   sl_history_search_t suspended_search;
   int request_submit;
+  unsigned long draft_revision;
+  struct {
+    char *text;
+    size_t length, offset;
+    int64_t deadline;
+    unsigned long revision;
+    sl_prompt_simulation_options_t options;
+  } prompt_simulation;
   int request_cancel;
   int request_suspend;
   int request_queue_dispatch;
@@ -302,6 +310,8 @@ void sl_backend_cancel_waiting(sl_impl_t *impl);
 int sl_backend_unsupported(sl_t *self);
 int sl_backend_recover_newest(sl_t *self);
 int64_t sl_queue_display_now(void);
+int sl_prompt_simulation_options_valid(const sl_prompt_simulation_options_t *);
+int sl_quoted_prompt_text_valid(const char *);
 int64_t sl_queue_display_start(const sl_impl_t *impl);
 int sl_queue_display_ready(const sl_impl_t *impl, int64_t started, int64_t now,
                            int64_t *deadline);
