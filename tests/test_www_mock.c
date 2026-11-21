@@ -588,6 +588,7 @@ static int assert_no_simulation(int fd, char *data, size_t cap) {
   do {
     if (ws_read(fd, data, cap, &opcode) < 0 ||
         strstr(data, "\"type\":\"simulate_") ||
+        strstr(data, "\"type\":\"queue_item\"") ||
         strstr(data, "Prompt sent to browser."))
       return -1;
   } while (opcode != 10);

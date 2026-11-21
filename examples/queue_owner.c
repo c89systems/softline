@@ -638,6 +638,9 @@ static void web_snapshot(void *context, demo_web_chat_t *web) {
   demo_web_queue_begin(web);
   for (i = 0; i < o->count; ++i) {
     const sl_queue_entry_t *e = &o->items[i].value;
+    /* Keep automation controls out of the browser's conversation preview. */
+    if (!e->held && !e->edit_held && command_named(e->text, "/type"))
+      continue;
     demo_web_queue_entry(web, e->id, e->revision, e->text,
                          e->mode == SL_PROMPT_QUEUE_MODE_STEER, e->held);
   }

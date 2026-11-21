@@ -19,7 +19,7 @@ const state = { socket: null, online: false, follow: true, messages: new Map(),
   promptExplicitDisabled: false, promptReason: '', terminalPromptLock: false, terminalHandoffs: 0,
   terminalUnlockCommand: '' };
 const icon = () => $('copy-icon').content.cloneNode(true);
-let toastTimer;
+let toastTimer, simulation = null, simulationInput = null;
 function toast(text) { $('toast').textContent = text; $('toast').hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => { $('toast').hidden = true; }, 3500); }
 function preference(id, fallback) {
   let value = fallback;
@@ -40,10 +40,12 @@ function send(action, fields = {}) {
   toast('Disconnected. Your draft is kept.'); return false;
 }
 function resizePrompt() {
-  prompt.style.height = 'auto';
+  // Simulated input only appends, so it can measure growth at the current height.
+  if (!simulation) prompt.style.height = 'auto';
   const projection = $('prompt-projection');
   if (prompt.clientWidth) projection.style.width = `${prompt.clientWidth}px`;
-  prompt.style.height = `${Math.min(Math.max(prompt.scrollHeight, projection.hidden ? 0 : projection.scrollHeight), 200)}px`;
+  const height = `${Math.min(Math.max(prompt.scrollHeight, projection.hidden ? 0 : projection.scrollHeight), 200)}px`;
+  if (prompt.style.height !== height) prompt.style.height = height;
   if (prompt.clientWidth) projection.style.width = `${prompt.clientWidth}px`;
   $('send').disabled = state.promptDisabled || !state.online || !prompt.value.trim() || !!state.attachments.length;
   previews.draft();
@@ -269,7 +271,6 @@ function sendPrompt(text, action) {
   state.pending.set(request, { action, fields, text });
   return true;
 }
-let simulation = null, simulationInput = null;
 function stopSimulation() {
   if (simulation) clearTimeout(simulation.timer);
   simulation = simulationInput = null;
@@ -313,16 +314,16 @@ function simulationEvent(event) {
     if (simulation !== job || !canSimulate()) { if (simulation === job) stopSimulation(); return; }
     const at = prompt.value.length;
     prompt.setRangeText(next.value.segment ?? next.value, at, at, 'end');
-    resizePrompt();
+    if (at) resizePrompt();
+    else editor.reset();
     next = segments ? segments.next() : { done: true };
     if (!next.done) job.timer = setTimeout(tick, job.pace);
     else job.timer = setTimeout(() => editor.enqueue(() => {
       if (simulation !== job) return;
       stopSimulation();
-      if (canSimulate() && prompt.value === text) submit(job.steer);
+      if (canSimulate() && prompt.value === text) submit(job.steer, true);
     }), job.after);
   }
-  editor.reset();
   job.timer = setTimeout(tick, job.start);
 }
 prompt.addEventListener('beforeinput', stopSimulation);
@@ -336,16 +337,18 @@ prompt.addEventListener('keydown', event => {
   event.stopImmediatePropagation();
   prompt.value = '';
   editor.reset();
-  resizePrompt();
 }, true);
-function submit(steer = false) {
+function submit(steer = false, automatic = false) {
   stopSimulation();
   if (state.promptDisabled || state.attachments.length) return;
   editor.finish();
   if (!prompt.value.trim()) return;
   if (new TextEncoder().encode(prompt.value).length > 128 * 1024) { toast('The prompt exceeds 128 KiB. Your draft is kept.'); return; }
   if (sendPrompt(prompt.value, steer ? 'steer' : 'send')) {
-    prompt.value = ''; prompt.setSelectionRange(0, 0); editor.reset(); started(); state.follow = true; resizePrompt(); editor.focus();
+    prompt.value = ''; prompt.setSelectionRange(0, 0); started();
+    if (!automatic) state.follow = true;
+    editor.reset();
+    if (!automatic) editor.focus();
   }
 }
 $('composer').addEventListener('submit', event => { event.preventDefault(); editor.enqueue(() => submit()); });
@@ -479,17 +482,22 @@ function receive(event) {
       follow(); break;
     }
     case 'queue_begin': state.stagingQueue = new Map(); break;
-    case 'queue_item': {
-      const old = state.queue.get(e.id);
-      state.stagingQueue?.set(e.id, { ...e, text: e.text || '', decoder: new TextDecoder(), visibleAt: old?.visibleAt ?? (!$('queue').hidden || e.held === '1' ? 0 : performance.now() + state.queueDelay) }); break;
-    }
+    case 'queue_item':
+      state.stagingQueue?.set(e.id, { ...e, text: e.text || '', decoder: new TextDecoder() }); break;
     case 'queue_text': {
       const item = state.stagingQueue?.get(e.id);
       if (item) item.text += e.encoding === 'base64' ? item.decoder.decode(Uint8Array.from(atob(e.data || ''), c => c.charCodeAt(0)), { stream: true }) : e.text || '';
       break;
     }
-    case 'queue_end':
-      if (state.stagingQueue) { for (const item of state.stagingQueue.values()) item.text += item.decoder.decode(); state.queue = state.stagingQueue; state.stagingQueue = null; queue(); } break;
+    case 'queue_end': {
+      if (!state.stagingQueue) break;
+      const visibleAt = $('queue').hidden ? performance.now() + state.queueDelay : 0;
+      for (const item of state.stagingQueue.values()) {
+        item.text += item.decoder.decode();
+        item.visibleAt = state.queue.get(item.id)?.visibleAt ?? (item.held === '1' ? 0 : visibleAt);
+      }
+      state.queue = state.stagingQueue; state.stagingQueue = null; queue(); break;
+    }
     case 'status': state.busy = e.busy === '1'; $('activity').textContent = e.text || ''; $('activity').title = e.text || ''; break;
     case 'prompt_state': promptState(e.disabled === '1', e.text); break;
     case 'simulate_begin': case 'simulate_text': case 'simulate_end':

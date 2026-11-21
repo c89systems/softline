@@ -78,7 +78,7 @@ export async function runWebCompletionTests(source, completionSource, promptSour
   const { ImagePreviews, imageReferences } = new Function('ImageViewer', stripImports(imagesSource) + '\nreturn { ImagePreviews, imageReferences };')(ImageViewer);
   async function boot(options = {}) {
     const elements = new Map(), timers = new Map(), observers = [];
-    let serial = 0, socket, previews;
+    let serial = 0, now = 0, socket, previews;
     const document = new Target(), window = new Target(), revoked = [], blobs = [], copiedImages = [], clipboardCalls = [], canvases = [], decoded = [], pendingDecodes = [], opened = [];
     const terminals = [];
     const Terminal = class {
@@ -171,10 +171,10 @@ export async function runWebCompletionTests(source, completionSource, promptSour
       WebSocket: Socket, TextEncoder: Encoder, TextDecoder: Decoder, URLSearchParams: Params,
       URL: class extends globalThis.URL { static createObjectURL() { const url = 'blob:test-image-' + (++serial); blobs.push(url); return url; } static revokeObjectURL(url) { revoked.push(url); } }, location: { href: 'http://localhost/', protocol: 'http:', origin: 'http://localhost' },
       crypto: { getRandomValues(array) { return array.fill(++serial); } }, localStorage: { getItem() {}, setItem() {} },
-      ResizeObserver: class { constructor(fn) { this.fn = fn; this.targets = []; observers.push(this); } observe(target) { this.targets.push(target); } }, performance: { now: () => 0 },
+      ResizeObserver: class { constructor(fn) { this.fn = fn; this.targets = []; observers.push(this); } observe(target) { this.targets.push(target); } }, performance: { now: () => now },
       MarkdownStream: class { write() {} end() {} },
       fetch: async () => { options.beforeConfig?.(document); return { ok: true, json: async () => ({ images: options.images ? '1' : '0', ...options.config }) }; },
-      setTimeout: (fn, delay) => { const id = ++serial; timers.set(id, { fn, delay }); return id; },
+      setTimeout: (fn, delay) => { const id = ++serial; timers.set(id, { fn, delay, due: now + delay }); return id; },
       clearTimeout: id => timers.delete(id)
     };
     window.URL = env.URL;
@@ -266,7 +266,16 @@ export async function runWebCompletionTests(source, completionSource, promptSour
       copiedImages, copiedText, clipboardCalls, canvases, decoded, narrow, finishDecode: () => pendingDecodes.shift()?.(),
       resize: target => { for (const observer of observers) if (observer.targets.includes(target)) observer.fn(); },
       form: () => get('composer').fire('submit'), ghost: () => get('completion-ghost').textContent || '',
-      timeout: delay => { for (const [id, timer] of [...timers]) if (timer.delay === delay) { timers.delete(id); timer.fn(); } } };
+      timeout: delay => { for (const [id, timer] of [...timers]) if (timer.delay === delay) { timers.delete(id); timer.fn(); } },
+      advance: delay => {
+        const end = now + delay;
+        for (;;) {
+          const next = [...timers].filter(([, timer]) => timer.due <= end).sort((a, b) => a[1].due - b[1].due)[0];
+          if (!next) break;
+          const [id, timer] = next; now = timer.due; timers.delete(id); timer.fn();
+        }
+        now = end;
+      } };
     return ui;
   }
   async function check(name, fn, options) {
@@ -280,6 +289,44 @@ export async function runWebCompletionTests(source, completionSource, promptSour
     for (const item of entries) ui.event({ type: 'queue_item', mode: 'queued', held: '1', text: 'Approval text', ...item });
     ui.event({ type: 'queue_end' });
   }
+  await check('a drained queue never appears and the next arrivals age independently', async ui => {
+    const queue = ui.get('queue'), queued = { id: 'queued', held: '0' }, steer = { id: 'steer', held: '0', mode: 'steer' };
+    await ui.type('sent immediately'); ui.key('Enter'); await ui.idle();
+    assert(ui.sent() === 'sent immediately', 'display delay blocked prompt delivery');
+    queueState(ui, [{ ...queued, id: 'quick' }]); ui.advance(30);
+    assert(queue.hidden, 'short-lived entry appeared');
+    queueState(ui, []); ui.advance(500);
+    assert(queue.hidden, 'a consumed row appeared on its deadline');
+    queueState(ui, [queued]); ui.advance(100); queueState(ui, [queued, steer]); ui.advance(399);
+    assert(queue.hidden, 'queue appeared before 500 ms');
+    ui.advance(1);
+    assert(queue.children.length === 1 && queue.children[0].dataset.id === 'queued', 'first arrival did not age independently');
+    const pending = { id: 'pending', held: '0', mode: 'pending' };
+    queueState(ui, [steer, pending]);
+    assert(queue.children.length === 1 && queue.children[0].dataset.id === 'pending', 'a visible queue delayed its newest arrival');
+    ui.advance(100);
+    assert(queue.children.length === 2, 'the older steering entry lost its original deadline');
+  });
+  await check('a custom delay starts when the complete queue snapshot arrives', async ui => {
+    const queue = ui.get('queue');
+    ui.event({ type: 'queue_begin' });
+    ui.event({ type: 'queue_item', id: 'slow', held: '0', mode: 'pending' });
+    ui.advance(125);
+    ui.event({ type: 'queue_end' }); ui.advance(124);
+    assert(queue.hidden, 'the timer elapsed while the snapshot was incomplete');
+    ui.advance(1);
+    assert(!queue.hidden && queue.children[0].dataset.id === 'slow', 'configured delay did not reveal a pending row');
+  }, { config: { queue_delay: '125' } });
+  await check('zero delay shows ordinary queue rows immediately', async ui => {
+    queueState(ui, [{ id: 'queued', held: '0' }]);
+    assert(!ui.get('queue').hidden, 'zero delay held a queue row');
+  }, { config: { queue_delay: '0' } });
+  await check('a waiting approval and connection errors bypass the queue delay', async ui => {
+    queueState(ui, [{ id: 'approval', revision: '1' }, { id: 'queued', held: '0' }]);
+    ui.event({ type: 'error', text: 'Connection failed' });
+    assert(ui.get('queue').children.length === 1 && ui.get('queue').children[0].dataset.id === 'approval', 'approval was delayed');
+    assert(!ui.get('toast').hidden && ui.get('toast').textContent === 'Connection failed', 'connection error was delayed');
+  });
   const shortcut = (ui, action, extra = {}) => ui.key({ approvals: '!', approve: '@', reject: '#', edit: 'Enter', terminal: '`' }[action],
     { ctrlKey: true, shiftKey: action !== 'terminal', code: { approvals: 'Digit1', approve: 'Digit2', reject: 'Digit3', edit: 'Enter', terminal: 'Backquote' }[action], ...extra });
   await check('startup focuses the prompt before configuration or connection finishes', async ui => {
@@ -301,6 +348,30 @@ export async function runWebCompletionTests(source, completionSource, promptSour
     assert(ui.sent('steer') === 'e\u0301x' && !ui.prompt.value &&
       ui.socket.sent.filter(frame => frame.get('action') === 'steer').length === 1,
       'simulation did not use the normal steer submission');
+  });
+  await check('simulated characters resize the composer only when they need more room', async ui => {
+    let height = ui.prompt.style.height;
+    const changes = [];
+    Object.defineProperty(ui.prompt.style, 'height', {
+      get: () => height, set: value => { height = value; changes.push(value); }
+    });
+    simulate(ui, 'abc', '50', 'q');
+    assert(!changes.length && !ui.prompt.value, 'arming the simulation resized the composer during grace');
+    ui.timeout(1000);
+    assert(!changes.length, 'a character on the same line reset the height');
+    ui.prompt.scrollHeight = 60;
+    ui.timeout(50); ui.timeout(50);
+    assert(changes.join(',') === '60px', 'composer did not grow once at the wrap');
+  });
+  await check('a simulated send preserves the reading position and focus', async ui => {
+    const scroll = ui.get('scroll');
+    scroll.scrollHeight = 1000; scroll.clientHeight = 250; scroll.scrollTop = 123;
+    scroll.fire('scroll'); scroll.focus();
+    simulate(ui, 'read without jumping', '0', 'q');
+    ui.timeout(1000); ui.timeout(2000); await ui.idle();
+    ui.event({ type: 'begin', id: 'echo', role: 'user' }); ui.resize(scroll);
+    assert(ui.sent() === 'read without jumping' && scroll.scrollTop === 123 &&
+      ui.document.activeElement === scroll, 'automatic send moved the reader');
   });
   await check('unpaced browser simulation inserts all text and queues once', async ui => {
     simulate(ui, 'paste everything', '0', 'q');
