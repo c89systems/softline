@@ -401,6 +401,25 @@ export async function runWebCompletionTests(source, completionSource, promptSour
     ui.timeout(2000); await ui.idle();
     assert(ui.sent() === 'paste everything' && !ui.prompt.value, 'normal queue submission was skipped');
   });
+  await check('simulation replaces a whitespace-only draft and sends its own text once', async ui => {
+    ui.prompt.value = ' \t\n\u00a0 ';
+    ui.prompt.setSelectionRange(ui.prompt.value.length, ui.prompt.value.length);
+    simulate(ui, 'send this', '0', 'q');
+    assert(!ui.prompt.value && ui.prompt.selectionStart === 0 && ui.get('toast').hidden,
+      'whitespace was treated as a draft or the composer was not reset');
+    assert(!ui.sent(), 'simulation skipped its initial grace');
+    ui.timeout(1000);
+    assert(ui.prompt.value === 'send this' && !ui.sent(), 'simulation kept old whitespace or skipped submit grace');
+    ui.timeout(2000); await ui.idle();
+    assert(ui.sent() === 'send this' && ui.socket.sent.filter(frame => frame.get('action') === 'send').length === 1,
+      'simulation did not send exactly the supplied prompt once');
+  });
+  await check('an empty simulation leaves the composer alone', async ui => {
+    ui.prompt.value = ' \t';
+    simulate(ui, ' \n', '0', 'q');
+    ui.timeout(1000); ui.timeout(2000); await ui.idle();
+    assert(ui.prompt.value === ' \t' && !ui.sent(), 'an invalid simulation changed the composer');
+  });
   await check('manual input and socket closure cancel simulated auto-submit', async ui => {
     simulate(ui, 'follows', '0', 'q');
     ui.timeout(1000); ui.input('!');

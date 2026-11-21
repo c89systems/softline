@@ -287,7 +287,7 @@ function simulationEvent(event) {
     const timing = [event.start, event.pace, event.submit];
     if (!timing.every(value => typeof value === 'string' && /^\d+$/u.test(value) &&
         Number(value) <= 2147483647) || !['q', 's'].includes(event.mode)) return;
-    if (simulation || prompt.value || !canSimulate()) {
+    if (simulation || prompt.value.trim() || !canSimulate()) {
       toast('The prompt is busy. Simulated input was skipped.');
       return;
     }
@@ -307,7 +307,12 @@ function simulationEvent(event) {
   const job = simulationInput;
   simulationInput = null;
   const text = job.chunks.join('');
-  if (!text.trim() || prompt.value || !canSimulate()) return;
+  if (!text.trim() || prompt.value.trim() || !canSimulate()) return;
+  if (prompt.value) {
+    prompt.value = '';
+    prompt.setSelectionRange(0, 0);
+    editor.reset();
+  }
   job.chunks = [];
   simulation = job;
   $('composer').dataset.simulating = '1';
