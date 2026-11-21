@@ -251,7 +251,7 @@ function updatePromptState() {
   $('composer').dataset.disabled = disabled ? '1' : '0';
   $('plus').disabled = disabled && !canUnlockPrompt();
   $('image-input').disabled = disabled;
-  if (disabled && !wasDisabled) { stopSimulation(); editor.suspend(); }
+  if (disabled && !wasDisabled) { stopSimulation('prompt_locked'); editor.suspend(); }
   else if (!disabled && wasDisabled) {
     editor.hideMenu();
     if (state.online) editor.connected();
@@ -269,36 +269,66 @@ function sendPrompt(text, action) {
   const request = randomId(), fields = { text, request, request_seq: ++state.requestSeq };
   if (!send(action, fields)) return false;
   state.pending.set(request, { action, fields, text });
-  return true;
+  return request;
 }
-function stopSimulation() {
+function reportSimulation(id, status, details = {}) {
+  if (id === undefined) return;
+  const socket = state.socket, epoch = state.epoch;
+  queueMicrotask(() => {
+    if (!state.online || state.socket !== socket || state.epoch !== epoch ||
+        socket?.readyState !== WebSocket.OPEN || socket.bufferedAmount >= 64 * 1024) return;
+    try {
+      socket.send(new URLSearchParams({ action: 'simulation_status', view: state.view, id, status, ...details }).toString());
+    } catch {} // Reports are transient and advisory.
+  });
+}
+function stopSimulation(reason) {
+  const job = simulation || simulationInput;
   if (simulation) {
     clearTimeout(simulation.timer);
     delete $('composer').dataset.simulating;
   }
   simulation = simulationInput = null;
+  if (reason && job) reportSimulation(job.id, 'cancelled', { reason });
 }
-function canSimulate() {
-  return state.online && !state.promptDisabled && !state.attachments.length && !state.edit;
+function simulationUnavailable() {
+  if (!state.online) return 'offline';
+  if (state.promptDisabled) return 'prompt_locked';
+  if (state.attachments.length) return 'image_pending';
+  if (state.edit) return 'queue_edit_active';
+  return '';
 }
 function simulationEvent(event) {
+  const id = event.id;
+  if (id !== undefined && (typeof id !== 'string' || !id || id.length > 64 || /[^a-zA-Z0-9_-]/u.test(id))) return;
+  if (event.type === 'simulate_cancel') {
+    if (id !== undefined && (simulation || simulationInput)?.id === id) stopSimulation('host_cancelled');
+    return;
+  }
   if (event.type === 'simulate_begin') {
+    if (simulationInput && simulationInput.id !== id) reportSimulation(simulationInput.id, 'cancelled', { reason: 'superseded' });
     simulationInput = null;
     const timing = [event.start, event.pace, event.submit];
     if (!timing.every(value => typeof value === 'string' && /^\d+$/u.test(value) &&
-        Number(value) <= 2147483647) || !['q', 's'].includes(event.mode)) return;
-    if (simulation || prompt.value.trim() || !canSimulate()) {
+        Number(value) <= 2147483647) || !['q', 's'].includes(event.mode)) {
+      reportSimulation(id, 'declined', { reason: 'invalid_options' });
+      return;
+    }
+    const reason = simulation ? 'busy' : prompt.value.trim() ? 'draft_present' : simulationUnavailable();
+    if (reason) {
       toast('The prompt is busy. Simulated input was skipped.');
+      reportSimulation(id, 'declined', { reason });
       return;
     }
     const [start, pace, after] = timing.map(Number);
-    simulationInput = { start, pace, after, steer: event.mode === 's', chunks: [], length: 0 };
+    simulationInput = { id, start, pace, after, steer: event.mode === 's', chunks: [], length: 0 };
     return;
   }
-  if (!simulationInput) return;
+  if (!simulationInput || simulationInput.id !== id) return;
   if (event.type === 'simulate_text') {
     if (typeof event.text !== 'string' || (simulationInput.length += event.text.length) > 128 * 1024) {
       simulationInput = null;
+      reportSimulation(id, 'declined', { reason: 'invalid_prompt' });
       return;
     }
     simulationInput.chunks.push(event.text);
@@ -307,7 +337,8 @@ function simulationEvent(event) {
   const job = simulationInput;
   simulationInput = null;
   const text = job.chunks.join('');
-  if (!text.trim() || prompt.value.trim() || !canSimulate()) return;
+  const reason = !text.trim() ? 'invalid_prompt' : prompt.value.trim() ? 'draft_present' : simulationUnavailable();
+  if (reason) { reportSimulation(id, 'declined', { reason }); return; }
   if (prompt.value) {
     prompt.value = '';
     prompt.setSelectionRange(0, 0);
@@ -321,7 +352,9 @@ function simulationEvent(event) {
     ? new Intl.Segmenter().segment(text)[Symbol.iterator]() : text[Symbol.iterator]());
   let next = segments ? segments.next() : { value: text, done: false };
   function tick() {
-    if (simulation !== job || !canSimulate()) { if (simulation === job) stopSimulation(); return; }
+    if (simulation !== job) return;
+    const reason = simulationUnavailable();
+    if (reason) { stopSimulation(reason); return; }
     const at = prompt.value.length;
     prompt.setRangeText(next.value.segment ?? next.value, at, at, 'end');
     if (at) editor.render();
@@ -334,18 +367,22 @@ function simulationEvent(event) {
     if (!next.done) job.timer = setTimeout(tick, job.pace);
     else job.timer = setTimeout(() => editor.enqueue(() => {
       if (simulation !== job) return;
+      const reason = simulationUnavailable() || (prompt.value !== text ? 'draft_changed' : '');
+      if (reason) { stopSimulation(reason); return; }
       stopSimulation();
-      if (canSimulate() && prompt.value === text) submit(job.steer, true);
+      const request = submit(job.steer, true);
+      if (request) reportSimulation(id, 'submitted', { request });
+      else reportSimulation(id, 'cancelled', { reason: 'submit_failed' });
     }), job.after);
   }
   job.timer = setTimeout(tick, job.start);
+  reportSimulation(id, 'started');
 }
-prompt.addEventListener('beforeinput', stopSimulation);
-prompt.addEventListener('input', stopSimulation);
-prompt.addEventListener('compositionstart', stopSimulation);
+for (const event of ['beforeinput', 'input', 'compositionstart'])
+  prompt.addEventListener(event, () => stopSimulation('manual_input'));
 prompt.addEventListener('keydown', event => {
   if (!simulation || ['Shift', 'Control', 'Alt', 'Meta'].includes(event.key)) return;
-  stopSimulation();
+  stopSimulation(event.key === 'Escape' ? 'user_cancelled' : 'manual_input');
   if (event.key !== 'Escape') return;
   event.preventDefault();
   event.stopImmediatePropagation();
@@ -353,17 +390,19 @@ prompt.addEventListener('keydown', event => {
   editor.reset();
 }, true);
 function submit(steer = false, automatic = false) {
-  stopSimulation();
+  stopSimulation('manual_input');
   if (state.promptDisabled || state.attachments.length) return;
   editor.finish();
   if (!prompt.value.trim()) return;
   if (new TextEncoder().encode(prompt.value).length > 128 * 1024) { toast('The prompt exceeds 128 KiB. Your draft is kept.'); return; }
-  if (sendPrompt(prompt.value, steer ? 'steer' : 'send')) {
+  const request = sendPrompt(prompt.value, steer ? 'steer' : 'send');
+  if (request) {
     prompt.value = ''; prompt.setSelectionRange(0, 0); started();
     if (!automatic) state.follow = true;
     editor.reset();
     if (!automatic) editor.focus();
   }
+  return request;
 }
 $('composer').addEventListener('submit', event => { event.preventDefault(); editor.enqueue(() => submit()); });
 function credit(kind) {
@@ -514,7 +553,7 @@ function receive(event) {
     }
     case 'status': state.busy = e.busy === '1'; $('activity').textContent = e.text || ''; $('activity').title = e.text || ''; break;
     case 'prompt_state': promptState(e.disabled === '1', e.text); break;
-    case 'simulate_begin': case 'simulate_text': case 'simulate_end':
+    case 'simulate_begin': case 'simulate_text': case 'simulate_end': case 'simulate_cancel':
       simulationEvent(e); break;
     case 'terminal_state': {
       if (typeof e.active !== 'string' || !/^(0|[1-9]\d*)$/u.test(e.active) || !Number.isSafeInteger(Number(e.active)) || !['0', '1'].includes(e.disable_prompt)) break;
@@ -526,7 +565,7 @@ function receive(event) {
     case 'limits': if (Number(e.image_bytes) > 0) state.imageLimit = Number(e.image_bytes); break;
     case 'completion_provider': case 'complete': case 'complete_end': editor.receive(e); break;
     case 'draft': {
-      stopSimulation();
+      stopSimulation('draft_replaced');
       const before = prompt.value; prompt.value = e.text || ''; adjustAnchor(before, prompt.value); editor.reset(); prompt.focus(); break;
     }
     case 'image_credit': if (e.id === state.upload?.id) credit('ready'); break;

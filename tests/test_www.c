@@ -11,7 +11,7 @@
   } while (0)
 typedef struct {
   sl_www_t *web;
-  int calls, replays, binaries, fail, reentrant;
+  int calls, replays, binaries, fail, reentrant, simulation_reports;
   char *output;
   size_t length;
 } host_t;
@@ -32,6 +32,16 @@ static int action(void *context, const sl_www_request_t *request) {
   host_t *h = context;
   sl_www_field_t field;
   const char *text = sl_www_field(request, "text");
+  if (!strcmp(sl_www_field(request, "action"), "simulation_status")) {
+    const char *id = sl_www_field(request, "id");
+    const char *status = sl_www_field(request, "status");
+    const char *submission = sl_www_field(request, "request");
+    if (request->peer != h || !id || strcmp(id, "run_17") || !status ||
+        strcmp(status, "submitted") || !submission || strcmp(submission, "42"))
+      return SL_ERROR;
+    ++h->simulation_reports;
+    return SL_OK;
+  }
   if (!text || strcmp(text, "a+b & \342\202\254\n") ||
       strcmp(sl_www_field(request, "action"), "send") || request->peer != h)
     return SL_ERROR;
@@ -62,7 +72,7 @@ static int binary(void *context, const sl_www_request_t *request,
   return SL_OK;
 }
 typedef struct {
-  int frames, fail_after;
+  int frames, fail_after, tracked;
 } simulation_sink_t;
 static int simulation_frame(void *context, const void *data, size_t length) {
   simulation_sink_t *sink = context;
@@ -70,6 +80,7 @@ static int simulation_frame(void *context, const void *data, size_t length) {
   static const char *const types[] = {"simulate_begin", "simulate_text",
                                       "simulate_text", "simulate_end"};
   char prefix[40];
+  static const char suffix[] = "\"id\":\"run_17\"}";
   int n;
   if (sink->frames == sink->fail_after)
     return SL_ERROR_NOT_READY;
@@ -77,6 +88,10 @@ static int simulation_frame(void *context, const void *data, size_t length) {
     return SL_ERROR;
   n = snprintf(prefix, sizeof(prefix), "{\"type\":\"%s\"", types[sink->frames]);
   if (n < 0 || length < (size_t)n || memcmp(frame, prefix, (size_t)n))
+    return SL_ERROR;
+  if (sink->tracked && (length < sizeof(suffix) - 1 ||
+                        memcmp(frame + length - (sizeof(suffix) - 1), suffix,
+                               sizeof(suffix) - 1)))
     return SL_ERROR;
   ++sink->frames;
   return SL_OK;
@@ -198,7 +213,9 @@ int main(void) {
         SL_ERROR_NOT_READY);
   {
     char text[SL_WWW_CHUNK_MAX + 8];
-    simulation_sink_t sink = {0, -1};
+    simulation_sink_t sink = {0, -1, 0};
+    static const char report[] =
+        "action=simulation_status&id=run_17&status=submitted&request=42";
     sl_prompt_simulation_options_t options = {1000, 30, 3000,
                                               SL_PROMPT_QUEUE_MODE_STEER};
     memset(text, 'a', SL_WWW_CHUNK_MAX - 1);
@@ -213,6 +230,26 @@ int main(void) {
           sink.frames == 2);
     CHECK(sl_www_simulate_prompt(h.web, simulation_frame, &sink, " \t\n",
                                  NULL) == SL_ERROR_INVALID);
+    sink.frames = 0;
+    sink.fail_after = -1;
+    sink.tracked = 1;
+    CHECK(sl_www_simulate_prompt_tracked(h.web, simulation_frame, &sink,
+                                         "bad id", text,
+                                         &options) == SL_ERROR_INVALID &&
+          sink.frames == 0);
+    CHECK(sl_www_simulate_prompt_tracked(h.web, simulation_frame, &sink,
+                                         "run_17", text, &options) == SL_OK &&
+          sink.frames == 4);
+    CHECK(sl_www_cancel_prompt_simulation(h.web, write_frame, &h, "run_17") ==
+          SL_ERROR_NOT_READY);
+    h.fail = 0;
+    CHECK(
+        sl_www_cancel_prompt_simulation(h.web, write_frame, &h, "run_17") ==
+            SL_OK &&
+        !strcmp(h.output, "{\"type\":\"simulate_cancel\",\"id\":\"run_17\"}"));
+    CHECK(sl_www_message(h.web, &h, report, sizeof(report) - 1, write_frame,
+                         &h) == SL_OK &&
+          h.simulation_reports == 1);
   }
   sl_www_destroy(h.web);
   free(h.output);

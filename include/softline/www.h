@@ -142,6 +142,20 @@ int sl_www_binary(sl_www_t *, void *, const void *, size_t, sl_www_write_t,
  * Call outside receiver callbacks, on the receiver's owner thread. */
 int sl_www_simulate_prompt(sl_www_t *, sl_www_write_t, void *, const char *,
                            const sl_prompt_simulation_options_t *);
+/** Opt in to best-effort simulation_status actions on the same connection.
+ * Use a fresh id of 1 to 64 ASCII letters, digits, underscores or hyphens for
+ * each simulation on a peer. SL_OK means the writer consumed the frames. The
+ * normal action callback receives any browser reports. Match them by peer
+ * and id. Call outside receiver callbacks, on the receiver's owner thread. */
+int sl_www_simulate_prompt_tracked(sl_www_t *, sl_www_write_t, void *,
+                                   const char *id, const char *text,
+                                   const sl_prompt_simulation_options_t *);
+/** Request cancellation on the same peer and id as a tracked simulation.
+ * The browser stops a matching pending or active job and keeps inserted text.
+ * SL_OK means the writer consumed the request. Call on the receiver's owner
+ * thread, outside receiver callbacks. */
+int sl_www_cancel_prompt_simulation(sl_www_t *, sl_www_write_t, void *,
+                                    const char *id);
 /** Encode one bounded event and call write once. The output is JSON, without
  * HTTP/WebSocket framing. Field names are ASCII identifiers. type and seq are
  * reserved. seq may be NULL for transient replies. See docs/web-frontend.md. */

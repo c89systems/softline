@@ -125,6 +125,27 @@ preserves drafts with content by declining the simulation. After the final
 delay it uses the normal send action. Manual edits take over the draft.
 Delivery is transient and a disconnect cancels unfinished automation.
 
+For optional feedback, call `sl_www_simulate_prompt_tracked()` with a fresh
+simulation ID and the selected peer's writer. The browser sends advisory
+`simulation_status` actions to the existing `sl_www_action_t` callback.
+Match each report against the host-owned `peer` and the simulation ID. The
+writer's `SL_OK` confirms frame delivery to the writer. A missing browser
+report leaves the outcome unknown. The browser drops reports if the socket
+is congested or has changed, and the host decides whether to surface them.
+
+| Status | Meaning |
+| --- | --- |
+| `started` | The browser accepted the complete request and scheduled its start. |
+| `declined` | The request could not start. `reason` describes the condition, such as `draft_present` or `prompt_locked`. |
+| `cancelled` | The browser stopped the request. `reason` can identify manual input, host cancellation, or a failed submit. |
+| `submitted` | The browser sent the ordinary queue or steer action. `request` is that action's existing request ID. The normal `accepted` or `error` response describes admission. |
+
+Call `sl_www_cancel_prompt_simulation()` with the same writer and ID to stop
+a pending or active simulation. The browser leaves any inserted text in the
+composer and ignores the command once the simulation has submitted. Use IDs of
+1 to 64 ASCII letters, digits, underscores, or hyphens. Send each tracked
+simulation and cancellation directly to the peer as transient events.
+
 ## Browser event contract
 
 All JSON values below are strings. Replay cursors are opaque strings assigned
@@ -150,6 +171,8 @@ Replies may omit `seq`.
 | `completion_provider` | Host registration: one-character `trigger`, `scope=start/word`, `strip=0/1`, `expand=0/1`. Send the current registrations after `session` on each connection. |
 | `complete` | `request`, raw full `candidate` including trigger; explicit `+` menu also uses canonical `value`, `label`, `description`, UTF-8 byte `start`/`end`, optional `continue=1` |
 | `complete_end` | `request`, `status=ok/error`; completes one provider snapshot, including empty results |
+| `simulate_begin`, `simulate_text`, `simulate_end` | Timing, text chunks, and commit boundary for a prompt simulation. Tracked requests carry the same `id` on all three events. |
+| `simulate_cancel` | `id` identifies the pending or active tracked simulation to stop. |
 | `accepted`, `error` | `request`, optional `text`; optional `view` targets one draft owner |
 | `image_credit` | `id`; one more bounded binary chunk may be sent |
 | `image_done` | `id`, absolute backend `path`; insert only into the originating draft |
@@ -158,6 +181,9 @@ Replies may omit `seq`.
 Browser text frames are URL-encoded actions:
 
 - `send`/`steer`: `view`, unique `request`, monotonic `request_seq`, `text`.
+- `simulation_status` carries `view`, simulation `id`, `status`, and optional
+  `reason` or submission `request` as described above. Treat it as advisory and
+  return `SL_OK` from the action callback to acknowledge handling it locally.
 - `complete`: `request`, `text`, UTF-8 byte `cursor`, `all=0/1`. Inline
   completion supplies UTF-8 byte `start`/`end` and `resolve`: initially the
   registered trigger, then an explicitly requested continuation prefix. Return

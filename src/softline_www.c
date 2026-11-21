@@ -315,17 +315,19 @@ static int binary(sl_www_t *self, void *peer, const void *data, size_t length,
   impl->callback_active = 0;
   return result;
 }
-static int simulate_prompt(sl_www_t *self, sl_www_write_t write, void *target,
-                           const char *text,
-                           const sl_prompt_simulation_options_t *options) {
+static int
+simulate_prompt_frames(sl_www_t *self, sl_www_write_t write, void *target,
+                       const char *id, const char *text,
+                       const sl_prompt_simulation_options_t *options) {
   static const sl_prompt_simulation_options_t defaults = {0};
   sl_www_field_t timing[] = {{"start", NULL, 0},
                              {"pace", NULL, 0},
                              {"submit", NULL, 0},
-                             {"mode", NULL, 0}};
-  sl_www_field_t chunk = {"text", NULL, 0};
+                             {"mode", NULL, 0},
+                             {"id", NULL, 0}};
+  sl_www_field_t chunk[] = {{"text", NULL, 0}, {"id", NULL, 0}};
   char start[16], pace[16], submit[16];
-  size_t length, offset;
+  size_t length, offset, id_length = id ? strlen(id) : 0;
   int result;
   www_impl_t *impl = self ? self->impl : NULL;
   if (!options)
@@ -348,22 +350,34 @@ static int simulate_prompt(sl_www_t *self, sl_www_write_t write, void *target,
   timing[1].value = pace;
   timing[2].value = submit;
   timing[3].value = options->mode == SL_PROMPT_QUEUE_MODE_STEER ? "s" : "q";
+  timing[4].value = chunk[1].value = id;
+  timing[4].length = chunk[1].length = id_length;
   impl->callback_active = 1;
-  result = sl_www_emit(write, target, "simulate_begin", NULL, timing, 4);
-  for (offset = 0; result == SL_OK && offset < length; offset += chunk.length) {
-    size_t end = offset + SL_WWW_CHUNK_MAX;
+  result =
+      sl_www_emit(write, target, "simulate_begin", NULL, timing, id ? 5u : 4u);
+  for (offset = 0; result == SL_OK && offset < length;
+       offset += chunk[0].length) {
+    size_t end = offset + SL_WWW_CHUNK_MAX - id_length;
     if (end > length)
       end = length;
     while (end < length && ((unsigned char)text[end] & 192u) == 128u)
       --end;
-    chunk.value = text + offset;
-    chunk.length = end - offset;
-    result = sl_www_emit(write, target, "simulate_text", NULL, &chunk, 1);
+    chunk[0].value = text + offset;
+    chunk[0].length = end - offset;
+    result =
+        sl_www_emit(write, target, "simulate_text", NULL, chunk, id ? 2u : 1u);
   }
   if (result == SL_OK)
-    result = sl_www_emit(write, target, "simulate_end", NULL, NULL, 0);
+    result = sl_www_emit(write, target, "simulate_end", NULL, timing + 4,
+                         id ? 1u : 0u);
   impl->callback_active = 0;
   return result;
+}
+
+static int simulate_prompt(sl_www_t *self, sl_www_write_t write, void *target,
+                           const char *text,
+                           const sl_prompt_simulation_options_t *options) {
+  return simulate_prompt_frames(self, write, target, NULL, text, options);
 }
 
 sl_www_t *sl_www_create(const sl_www_config_t *config) {
@@ -455,4 +469,29 @@ int sl_www_simulate_prompt(sl_www_t *self, sl_www_write_t write, void *target,
   return self && self->simulate_prompt
              ? self->simulate_prompt(self, write, target, text, options)
              : SL_ERROR_INVALID;
+}
+
+int sl_www_simulate_prompt_tracked(sl_www_t *self, sl_www_write_t write,
+                                   void *target, const char *id,
+                                   const char *text,
+                                   const sl_prompt_simulation_options_t *opts) {
+  if (!identifier(id))
+    return SL_ERROR_INVALID;
+  return simulate_prompt_frames(self, write, target, id, text, opts);
+}
+
+int sl_www_cancel_prompt_simulation(sl_www_t *self, sl_www_write_t write,
+                                    void *target, const char *id) {
+  www_impl_t *impl = self ? self->impl : NULL;
+  sl_www_field_t field = {"id", NULL, 0};
+  int result;
+  if (!impl || !impl->config.enabled || !write || !identifier(id))
+    return SL_ERROR_INVALID;
+  if (impl->callback_active)
+    return SL_ERROR_NOT_READY;
+  field.value = id;
+  impl->callback_active = 1;
+  result = sl_www_emit(write, target, "simulate_cancel", NULL, &field, 1);
+  impl->callback_active = 0;
+  return result;
 }

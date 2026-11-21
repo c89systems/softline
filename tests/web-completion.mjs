@@ -158,10 +158,12 @@ export async function runWebCompletionTests(source, completionSource, promptSour
     }
     class Socket extends Target {
       static OPEN = 1;
-      constructor(url) { super(); this.url = url; this.readyState = 1; this.sent = []; this.binary = []; socket = this; }
+      constructor(url) { super(); this.url = url; this.readyState = 1; this.bufferedAmount = 0; this.sent = []; this.binary = []; socket = this; }
       send(frame) {
         if (typeof frame !== 'string') { this.binary.push(frame); return; }
-        const query = new Params(frame); this.sent.push(query);
+        const query = new Params(frame);
+        if (options.failSimulationReports && query.get('action') === 'simulation_status') throw new Error('status write failed');
+        this.sent.push(query);
         if (query.get('action') === 'complete' && !options.manual) Promise.resolve().then(() => reply(query, undefined, options.failure ? 'error' : 'ok'));
       }
       close() { this.readyState = 0; this.fire('close'); }
@@ -332,10 +334,14 @@ export async function runWebCompletionTests(source, completionSource, promptSour
   await check('startup focuses the prompt before configuration or connection finishes', async ui => {
     assert(ui.document.activeElement === ui.prompt && ui.prompt.focusOptions.preventScroll, 'startup did not focus the prompt without scrolling');
   }, { beforeConfig(document) { assert(document.activeElement === document.getElementById('prompt'), 'startup focus waited for configuration'); } });
-  function simulate(ui, text, pace, mode) {
-    ui.event({ type: 'simulate_begin', start: '1000', pace, submit: '2000', mode });
-    ui.event({ type: 'simulate_text', text });
-    ui.event({ type: 'simulate_end' });
+  function simulate(ui, text, pace, mode, id) {
+    ui.event({ type: 'simulate_begin', start: '1000', pace, submit: '2000', mode, id });
+    ui.event({ type: 'simulate_text', text, id });
+    ui.event({ type: 'simulate_end', id });
+  }
+  function simulationReports(ui, id) {
+    return ui.socket.sent.filter(frame => frame.get('action') === 'simulation_status' &&
+      (id === undefined || frame.get('id') === id));
   }
   await check('simulated browser typing waits, inserts graphemes and steers once', async ui => {
     simulate(ui, 'e\u0301x', '30', 's');
@@ -348,6 +354,84 @@ export async function runWebCompletionTests(source, completionSource, promptSour
     assert(ui.sent('steer') === 'e\u0301x' && !ui.prompt.value &&
       ui.socket.sent.filter(frame => frame.get('action') === 'steer').length === 1,
       'simulation did not use the normal steer submission');
+    assert(!simulationReports(ui).length, 'untracked simulation sent feedback');
+  });
+  await check('tracked simulation reports scheduling and correlates the ordinary submission', async ui => {
+    simulate(ui, 'tracked reply', '0', 's', 'run_17');
+    await ui.idle();
+    assert(simulationReports(ui, 'run_17').map(report => report.get('status')).join(',') === 'started' && !ui.prompt.value,
+      'started was not reported during the grace period');
+    ui.timeout(1000);
+    assert(ui.prompt.value === 'tracked reply' && !ui.sent('steer'), 'feedback changed submission timing');
+    ui.timeout(2000); await ui.idle();
+    const reports = simulationReports(ui, 'run_17');
+    const submitted = ui.socket.sent.find(frame => frame.get('action') === 'steer');
+    assert(reports.length === 2 && reports[1].get('status') === 'submitted' &&
+      submitted?.get('text') === 'tracked reply' && reports[1].get('request') === submitted.get('request') &&
+      ui.socket.sent.indexOf(reports[1]) > ui.socket.sent.indexOf(submitted), 'feedback lost the normal submission identity or order');
+    ui.event({ type: 'simulate_cancel', id: 'run_17' }); await ui.idle();
+    assert(simulationReports(ui, 'run_17').length === 2 && ui.sent('steer') === 'tracked reply', 'late cancellation affected a submitted job');
+  });
+  await check('a tracked simulation reports a real draft without changing it', async ui => {
+    await ui.type('keep this');
+    simulate(ui, 'discard this', '0', 'q', 'occupied');
+    await ui.idle();
+    const reports = simulationReports(ui, 'occupied');
+    assert(reports.length === 1 && reports[0].get('status') === 'declined' &&
+      reports[0].get('reason') === 'draft_present' && ui.prompt.value === 'keep this' && !ui.sent(),
+      'draft was changed or the decline was ambiguous');
+  });
+  await check('only matching frames and cancellation affect a tracked simulation', async ui => {
+    ui.event({ type: 'simulate_begin', start: '1000', pace: '50', submit: '2000', mode: 'q', id: 'current' });
+    ui.event({ type: 'simulate_text', text: 'wrong', id: 'stale' });
+    ui.event({ type: 'simulate_end', id: 'stale' });
+    ui.event({ type: 'simulate_text', text: 'abc', id: 'current' });
+    ui.event({ type: 'simulate_end', id: 'current' });
+    ui.timeout(1000);
+    assert(ui.prompt.value === 'a', 'unrelated frames changed or started the draft');
+    ui.event({ type: 'simulate_cancel', id: 'stale' }); ui.timeout(50);
+    assert(ui.prompt.value === 'ab', 'stale cancellation stopped the active simulation');
+    ui.event({ type: 'simulate_cancel', id: 'current' });
+    ui.event({ type: 'simulate_cancel', id: 'current' });
+    ui.timeout(50); ui.timeout(2000); await ui.idle();
+    const reports = simulationReports(ui, 'current');
+    assert(reports.map(report => report.get('status')).join(',') === 'started,cancelled' &&
+      reports[1].get('reason') === 'host_cancelled' && !simulationReports(ui, 'stale').length &&
+      ui.prompt.value === 'ab' && !ui.sent() && ui.get('toast').hidden,
+      'cancellation discarded the text, sent it, emitted a toast or reported twice');
+  });
+  await check('host can cancel a tracked simulation before the last frame arrives', async ui => {
+    ui.prompt.value = ' \t';
+    ui.event({ type: 'simulate_begin', start: '1000', pace: '0', submit: '2000', mode: 'q', id: 'pending' });
+    ui.event({ type: 'simulate_cancel', id: 'pending' });
+    ui.event({ type: 'simulate_text', text: 'late text', id: 'pending' });
+    ui.event({ type: 'simulate_end', id: 'pending' });
+    ui.timeout(1000); ui.timeout(2000); await ui.idle();
+    assert(ui.prompt.value === ' \t' && !ui.sent() &&
+      simulationReports(ui, 'pending').map(report => report.get('status')).join(',') === 'cancelled',
+      'incomplete cancelled job cleared the composer, started or submitted');
+  });
+  for (const congested of [false, true]) await check(`feedback ${congested ? 'backpressure' : 'write failure'} leaves submission alone`, async ui => {
+    if (congested) ui.socket.bufferedAmount = 64 * 1024;
+    simulate(ui, 'normal send', '0', 'q', 'best-effort');
+    await ui.idle(); ui.timeout(1000); ui.timeout(2000); await ui.idle();
+    assert(ui.sent() === 'normal send' && !simulationReports(ui).length && ui.get('toast').hidden,
+      'failed telemetry interfered with normal submission or the UI');
+  }, { failSimulationReports: !congested });
+  await check('disconnect drops pending feedback and cancels automatic submission', async ui => {
+    simulate(ui, 'kept draft', '0', 'q', 'interrupted'); ui.timeout(1000);
+    ui.socket.close(); ui.event({ type: 'session', id: 'new-epoch' });
+    ui.timeout(2000); await ui.idle();
+    assert(!simulationReports(ui).length && !ui.sent() && ui.prompt.value === 'kept draft',
+      'an obsolete report escaped into the new session or the draft was lost');
+  });
+  await check('tracked input takeover reports one cancellation and keeps the edited text', async ui => {
+    simulate(ui, 'typed', '0', 'q', 'manual'); ui.timeout(1000); ui.input('!');
+    ui.timeout(2000); await ui.idle();
+    const reports = simulationReports(ui, 'manual');
+    assert(reports.map(report => report.get('status')).join(',') === 'started,cancelled' &&
+      reports[1].get('reason') === 'manual_input' && ui.prompt.value === 'typed!' && !ui.sent(),
+      'manual takeover lost the draft or reported the wrong outcome');
   });
   await check('simulated characters resize the composer only when they need more room', async ui => {
     let height = ui.prompt.style.height;
