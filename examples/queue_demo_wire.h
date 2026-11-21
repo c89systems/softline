@@ -43,8 +43,10 @@ enum demo_message {
 };
 #ifdef SOFTLINE_CBOR_TCP
 #include <softline/cbor.h>
+#include <sys/uio.h>
 
 #define DEMO_INLINE_FIELDS 12
+#define DEMO_SEND_SPANS 16
 typedef struct demo_field {
   c89cbor_type type;
   uint64_t value;
@@ -59,7 +61,10 @@ typedef struct demo_packet {
 typedef struct demo_link {
   int fd;
   unsigned char header[4];
-  size_t header_offset, send_field;
+  struct iovec send_spans[DEMO_SEND_SPANS];
+  unsigned char send_headers[DEMO_SEND_SPANS][9];
+  size_t send_count, send_pos, send_field;
+  int send_borrowed, send_finished;
   c89cbor_encoder encoder;
   c89cbor_reader reader;
   unsigned char buffer[C89CBOR_CHUNK];

@@ -1,4 +1,3 @@
-#define SOFTLINE_CBOR_IMPLEMENTATION
 #include "queue_demo_wire.h"
 #include <errno.h>
 #include <fcntl.h>
@@ -300,8 +299,7 @@ int demo_nonblock(int fd) {
   int enabled = 1;
   if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0)
     return -1;
-  /* CBOR headers and byte spans arrive as separate writes. Avoid delayed
-   * ACK stalls on this loopback stream. Pipes and Unix sockets ignore it. */
+  /* Small records should be sent promptly on this loopback stream. */
   (void)setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &enabled, sizeof(enabled));
   return 0;
 }
@@ -343,25 +341,7 @@ int demo_link_queue(demo_link_t *link, demo_packet_t *p) {
   return 0;
 }
 
-static int socket_write(void *context, const void *bytes, size_t length,
-                        size_t *accepted) {
-  demo_link_t *link = context;
-  ssize_t wrote;
-  int flags = 0;
-#if defined(MSG_NOSIGNAL)
-  flags = MSG_NOSIGNAL;
-#endif
-  do {
-    wrote = send(link->fd, bytes, length, flags);
-  } while (wrote < 0 && errno == EINTR);
-  *accepted = wrote > 0 ? (size_t)wrote : 0;
-  if (wrote < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
-    return C89CBOR_OUTPUT;
-  return wrote > 0 ? C89CBOR_OK : C89CBOR_IO;
-}
-
-/* Submit one native CBOR token. DATA borrows the retained field and the
- * encoder keeps its unsent suffix across EAGAIN. */
+/* Submit one native CBOR token. DATA borrows the retained field. */
 static int next_token(demo_link_t *link, demo_packet_t *p) {
   c89cbor_token token = {0};
   const demo_field_t *field;
@@ -396,14 +376,78 @@ static int next_token(demo_link_t *link, demo_packet_t *p) {
       link->send_phase = SEND_FIELD;
     }
   }
+  link->send_borrowed = token.type == C89CBOR_DATA;
   return c89cbor_encoder_put(&link->encoder, &token);
 }
 
+/* Gather native encoder output for a bounded scatter/gather write. The
+ * encoder reuses its header storage, so keep only those small headers here.
+ * DATA stays in its original storage until the record's last write. */
+static int stage_output(demo_link_t *link, demo_packet_t *p, size_t budget) {
+  link->send_pos = link->send_count = 0;
+  if (!link->writer_live) {
+    if (c89cbor_length32(NULL, (uint32_t)payload_size(p), DEMO_FRAME_MAX,
+                         link->header) != C89CBOR_OK ||
+        c89cbor_encoder_init(NULL, &link->encoder, NULL, 0, 0) != C89CBOR_OK)
+      return -1;
+    link->writer_live = 1;
+    link->send_spans[0].iov_base = link->header;
+    link->send_spans[0].iov_len = sizeof(link->header);
+    link->send_count = 1;
+    budget -= sizeof(link->header);
+  }
+  while (link->send_count < DEMO_SEND_SPANS && budget && !link->send_finished) {
+    const void *bytes;
+    size_t length;
+    size_t index = link->send_count;
+    int status = c89cbor_encoder_peek(&link->encoder, &bytes, &length);
+    if (status == C89CBOR_OK) {
+      status = next_token(link, p);
+      if (status == C89CBOR_DONE)
+        link->send_finished = 1;
+      else if (status != C89CBOR_OK)
+        return -1;
+      continue;
+    }
+    if (status != C89CBOR_OUTPUT)
+      return -1;
+    if (length > budget)
+      length = budget;
+    if (!link->send_borrowed) {
+      if (length > sizeof(link->send_headers[index]))
+        return -1;
+      memcpy(link->send_headers[index], bytes, length);
+      bytes = link->send_headers[index];
+    }
+    link->send_spans[index].iov_base = (void *)bytes;
+    link->send_spans[index].iov_len = length;
+    ++link->send_count;
+    budget -= length;
+    if (c89cbor_encoder_advance(&link->encoder, length) < 0)
+      return -1;
+  }
+  return 0;
+}
+
+static ssize_t send_spans(demo_link_t *link) {
+  struct msghdr message = {0};
+  ssize_t written;
+  int flags = 0;
+#if defined(MSG_NOSIGNAL)
+  flags = MSG_NOSIGNAL;
+#endif
+  message.msg_iov = link->send_spans + link->send_pos;
+  message.msg_iovlen = link->send_count - link->send_pos;
+  do {
+    written = sendmsg(link->fd, &message, flags);
+  } while (written < 0 && errno == EINTR);
+  if (written < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+    return 0;
+  return written > 0 ? written : -1;
+}
+
 int demo_link_flush(demo_link_t *link) {
-  c89cbor_sink sink;
   size_t budget = IO_BUDGET;
-  sink.context = link;
-  sink.write = socket_write;
 #if !defined(MSG_NOSIGNAL) && defined(SO_NOSIGPIPE)
   {
     int enabled = 1;
@@ -416,50 +460,44 @@ int demo_link_flush(demo_link_t *link) {
 #endif
   while (link->count && budget) {
     demo_packet_t *p = link->output;
-    size_t start = budget;
-    int status;
-    if (!link->writer_live) {
-      if (c89cbor_length32(NULL, (uint32_t)payload_size(p), DEMO_FRAME_MAX,
-                           link->header) != C89CBOR_OK ||
-          c89cbor_encoder_init(NULL, &link->encoder, NULL, 0, 0) != C89CBOR_OK)
-        return -1;
-      link->writer_live = 1;
-    }
-    if (link->header_offset < sizeof(link->header)) {
-      size_t written, amount = sizeof(link->header) - link->header_offset;
-      if (amount > budget)
-        amount = budget;
-      status = socket_write(link, link->header + link->header_offset, amount,
-                            &written);
-      if (status < 0)
-        return -1;
-      if (status == C89CBOR_OUTPUT)
+    if (link->send_pos == link->send_count) {
+      if (!link->writer_live && budget < sizeof(link->header))
         return 0;
-      link->header_offset += written;
-      budget -= written;
-      link->queued_bytes -= written;
-      continue;
+      if (stage_output(link, p, budget))
+        return -1;
     }
-    status = sl_cbor_drain(&link->encoder, &sink, &budget);
-    link->queued_bytes -= start - budget;
-    if (status == C89CBOR_OUTPUT)
-      return 0;
-    if (status != C89CBOR_OK)
-      return -1;
-    status = next_token(link, p);
-    if (status == C89CBOR_DONE) {
+    if (link->send_pos < link->send_count) {
+      ssize_t written = send_spans(link);
+      size_t remaining;
+      if (written < 0)
+        return -1;
+      if (!written)
+        return 0;
+      remaining = (size_t)written;
+      budget -= remaining;
+      link->queued_bytes -= remaining;
+      while (remaining) {
+        struct iovec *span = link->send_spans + link->send_pos;
+        if (remaining < span->iov_len) {
+          span->iov_base = (char *)span->iov_base + remaining;
+          span->iov_len -= remaining;
+          break;
+        }
+        remaining -= span->iov_len;
+        ++link->send_pos;
+      }
+    }
+    if (link->send_finished && link->send_pos == link->send_count) {
       if (c89cbor_encoder_finish(&link->encoder) != C89CBOR_OK)
         return -1;
       (void)c89cbor_encoder_cleanup(&link->encoder);
-      link->writer_live = 0;
-      link->header_offset = link->send_field = 0;
+      link->writer_live = link->send_finished = 0;
+      link->send_field = 0;
       link->send_phase = SEND_ARRAY;
       demo_packet_free(p);
       --link->count;
       memmove(p, p + 1, link->count * sizeof(*p));
       memset(p + link->count, 0, sizeof(*p));
-    } else if (status != C89CBOR_OK) {
-      return -1;
     }
   }
   return 0;

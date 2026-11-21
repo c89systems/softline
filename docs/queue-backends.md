@@ -231,20 +231,20 @@ snapshots, response Markdown and lifecycle events, image uploads, and PTY
 traffic. Remote shell handoffs use a dedicated connection to the same port.
 
 The queue backend callback pins the request's existing recovery storage and
-enqueues field metadata. Socket readiness drains native libcbor encoder
-spans directly, including across partial writes. The reader decodes from a
+enqueues field metadata. The TCP example uses the native libcbor encoder and
+gathers its spans into bounded socket writes. Only the small CBOR headers
+need scratch storage. Payload spans keep borrowing their original bytes
+across partial writes. The reader decodes from a
 bounded socket buffer into typed fields and delivers a request only after
 its CBOR record validates. The outbound queue accounts for bytes without
 retaining a serialized frame. Large snapshots retain their typed fields,
 and image and PTY payloads retain at most their independently bounded chunks.
 
-For an application adapter, include `<softline/cbor.h>` with
-`SOFTLINE_CBOR_IMPLEMENTATION` in one translation unit and link that unit
-with `C89Cbor::static` or `C89Cbor::shared`. `sl_cbor_drain` works with the
-native `c89cbor_encoder` and `c89cbor_sink` interfaces. Use
-`sl_queue_backend_pin_request` inside the Softline request callback to keep
-the borrowed text fields valid until your encoder drains them. Downstream
-clients can use the same backend callbacks with their own adapter.
+For an application using libcbor, include `<softline/cbor.h>` and link with
+`C89Cbor::static` or `C89Cbor::shared`. Use `sl_queue_backend_pin_request`
+inside the Softline request callback and give the borrowed text fields
+directly to the native `c89cbor_encoder`. Release the pin after your
+transport finishes writing the borrowed bytes.
 
 Both C executables share the current chat frontend, preserving the v0.15.1
 interaction model while adding backend adapters: Softline renders the

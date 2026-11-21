@@ -96,6 +96,9 @@ static int partial_request(void) {
   memset(text, 'z', sizeof(text) - 1);
   CHECK(!demo_link_flush(&f.sender) && f.sender.count == 1 &&
         f.sender.queued_bytes > 0 && f.sender.queued_bytes < sizeof(text));
+  demo_put_number(&p, DEMO_IDLE);
+  demo_put_number(&p, 1);
+  CHECK(!demo_link_queue(&f.sender, &p));
   result.status = SL_QUEUE_ACCEPTED;
   result.item_id = "id";
   result.item_revision = "2";
@@ -113,6 +116,11 @@ static int partial_request(void) {
   CHECK(demo_packet_done(&p) && read_request.request_id == result.request_id &&
         strlen(read_request.text) == sizeof(text) - 1 &&
         strspn(read_request.text, "a") == sizeof(text) - 1);
+  demo_packet_free(&p);
+  CHECK(!demo_link_flush(&f.sender) && !f.sender.count &&
+        !f.sender.queued_bytes);
+  CHECK(demo_link_read(&receiver, &p) == 1 && demo_number(&p) == DEMO_IDLE &&
+        demo_number(&p) == 1 && demo_packet_done(&p));
   demo_packet_free(&p);
   demo_link_close(&receiver);
   demo_link_close(&f.sender);
