@@ -1047,6 +1047,12 @@ int main(int argc, char **argv) {
   http[used] = 0;
   CHECK(strstr(http, "200 OK") && strstr(http, "Welcome to softline") &&
         strstr(http, "id=\"send\""));
+  {
+    const char *motion = getenv("SOFTLINE_WEB_ANIMATIONS");
+    int expected = motion && !strcmp(motion, "1");
+    CHECK(!!strstr(http, "./motion.css") == expected &&
+          !!strstr(http, "./motion.js") == expected);
+  }
   close(fd);
   fd = -1;
   one = ws_open(port);

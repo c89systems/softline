@@ -1,11 +1,12 @@
 // Logical client tests: execute the shipped module with DOM/transport doubles.
 // Actual browser layout and selection integration remain in web-browser.html.
-export async function runWebCompletionTests(source, completionSource, promptSource, fixture, imagesSource, viewerSource, panelSource, transcriptsSource, dividerSource) {
+export async function runWebCompletionTests(source, completionSource, promptSource, fixture, imagesSource, viewerSource, panelSource, transcriptsSource, dividerSource, motionSource) {
   const checks = [];
   function assert(value, message) { if (!value) throw new Error(message); }
   class Target {
     constructor() { this.listeners = new Map(); }
     addEventListener(name, fn) { const list = this.listeners.get(name) || []; list.push(fn); this.listeners.set(name, list); }
+    dispatchEvent(event) { return !this.fire(event.type).defaultPrevented; }
     fire(name, fields = {}) {
       const event = { target: this, key: '', altKey: false, shiftKey: false, ctrlKey: false, metaKey: false, isComposing: false, defaultPrevented: false, preventDefault() { this.defaultPrevented = true; }, stopImmediatePropagation() { this.stopped = true; }, ...fields };
       for (const fn of this.listeners.get(name) || []) { fn(event); if (event.stopped) break; }
@@ -80,7 +81,7 @@ export async function runWebCompletionTests(source, completionSource, promptSour
     const elements = new Map(), timers = new Map(), observers = [];
     let serial = 0, now = 0, socket, previews;
     const document = new Target(), window = new Target(), revoked = [], blobs = [], copiedImages = [], clipboardCalls = [], canvases = [], decoded = [], pendingDecodes = [], opened = [];
-    const terminals = [];
+    const terminals = [], animations = [];
     const Terminal = class {
       constructor(options) {
         this.options = options; this.chunks = []; this.osc = new Set();
@@ -100,7 +101,7 @@ export async function runWebCompletionTests(source, completionSource, promptSour
     window.innerWidth = 1024; window.innerHeight = 768;
     const narrow = new Target();
     narrow.matches = false;
-    window.matchMedia = () => narrow;
+    window.matchMedia = query => query === '(prefers-reduced-motion: reduce)' ? { matches: !!options.reducedMotion } : narrow;
     document.getElementById = id => {
       if (!elements.has(id)) {
         const element = new Element(); element.id = id; element.ownerDocument = document;
@@ -141,6 +142,13 @@ export async function runWebCompletionTests(source, completionSource, promptSour
     get('transcripts').append(get('transcript-tabs'), get('transcript-close'), get('transcript-screen'));
     get('conversation-pane').rect = { top: 64, height: 704 };
     get('composer-area').rect = { top: 600, height: 120 };
+    if (options.motionLayout) {
+      const chat = get('chat'), composer = get('composer-area');
+      const classes = new Set(['welcome-state']);
+      chat.classList = { add: name => classes.add(name), remove: name => classes.delete(name), contains: name => classes.has(name) };
+      composer.getBoundingClientRect = () => ({ ...composer.rect, top: classes.has('welcome-state') ? 310 : composer.rect.top });
+      composer.animate = (keyframes, timing) => animations.push({ keyframes, timing });
+    }
     get('image-preview').append(get('image-preview-content'));
     get('theme').options = [{ value: 'default' }]; get('font').options = [{ value: 'sans' }];
     for (const id of ['completions', 'prompt-projection', 'queue', 'uploads', 'latest', 'toast', 'image-preview', 'terminal-panel']) get(id).hidden = true;
@@ -204,6 +212,7 @@ export async function runWebCompletionTests(source, completionSource, promptSour
     if (options.noImageClipboard) delete window.navigator.clipboard.write;
     const names = Object.keys(env), values = Object.values(env);
     env.Prompt = new Function('Completion', ...names, stripImports(promptSource) + '\nreturn Prompt;')(Completion, ...values);
+    if (options.motion) new Function('document', 'window', motionSource)(document, window);
     const AsyncFunction = Object.getPrototypeOf(async function() {}).constructor;
     await new AsyncFunction(...Object.keys(env), stripImports(source))(...Object.values(env));
     socket.fire('open');
@@ -263,7 +272,7 @@ export async function runWebCompletionTests(source, completionSource, promptSour
       event({ type: 'image_done', id, path }); await idle();
       return { id, url, file: get('image-input').files[0] };
     }
-    const ui = { get, prompt, input, type, key, idle, queries, reply, event, sent, get socket() { return socket; }, document, window, revoked, blobs, upload, previews, opened, terminals,
+    const ui = { get, prompt, input, type, key, idle, queries, reply, event, sent, get socket() { return socket; }, document, window, revoked, blobs, upload, previews, opened, terminals, animations,
       socketURL: () => socket.url,
       copiedImages, copiedText, clipboardCalls, canvases, decoded, narrow, finishDecode: () => pendingDecodes.shift()?.(),
       resize: target => { for (const observer of observers) if (observer.targets.includes(target)) observer.fn(); },
@@ -291,6 +300,31 @@ export async function runWebCompletionTests(source, completionSource, promptSour
     for (const item of entries) ui.event({ type: 'queue_item', mode: 'queued', held: '1', text: 'Approval text', ...item });
     ui.event({ type: 'queue_end' });
   }
+  await check('the optional motion module docks the composer once after a successful first send', async ui => {
+    await ui.type('initial draft');
+    assert(!ui.animations.length && ui.get('chat').classList.contains('welcome-state'), 'typing moved the composer');
+    ui.socket.close(); ui.key('Enter'); await ui.idle();
+    assert(!ui.animations.length && ui.prompt.value === 'initial draft', 'failed send moved the composer or lost the draft');
+    ui.timeout(1000); ui.event({ type: 'session', id: 'initial' });
+    ui.key('Enter'); await ui.idle();
+    assert(ui.sent() === 'initial draft' && ui.prompt.value === '' && ui.animations.length === 1, 'first send did not dock the composer');
+    const { keyframes, timing } = ui.animations[0];
+    assert(keyframes[0].translate === '0 -290px' && keyframes[1].translate === '0 0' && timing.duration === 440, 'dock did not animate from the measured welcome position');
+    await ui.type('next prompt'); ui.key('Enter'); await ui.idle();
+    assert(ui.sent() === 'next prompt' && ui.animations.length === 1, 'subsequent sends animated the already docked composer');
+  }, { motion: true, motionLayout: true });
+  for (const [name, motion, reducedMotion] of [['plain page', false, false], ['reduced motion', true, true]]) {
+    await check(`${name} docks the composer immediately`, async ui => {
+      await ui.type('initial draft'); ui.key('Enter'); await ui.idle();
+      assert(ui.sent() === 'initial draft' && !ui.animations.length && !ui.get('chat').classList.contains('welcome-state'), 'submit did not dock without animation');
+    }, { motion, reducedMotion, motionLayout: true });
+  }
+  await check('history replay docks the composer without flying from the welcome position', async ui => {
+    ui.event({ type: 'delta', id: 'm1', role: 'user', text: 'Existing turn' });
+    assert(!ui.get('chat').classList.contains('welcome-state') && !ui.animations.length, 'history triggered a local send animation');
+    await ui.type('next prompt'); ui.key('Enter'); await ui.idle();
+    assert(ui.sent() === 'next prompt' && !ui.animations.length, 'an already docked composer took the welcome flight');
+  }, { motion: true, motionLayout: true });
   await check('a drained queue never appears and the next arrivals age independently', async ui => {
     const queue = ui.get('queue'), queued = { id: 'queued', held: '0' }, steer = { id: 'steer', held: '0', mode: 'steer' };
     await ui.type('sent immediately'); ui.key('Enter'); await ui.idle();
@@ -345,17 +379,18 @@ export async function runWebCompletionTests(source, completionSource, promptSour
   }
   await check('simulated browser typing waits, inserts graphemes and steers once', async ui => {
     simulate(ui, 'e\u0301x', '30', 's');
-    assert(!ui.prompt.value && !ui.sent('steer'), 'initial grace was skipped');
+    assert(!ui.prompt.value && !ui.sent('steer') && !ui.animations.length, 'initial grace was skipped');
     ui.timeout(1000);
     assert(ui.prompt.value === 'e\u0301', 'first visible character was split');
     ui.timeout(30);
-    assert(ui.prompt.value === 'e\u0301x' && !ui.sent('steer'), 'pre-submit grace was skipped');
+    assert(ui.prompt.value === 'e\u0301x' && !ui.sent('steer') && !ui.animations.length, 'pre-submit grace was skipped or typing moved the composer');
     ui.timeout(2000); await ui.idle();
     assert(ui.sent('steer') === 'e\u0301x' && !ui.prompt.value &&
       ui.socket.sent.filter(frame => frame.get('action') === 'steer').length === 1,
       'simulation did not use the normal steer submission');
     assert(!simulationReports(ui).length, 'untracked simulation sent feedback');
-  });
+    assert(ui.animations.length === 1, 'simulated submit did not use the normal composer motion');
+  }, { motion: true, motionLayout: true });
   await check('tracked simulation reports scheduling and correlates the ordinary submission', async ui => {
     simulate(ui, 'tracked reply', '0', 's', 'run_17');
     await ui.idle();

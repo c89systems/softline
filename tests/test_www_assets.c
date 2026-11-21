@@ -21,6 +21,69 @@ static char *asset(sl_www_t *w, const char *path) {
   }
   return s;
 }
+static int matches_source(sl_www_t *w, const char *path, const char *root,
+                          const char *source) {
+  char file[4096];
+  FILE *f;
+  sl_www_asset_t a;
+  size_t offset = 0;
+  unsigned char bytes[4096];
+  CHECK(sl_www_asset(w, path, &a) == SL_OK);
+  CHECK(snprintf(file, sizeof(file), "%s/%s", root, source) <
+        (int)sizeof(file));
+  f = fopen(file, "rb");
+  CHECK(f);
+  for (;;) {
+    size_t n = fread(bytes, 1, sizeof(bytes), f);
+    CHECK(n <= a.length - offset && !memcmp(bytes, a.data + offset, n));
+    offset += n;
+    if (!n)
+      break;
+  }
+  CHECK(!ferror(f) && offset == a.length);
+  fclose(f);
+  return 0;
+}
+
+static int motion_assets(sl_www_t *plain, const sl_www_config_t *cfg,
+                         const char *root, const char *html) {
+  static const char tags[] =
+      "  <link rel=\"stylesheet\" href=\"./motion.css\">\n"
+      "  <script type=\"module\" src=\"./motion.js\"></script>\n";
+  sl_www_t *animated = sl_www_create_with_flags(cfg, SL_WWW_ANIMATIONS);
+  sl_www_asset_t a;
+  const char *close_head = strstr(html, "</head>");
+  char *page, *css;
+  size_t prefix;
+  CHECK(animated && close_head);
+  CHECK(!sl_www_create_with_flags(cfg, SL_WWW_ANIMATIONS << 1));
+  CHECK(!strstr(html, "./motion.") &&
+        sl_www_asset(plain, "/motion.css", &a) == SL_ERROR_INVALID &&
+        sl_www_asset(plain, "/motion.js", &a) == SL_ERROR_INVALID);
+  page = asset(animated, "/");
+  prefix = (size_t)(close_head - html);
+  CHECK(page && strlen(page) == strlen(html) + sizeof(tags) - 1 &&
+        !memcmp(html, page, prefix) &&
+        !memcmp(page + prefix, tags, sizeof(tags) - 1) &&
+        !strcmp(page + prefix + sizeof(tags) - 1, close_head));
+  CHECK(!matches_source(animated, "/motion.css", root, "web/motion.css") &&
+        !matches_source(animated, "/motion.js", root, "web/motion.js") &&
+        !matches_source(animated, "/softline.js", root, "web/softline.js"));
+  css = asset(animated, "/motion.css");
+  CHECK(css && strstr(css, "(prefers-reduced-motion: no-preference)") &&
+        strstr(css, "#workspace { overflow: clip; }") &&
+        strstr(css, ".message.user > .body:empty { visibility: hidden; }") &&
+        strstr(css, ".message.user > .body:not(:empty)") &&
+        strstr(css, "#terminal-panel:not([hidden])") &&
+        strstr(css, "#transcripts:not([hidden])") &&
+        strstr(css, "opacity: 0; transform: translate(16px, 14px)") &&
+        strstr(css, "translateY(100%)") && strstr(css, "translateX(100%)"));
+  free(css);
+  free(page);
+  sl_www_destroy(animated);
+  return 0;
+}
+
 int main(int argc, char **argv) {
   static const char *paths[] = {"/",
                                 "/softline.css",
@@ -75,27 +138,8 @@ int main(int argc, char **argv) {
   cfg.enabled = 1;
   w = sl_www_create(&cfg);
   CHECK(w);
-  for (i = 0; i < sizeof(paths) / sizeof(paths[0]); ++i) {
-    char file[4096];
-    FILE *f;
-    sl_www_asset_t a;
-    size_t offset = 0;
-    unsigned char bytes[4096];
-    CHECK(sl_www_asset(w, paths[i], &a) == SL_OK);
-    CHECK(snprintf(file, sizeof(file), "%s/%s", argv[1], sources[i]) <
-          (int)sizeof(file));
-    f = fopen(file, "rb");
-    CHECK(f);
-    for (;;) {
-      size_t n = fread(bytes, 1, sizeof(bytes), f);
-      CHECK(n <= a.length - offset && !memcmp(bytes, a.data + offset, n));
-      offset += n;
-      if (!n)
-        break;
-    }
-    CHECK(!ferror(f) && offset == a.length);
-    fclose(f);
-  }
+  for (i = 0; i < sizeof(paths) / sizeof(paths[0]); ++i)
+    CHECK(!matches_source(w, paths[i], argv[1], sources[i]));
   html = asset(w, "/");
   css = asset(w, "/softline.css");
   js = asset(w, "/softline.js");
@@ -107,6 +151,7 @@ int main(int argc, char **argv) {
   modules[3] = asset(w, "/transcripts.js");
   CHECK(html && css && js && md && prompt && modules[0] && modules[1] &&
         modules[2] && modules[3]);
+  CHECK(!motion_assets(w, &cfg, argv[1], html));
   CHECK(!strstr(html, "/terminal-lock") && !strstr(js, "/terminal-lock") &&
         !strstr(prompt, "/terminal-lock"));
   CHECK(!strstr(html, "/stream") && !strstr(js, "/stream") &&
@@ -173,7 +218,7 @@ int main(int argc, char **argv) {
           "id=\"terminal-panel\" aria-label=\"Server terminal panel\" hidden"));
   CHECK(strstr(css, "#workspace #chat{height:auto;flex:1;min-height:0}") &&
         strstr(css, "#terminal-panel{flex:none;") &&
-        strstr(css, "@keyframes terminal-slide-up") &&
+        !strstr(css, "@keyframes terminal-slide-up") &&
         strstr(css, "#composer[data-disabled=\"1\"]"));
   {
     const char *conversation = strstr(html, "id=\"conversation-pane\"");

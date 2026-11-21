@@ -29,15 +29,30 @@ assets = [
     ("/licenses/streaming-markdown.txt", "text/plain; charset=utf-8", "vendor/streaming-markdown/LICENSE"),
     ("/licenses/JetBrainsMono.txt", "text/plain; charset=utf-8", "vendor/jetbrains-mono/OFL.txt"),
 ]
-with output.open("w") as stream:
-    stream.write("/* Generated: do not edit. */\n")
-    for index, (_, _, path) in enumerate(assets):
-        data = (root / path).read_bytes()
-        stream.write(f"static const unsigned char www_asset_{index}[] = {{\n")
+def write_assets(stream, name, entries):
+    for index, (_, _, data) in enumerate(entries):
+        stream.write(f"static const unsigned char {name}_{index}[] = {{\n")
         for at in range(0, len(data), 16):
             stream.write("  " + ",".join(str(c) for c in data[at:at+16]) + ",\n")
         stream.write("};\n")
-    stream.write("static const sl_www_asset_t www_assets[] = {\n")
-    for index, (path, mime, _) in enumerate(assets):
-        stream.write(f'  {{"{path}", "{mime}", www_asset_{index}, sizeof(www_asset_{index})}},\n')
+    stream.write(f"static const sl_www_asset_t {name}[] = {{\n")
+    for index, (path, mime, _) in enumerate(entries):
+        data = f"{name}_{index}"
+        stream.write(f'  {{"{path}", "{mime}", {data}, sizeof({data})}},\n')
     stream.write("};\n")
+
+
+assets = [(path, mime, (root / source).read_bytes()) for path, mime, source in assets]
+page, mime, html = assets[0]
+head = b'  <link rel="stylesheet" href="./motion.css">\n  <script type="module" src="./motion.js"></script>\n'
+if html.count(b"</head>") != 1:
+    raise ValueError("expected one closing head tag in the web page")
+motion_assets = [
+    (page, mime, html.replace(b"</head>", head + b"</head>")),
+    ("/motion.css", "text/css; charset=utf-8", (root / "web/motion.css").read_bytes()),
+    ("/motion.js", "text/javascript; charset=utf-8", (root / "web/motion.js").read_bytes()),
+]
+with output.open("w") as stream:
+    stream.write("/* Generated: do not edit. */\n")
+    write_assets(stream, "www_assets", assets)
+    write_assets(stream, "www_motion_assets", motion_assets)

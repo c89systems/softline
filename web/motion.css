@@ -1,0 +1,31 @@
+/* Move the visible surfaces while keeping their layout and PTY sizes stable. */
+@media (prefers-reduced-motion: no-preference) {
+  /* Tab focus and scrollIntoView must not scroll the workspace during entry. */
+  #workspace { overflow: clip; }
+
+  .message.user > .body:empty { visibility: hidden; }
+  .message.user > .body:not(:empty) {
+    animation: message-arrive 320ms cubic-bezier(.18, .72, .24, 1);
+  }
+  #terminal-panel:not([hidden]) {
+    animation: terminal-arrive 360ms cubic-bezier(.18, .72, .24, 1);
+  }
+  #transcripts:not([hidden]) {
+    animation: transcript-arrive 380ms cubic-bezier(.18, .72, .24, 1);
+  }
+}
+
+@keyframes message-arrive {
+  from { opacity: 0; transform: translate(16px, 14px); }
+  to { opacity: 1; transform: translate(0, 0); }
+}
+
+@keyframes terminal-arrive {
+  from { transform: translateY(100%); }
+  to { transform: translateY(0); }
+}
+
+@keyframes transcript-arrive {
+  from { transform: translateX(100%); }
+  to { transform: translateX(0); }
+}

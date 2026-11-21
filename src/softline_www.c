@@ -13,6 +13,7 @@ typedef struct {
   sl_www_config_t config;
   char *settings;
   size_t settings_length;
+  unsigned flags;
   int callback_active;
 } www_impl_t;
 typedef struct {
@@ -178,6 +179,13 @@ static int asset(sl_www_t *self, const char *path, sl_www_asset_t *out) {
       *out = impl->config.assets[i];
       return SL_OK;
     }
+  if (impl->flags & SL_WWW_ANIMATIONS)
+    for (i = 0; i < sizeof(www_motion_assets) / sizeof(www_motion_assets[0]);
+         ++i)
+      if (!strcmp(path, www_motion_assets[i].path)) {
+        *out = www_motion_assets[i];
+        return SL_OK;
+      }
   for (i = 0; i < sizeof(www_assets) / sizeof(www_assets[0]); ++i)
     if (!strcmp(path, www_assets[i].path)) {
       *out = www_assets[i];
@@ -380,7 +388,8 @@ static int simulate_prompt(sl_www_t *self, sl_www_write_t write, void *target,
   return simulate_prompt_frames(self, write, target, NULL, text, options);
 }
 
-sl_www_t *sl_www_create(const sl_www_config_t *config) {
+sl_www_t *sl_www_create_with_flags(const sl_www_config_t *config,
+                                   unsigned flags) {
   sl_www_t *self;
   www_impl_t *impl;
   sl_www_config_t defaults;
@@ -391,7 +400,8 @@ sl_www_t *sl_www_create(const sl_www_config_t *config) {
     sl_www_config_init(&defaults);
     config = &defaults;
   }
-  if ((config->asset_count && !config->assets) ||
+  if ((flags & ~SL_WWW_ANIMATIONS) ||
+      (config->asset_count && !config->assets) ||
       config->queue_display_delay_ms < 0)
     return NULL;
   for (i = 0; i < config->asset_count; ++i) {
@@ -410,6 +420,7 @@ sl_www_t *sl_www_create(const sl_www_config_t *config) {
   }
   self->impl = impl;
   impl->config = *config;
+  impl->flags = flags;
   self->asset = asset;
   self->message = message;
   self->connect = connect_peer;
@@ -441,6 +452,9 @@ sl_www_t *sl_www_create(const sl_www_config_t *config) {
     return NULL;
   }
   return self;
+}
+sl_www_t *sl_www_create(const sl_www_config_t *config) {
+  return sl_www_create_with_flags(config, 0);
 }
 void sl_www_destroy(sl_www_t *s) {
   if (s && s->destroy)

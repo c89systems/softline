@@ -17,6 +17,8 @@ extern "C" {
 #define SL_WWW_REQUEST_MAX (3u * 128u * 1024u + 4096u)
 /** Maximum action/event fields per call. */
 #define SL_WWW_FIELDS_MAX 16u
+/** Serve the optional browser motion assets with the chat page. */
+#define SL_WWW_ANIMATIONS 1u
 
 /** Framework-independent web receiver; no sockets, workers or history. */
 typedef struct sl_www sl_www_t;
@@ -123,6 +125,8 @@ void sl_www_config_init(sl_www_config_t *);
 /** Configuration strings are copied; custom asset bytes and context are
  * borrowed until destroy. No terminal editor or libmdf dependency is needed. */
 sl_www_t *sl_www_create(const sl_www_config_t *);
+/** Like sl_www_create(), with optional SL_WWW_* flags. Unknown flags fail. */
+sl_www_t *sl_www_create_with_flags(const sl_www_config_t *, unsigned flags);
 /** Free a receiver; ignored during its own callback. NULL is harmless. */
 void sl_www_destroy(sl_www_t *);
 /** Look up an immutable route-relative asset or return SL_ERROR_INVALID. */

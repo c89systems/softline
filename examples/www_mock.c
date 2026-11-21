@@ -848,6 +848,7 @@ demo_www_t *demo_www_open(const sl_www_config_t *config, unsigned short port,
   struct sockaddr_in address;
   socklen_t length = sizeof(address);
   sl_www_config_t adapted;
+  const char *animations = getenv("SOFTLINE_WEB_ANIMATIONS");
   int reuse = 1;
   struct timespec now;
   size_t i;
@@ -872,7 +873,8 @@ demo_www_t *demo_www_open(const sl_www_config_t *config, unsigned short port,
   adapted.action = action;
   adapted.binary = config->binary ? binary : NULL;
   adapted.context = w;
-  w->handler = sl_www_create(&adapted);
+  w->handler = sl_www_create_with_flags(
+      &adapted, animations && !strcmp(animations, "1") ? SL_WWW_ANIMATIONS : 0);
   w->listener = socket(AF_INET, SOCK_STREAM, 0);
   memset(&address, 0, sizeof(address));
   address.sin_family = AF_INET;

@@ -32,6 +32,8 @@ same chart source and data. The plain-text Lua queue example remains separate.
 `SOFTLINE_WEB_BANNER` (trusted host HTML/SVG in the welcome area) customize the
 examples. `SOFTLINE_WEB_HEADER` optionally supplies trusted HTML, SVG or image
 markup in the upper-left toolbar; that area is hidden and unbranded by default.
+Set `SOFTLINE_WEB_ANIMATIONS=1` to try the animated page in any browser chat
+example, for example `SOFTLINE_WEB_ANIMATIONS=1 make run-chat-web-only`.
 `SOFTLINE_QUEUE_DISPLAY_DELAY_MS` defaults to 500 and affects only Q/S/pending
 visibility. Admission, execution, acknowledgement, and FIFO have no delay.
 New rows show immediately while the queue is already visible; approval rows,
@@ -68,6 +70,14 @@ web = sl_www_create(&config);
  * On close: retire peer replay work and cancel its unfinished image source.
  */
 ```
+
+Use `sl_www_create_with_flags(&config, SL_WWW_ANIMATIONS)` to serve the animated
+chat page. The handler adds the separate motion stylesheet and module to the
+page it serves at `/`. The composer flies down on its first successful send
+from the welcome screen, user bubbles glide and fade into place, and the shell
+and transcript slide in from the bottom and right. The motion respects the
+browser’s reduced-motion preference. Sending and paced typing keep their usual
+timing.
 
 For Kore, use `http_response_header`/`http_response` for immutable assets and
 `kore_websocket_handshake` with connect/message/disconnect callbacks for events.
