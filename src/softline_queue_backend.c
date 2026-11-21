@@ -962,6 +962,7 @@ int sl_backend_submit(sl_t *self, sl_prompt_queue_mode_t mode) {
     impl->edit.changed = 1;
     impl->preferred_column_valid = 0;
   }
+  sl_history_nav_reset(impl);
   sl_edit_clear_undo(&impl->edit);
   return SL_OK;
 }

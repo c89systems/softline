@@ -362,6 +362,9 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   softline_apply_warnings(test_queue_backend)
   softline_local_runtime(test_queue_backend)
   add_test(NAME softline_queue_backend COMMAND test_queue_backend)
+  add_test(NAME softline_queue_backend_history COMMAND test_queue_backend history)
+  set_tests_properties(softline_queue_backend_history PROPERTIES
+    LABELS "integration;queue;history;memcheck" TIMEOUT 5)
   set_tests_properties(softline_queue_backend PROPERTIES
     LABELS "unit;queue;editing;memcheck" TIMEOUT 15)
   add_test(NAME softline_queue_backend_large_edit COMMAND test_queue_backend large-edit)

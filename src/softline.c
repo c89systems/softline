@@ -6625,7 +6625,7 @@ static void sl_history_nav_start(sl_t *self) {
   }
 }
 
-static void sl_history_nav_reset(sl_impl_t *impl) {
+void sl_history_nav_reset(sl_impl_t *impl) {
   if (!impl)
     return;
   free(impl->history_edit);
@@ -6645,11 +6645,11 @@ static void sl_history_nav(sl_t *self, int dir) {
     next = 0;
   if (next > impl->history.len)
     next = impl->history.len;
-  impl->history_index = next;
-  if (next == impl->history.len)
-    (void)sl_buf_set(self, impl->history_edit ? impl->history_edit : "");
-  else
-    (void)sl_buf_set(self, impl->history.items[next]);
+  if (next == impl->history.len) {
+    if (sl_buf_set(self, impl->history_edit ? impl->history_edit : "") == 0)
+      sl_history_nav_reset(impl);
+  } else if (sl_buf_set(self, impl->history.items[next]) == 0)
+    impl->history_index = next;
 }
 
 static void sl_history_search_cleanup(sl_t *self, sl_history_search_t *search) {

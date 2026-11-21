@@ -1532,7 +1532,69 @@ static int stop_capacity(void) {
   return 0;
 }
 
+static int history_step(sl_t *sl, struct bridge *bridge) {
+  char drain[2048];
+  sl_queue_result_t result = {0};
+  while (read(bridge->master, drain, sizeof(drain)) > 0) {
+  }
+  result.item_id = "history/accepted";
+  result.item_revision = "v1";
+  if (bridge->stage == 0) {
+    CHECK(write(bridge->master, "\033[A\r", 4) == 4);
+  } else if (bridge->stage == 1) {
+    CHECK(bridge->calls == 1 && !strcmp(bridge->text, "latest"));
+    result.request_id = bridge->request.request_id;
+    CHECK(sl_queue_backend_result(sl, &result) == SL_OK);
+    CHECK(write(bridge->master, "\033[A", 3) == 3);
+  } else if (bridge->stage == 2) {
+    CHECK(!strcmp(sl_buffer(sl), "latest"));
+    CHECK(write(bridge->master, "\033[Bdraft\033[A\033[B", 14) == 14);
+  } else if (bridge->stage == 3) {
+    sl_queue_request_t offer = {0};
+    CHECK(!strcmp(sl_buffer(sl), "draft"));
+    offer.operation = SL_QUEUE_OFFER;
+    offer.text = "newly accepted";
+    CHECK(sl_queue_backend_request(sl, &offer, &result.request_id) == SL_OK);
+    CHECK(sl_queue_backend_result(sl, &result) == SL_OK);
+    CHECK(write(bridge->master, "\033[A", 3) == 3);
+  } else {
+    CHECK(!strcmp(sl_buffer(sl), "newly accepted"));
+    CHECK(sl_suspend(sl) == SL_OK);
+  }
+  ++bridge->stage;
+  return 0;
+}
+
+static void history_idle(sl_t *sl, void *context) {
+  struct bridge *bridge = context;
+  if (history_step(sl, bridge)) {
+    bridge->failed = 1;
+    (void)sl_suspend(sl);
+  }
+}
+
+static int native_history(void) {
+  struct bridge bridge = {0};
+  struct winsize size = {24, 80, 0, 0};
+  int slave;
+  CHECK(openpty(&bridge.master, &slave, NULL, NULL, &size) == 0);
+  CHECK(fcntl(bridge.master, F_SETFL, O_NONBLOCK) == 0);
+  CHECK(create(&bridge, slave, slave, 4));
+  CHECK(snapshot(bridge.sl, "q0", NULL, 0) == SL_OK);
+  CHECK(sl_history_add(bridge.sl, "earlier") == SL_OK &&
+        sl_history_add(bridge.sl, "latest") == SL_OK &&
+        sl_history_set_auto_add(bridge.sl, 1) == SL_OK);
+  CHECK(sl_set_idle_callback(bridge.sl, history_idle, &bridge) == SL_OK);
+  CHECK(!sl_readline(bridge.sl, "> ") && !bridge.failed && bridge.stage == 5);
+  sl_destroy(bridge.sl);
+  close(bridge.master);
+  close(slave);
+  return 0;
+}
+
 int main(int argc, char **argv) {
+  if (argc == 2 && !strcmp(argv[1], "history"))
+    return native_history();
   if (argc == 2 && !strcmp(argv[1], "stop-capacity"))
     return stop_capacity();
   if (argc == 2 && !strcmp(argv[1], "stop-edit")) {

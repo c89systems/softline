@@ -288,6 +288,7 @@ int sl_image_valid_path(const char *);
  * adapter. These are not application queue admission or consumption seams. */
 int sl_queue_cached_edit_begin(sl_t *self, int index);
 void sl_queue_cached_edit_restore(sl_t *self);
+void sl_history_nav_reset(sl_impl_t *impl);
 int sl_backend_create(sl_t *self, const sl_config_t *config);
 void sl_backend_destroy(sl_t *self);
 int sl_backend_callback_active(const sl_impl_t *impl);
