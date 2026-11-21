@@ -315,15 +315,31 @@ static int read_all(int fd, void *data, size_t n) {
   }
   return 0;
 }
+static int check_http_host(unsigned short port, const char *headers,
+                           const char *expected) {
+  char request[512], response[12];
+  int size =
+      snprintf(request, sizeof(request), "GET / HTTP/1.1\r\n%s\r\n", headers);
+  int fd = connect_to(port), result;
+  if (fd < 0)
+    return -1;
+  result = size <= 0 || (size_t)size >= sizeof(request) ||
+           write_all(fd, request, (size_t)size) ||
+           read_all(fd, response, sizeof(response)) ||
+           memcmp(response, expected, sizeof(response));
+  close(fd);
+  return result;
+}
 static int ws_open_route(unsigned short port, const char *route,
                          const char *after) {
   char request[1024];
   int size =
       snprintf(request, sizeof(request),
-               "GET %s?after=%s HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: "
+               "GET %s?after=%s HTTP/1.1\r\nHost: 127.0.0.1:%u\r\n"
+               "Origin: http://127.0.0.1:%u\r\nUpgrade: "
                "websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: "
                "13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n",
-               route, after);
+               route, after, (unsigned int)port, (unsigned int)port);
   int fd = connect_to(port);
   char header[1024];
   size_t at = 0, i;
@@ -998,6 +1014,22 @@ int main(int argc, char **argv) {
           !demo_link_flush(&approval_link));
   }
 #endif
+  if (argc == 2) {
+    char authority[128];
+    unsigned int other = port == 65535 ? 65534u : (unsigned int)port + 1;
+    (void)snprintf(authority, sizeof(authority), "Host: LOCALHOST:%u\r\n",
+                   (unsigned int)port);
+    CHECK(!check_http_host(port, authority, "HTTP/1.1 200"));
+    CHECK(!check_http_host(port, "Host: site.invalid\r\n", "HTTP/1.1 400"));
+    CHECK(
+        !check_http_host(port, "Host: localhost.invalid\r\n", "HTTP/1.1 400"));
+    CHECK(!check_http_host(port, "Host: localhost\r\nHost: localhost\r\n",
+                           "HTTP/1.1 400"));
+    CHECK(!check_http_host(port, "", "HTTP/1.1 400"));
+    (void)snprintf(authority, sizeof(authority), "Host: 127.0.0.1:%u\r\n",
+                   other);
+    CHECK(!check_http_host(port, authority, "HTTP/1.1 400"));
+  }
   fd = connect_to(port);
   CHECK(fd >= 0);
   CHECK(write_all(fd, "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n", 35) == 0);

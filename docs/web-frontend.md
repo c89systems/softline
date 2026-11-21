@@ -41,6 +41,7 @@ The mock listener in `examples/www_mock.c` is example/test support. It is not
 installed, exported, or linked into libsoftline. It accepts eight loopback
 connections, uses bounded buffers and no threads, and drops lagging browsers
 so they can reconnect and replay without blocking the terminal or producer.
+Open the listener through `127.0.0.1` or `localhost` using its configured port.
 
 ## Host integration
 

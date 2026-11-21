@@ -372,13 +372,18 @@ static int header(const char *request, const char *name, char *out,
                   size_t cap) {
   const char *line = strstr(request, "\r\n");
   size_t length = strlen(name);
-  while (line && line[2]) {
+  int found = 0;
+  while (line) {
     const char *end;
     size_t i;
     line += 2;
     end = strstr(line, "\r\n");
     if (!end)
-      return 0;
+      return -1;
+    if (end == line)
+      return found;
+    if (*line == ' ' || *line == '\t')
+      return -1;
     for (i = 0; i < length && line + i < end; ++i) {
       unsigned char c = (unsigned char)line[i];
       if (c >= 'A' && c <= 'Z')
@@ -387,18 +392,33 @@ static int header(const char *request, const char *name, char *out,
         break;
     }
     if (i == length && line + i < end && line[i] == ':') {
-      line += i + 1;
-      while (line < end && (*line == ' ' || *line == '\t'))
-        ++line;
-      if ((size_t)(end - line) >= cap)
-        return 0;
-      memcpy(out, line, (size_t)(end - line));
-      out[end - line] = 0;
-      return 1;
+      const char *value = line + i + 1, *last = end;
+      while (value < last && (*value == ' ' || *value == '\t'))
+        ++value;
+      while (last > value && (last[-1] == ' ' || last[-1] == '\t'))
+        --last;
+      if (found || (size_t)(last - value) >= cap)
+        return -1;
+      memcpy(out, value, (size_t)(last - value));
+      out[last - value] = 0;
+      found = 1;
     }
     line = end;
   }
-  return 0;
+  return -1;
+}
+
+static int loopback_host(const char *host, unsigned short port) {
+  char authority[sizeof("127.0.0.1:65535")];
+  if (!strcasecmp(host, "localhost") || !strcmp(host, "127.0.0.1"))
+    return 1;
+  (void)snprintf(authority, sizeof(authority), "localhost:%u",
+                 (unsigned int)port);
+  if (!strcasecmp(host, authority))
+    return 1;
+  (void)snprintf(authority, sizeof(authority), "127.0.0.1:%u",
+                 (unsigned int)port);
+  return !strcmp(host, authority);
 }
 static int replay(void *context, void *peer, const char *after) {
   demo_www_t *w = context;
@@ -455,9 +475,16 @@ static int http(demo_www_peer_t *p) {
   if (!end)
     return p->input_length >= 8192 ? -1 : 0;
   if (sscanf((char *)p->input, "%7s %4095s %15s", method, path, version) != 3 ||
-      strcmp(version, "HTTP/1.1") ||
-      !header((char *)p->input, "host", host, sizeof(host)))
+      strcmp(version, "HTTP/1.1"))
     return -1;
+  if (header((char *)p->input, "host", host, sizeof(host)) != 1 ||
+      !loopback_host(host, p->server->port)) {
+    static const char bad_host[] = "HTTP/1.1 400 Bad Request\r\n"
+                                   "Connection: close\r\n"
+                                   "Content-Length: 0\r\n\r\n";
+    p->close_after_write = 1;
+    return queue_frame(p, -1, bad_host, sizeof(bad_host) - 1) == SL_OK ? 0 : -1;
+  }
   query = strchr(path, '?');
   if (query)
     *query++ = 0;
@@ -465,12 +492,12 @@ static int http(demo_www_peer_t *p) {
        (!strcmp(path, "/terminal/events") && p->server->terminal_enabled)) &&
       !strcmp(method, "GET")) {
     size_t i;
-    if (!header((char *)p->input, "upgrade", upgrade, sizeof(upgrade)) ||
+    if (header((char *)p->input, "upgrade", upgrade, sizeof(upgrade)) != 1 ||
         strcasecmp(upgrade, "websocket") ||
-        !header((char *)p->input, "connection", connection,
-                sizeof(connection)) ||
-        !header((char *)p->input, "sec-websocket-version", ws_version,
-                sizeof(ws_version)) ||
+        header((char *)p->input, "connection", connection,
+               sizeof(connection)) != 1 ||
+        header((char *)p->input, "sec-websocket-version", ws_version,
+               sizeof(ws_version)) != 1 ||
         strcmp(ws_version, "13"))
       return -1;
     {
@@ -494,7 +521,7 @@ static int http(demo_www_peer_t *p) {
       if (!found)
         return -1;
     }
-    if (!header((char *)p->input, "sec-websocket-key", key, sizeof(key)) ||
+    if (header((char *)p->input, "sec-websocket-key", key, sizeof(key)) != 1 ||
         strlen(key) != 24)
       return -1;
     for (i = 0; key[i]; ++i)
@@ -503,9 +530,12 @@ static int http(demo_www_peer_t *p) {
             (key[i] >= '0' && key[i] <= '9') || key[i] == '+' ||
             key[i] == '/' || key[i] == '='))
         return -1;
-    if (header((char *)p->input, "origin", origin, sizeof(origin))) {
+    count = header((char *)p->input, "origin", origin, sizeof(origin));
+    if (count < 0)
+      return -1;
+    if (count == 1) {
       (void)snprintf(expected, sizeof(expected), "http://%s", host);
-      if (strcmp(origin, expected))
+      if (strcasecmp(origin, expected))
         return -1;
     }
     websocket_accept(key, accept);
