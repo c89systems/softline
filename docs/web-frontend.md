@@ -156,7 +156,7 @@ Replies may omit `seq`.
 
 | Event | Fields and behavior |
 | --- | --- |
-| `session` | `id`: host epoch; reconnect retries only within the same epoch |
+| `session` | `id`: host epoch. `disable_auto_resend=1` disables automatic retries on same-epoch reconnects. The field defaults to `0`. |
 | `capabilities` | `edit=1` enables revision-checked queue edits. Optional `terminal` is a same-origin absolute path to a terminal page. Optional `terminal_unlock_command` is a single-line host command. During an automatic terminal lock, the `+` menu displays that text and submits it verbatim through the normal prompt handler, preserving the draft. |
 | `reset` | Optional `text`; clear the retained transcript and queue before replay |
 | `begin` | `id`, `role` (`user`, `assistant`, `note`) |
@@ -177,6 +177,21 @@ Replies may omit `seq`.
 | `image_credit` | `id`; one more bounded binary chunk may be sent |
 | `image_done` | `id`, absolute backend `path`; insert only into the originating draft |
 | `image_error` | `id`, `text`; cancel the operation and keep the draft |
+
+Set `disable_auto_resend=1` on the initial `session` event of each connection
+when the host may lose request deduplication state without changing its epoch.
+Send the setting together with `id` via `sl_www_emit()` so it applies before
+the browser decides whether to retry. For example, the session event can be
+`{"type":"session","id":"conversation-epoch","disable_auto_resend":"1"}`.
+
+With this setting, queued prompts, steers, and queue edits awaiting a receipt
+move to the `+` recovery menu as **Delivery unconfirmed.** The browser also
+recovers unconfirmed text after an epoch change. Selecting a recovery entry
+restores its text to the composer for inspection and deliberate submission.
+The browser retains up to 32 recovery entries in the current tab. The host owns
+receipt lookup and may send `accepted` or `error` with the original browser
+request ID in the same epoch to resolve an unconfirmed entry. Acceptance removes
+the entry, and rejection keeps the text available for recovery.
 
 Browser text frames are URL-encoded actions:
 

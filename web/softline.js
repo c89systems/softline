@@ -10,10 +10,11 @@ function randomId() {
 const $ = id => document.getElementById(id);
 const prompt = $('prompt'), scroll = $('scroll'), messages = $('messages');
 const previews = new ImagePreviews(document, window, { notice: toast });
+const requestLimit = 32;
 const state = { socket: null, online: false, follow: true, messages: new Map(),
   queue: new Map(), seq: '', upload: null,
   view: randomId(), generation: 0, imageLimit: 32 * 1024 * 1024,
-  queueDelay: 500, queueTimer: null, pending: new Map(), failed: [], epoch: null,
+  queueDelay: 500, queueTimer: null, pending: new Map(), recovery: [], epoch: null,
   images: true, attachments: [], requestSeq: 0, approval: null, edit: null,
   editPending: null, canEdit: false, terminal: '', promptDisabled: false, restorePromptAfterTerminal: false,
   promptExplicitDisabled: false, promptReason: '', terminalPromptLock: false, terminalHandoffs: 0,
@@ -173,6 +174,7 @@ function saveEdit() {
   const text = $('queue-edit-text').value;
   if (text === state.edit.original) { $('queue-editor').close(); return; }
   if (!text.trim() || new TextEncoder().encode(text).length > 128 * 1024) { $('queue-edit-error').textContent = 'Use nonempty text within 128 KiB.'; return; }
+  if (state.pending.size >= requestLimit) { $('queue-edit-error').textContent = 'Wait for the host to confirm pending requests.'; return; }
   const request = randomId(), fields = { id: state.edit.id, revision: state.edit.revision, text, request, request_seq: ++state.requestSeq };
   if (send('edit', fields)) {
     state.editPending = request; state.pending.set(request, { action: 'edit', fields, text });
@@ -192,6 +194,19 @@ function editResult(request, error) {
   $('queue-edit-save').disabled = $('queue-edit-cancel').disabled = $('queue-edit-text').disabled = false;
   if (error) $('queue-edit-error').textContent = error;
   else $('queue-editor').close();
+}
+function keepForRecovery(items) {
+  state.recovery = state.recovery.concat(items).slice(-requestLimit);
+  editor.showMenu();
+}
+function requestResult(request, error) {
+  editResult(request, error);
+  let item = state.pending.get(request);
+  state.pending.delete(request);
+  const index = state.recovery.findIndex(entry => entry.unconfirmedEpoch === state.epoch && entry.fields.request === request);
+  if (index >= 0) [item] = state.recovery.splice(index, 1);
+  if (error && item) keepForRecovery({ action: item.action, fields: item.fields, text: item.text });
+  else if (index >= 0) editor.showMenu();
 }
 // Keep in-flight image insertion points attached to edits, including the
 // syntax-only removal of a completion trigger at the same insertion point.
@@ -216,8 +231,8 @@ const editor = new Prompt({
   actions: actionItems, action: promptAction,
   lockedActions: () => canUnlockPrompt() ? [{ id: 'terminal-unlock', label: state.terminalUnlockCommand,
     description: 'Allow typing while terminals are open', disabled: !state.online }] : [],
-  images: () => state.images, recovery: () => state.failed,
-  recovered: item => { state.failed = state.failed.filter(candidate => candidate !== item); },
+  images: () => state.images, recovery: () => state.recovery,
+  recovered: item => { state.recovery = state.recovery.filter(candidate => candidate !== item); },
   imagePicker: () => $('image-input').click(),
   cancelImages: () => {
     if (!state.attachments.length || prompt.selectionStart !== prompt.selectionEnd) return false;
@@ -262,7 +277,7 @@ function updatePromptState() {
   resizePrompt();
 }
 function sendPrompt(text, action) {
-  if (state.pending.size >= 32) {
+  if (state.pending.size >= requestLimit) {
     toast('Wait for the host to confirm pending prompts.');
     return false;
   }
@@ -571,11 +586,12 @@ function receive(event) {
     case 'image_credit': if (e.id === state.upload?.id) credit('ready'); break;
     case 'image_done': if (e.id === state.upload?.id) credit({ path: e.path }); break;
     case 'image_error': if (e.id === state.upload?.id) cancelUpload(e.text || 'Image upload failed.'); break;
-    case 'session':
+    case 'session': {
       stopSimulation();
       editor.newSession();
       state.terminalUnlockCommand = '';
-      if (state.epoch && state.epoch !== e.id) {
+      const previousEpoch = state.epoch, restarted = previousEpoch !== null && previousEpoch !== e.id;
+      if (restarted) {
         terminalPanel.close();
         state.terminalHandoffs = 0; state.terminalPromptLock = false;
         promptState(false);
@@ -584,14 +600,19 @@ function receive(event) {
         state.edit = null; $('queue-edit-save').disabled = true;
         state.canEdit = false; state.terminal = '';
       }
+      state.epoch = e.id;
       state.online = true; $('connection').textContent = 'Connected';
       updatePromptState(); queue();
-      if (!state.epoch || state.epoch === e.id) for (const item of state.pending.values()) send(item.action, item.fields);
-      else if (state.epoch && state.pending.size) {
-        state.failed.push(...state.pending.values()); state.failed = state.failed.slice(-16); state.pending.clear();
-        toast('The host restarted. Unconfirmed prompts are available under +; they were not sent again.');
+      if (!restarted && e.disable_auto_resend !== '1') {
+        for (const item of state.pending.values()) send(item.action, item.fields);
+      } else if (state.pending.size) {
+        keepForRecovery([...state.pending.values()].map(item => ({ ...item, unconfirmedEpoch: previousEpoch })));
+        state.pending.clear();
+        if (state.editPending) editResult(state.editPending);
+        toast('Delivery unconfirmed. Recover the text under +.');
       }
-      state.epoch = e.id; break;
+      break;
+    }
     case 'capabilities': {
       state.canEdit = e.edit === '1';
       const command = e.terminal_unlock_command;
@@ -602,10 +623,9 @@ function receive(event) {
       if (!state.terminal) terminalPanel.close();
       queue(); break;
     }
-    case 'accepted': state.pending.delete(e.request); editResult(e.request); break;
+    case 'accepted': requestResult(e.request); break;
     case 'error':
-      editResult(e.request, e.text || 'The entry changed or was consumed. Your edit is kept.');
-      if (state.pending.has(e.request)) { state.failed.push(state.pending.get(e.request)); state.failed = state.failed.slice(-16); state.pending.delete(e.request); }
+      requestResult(e.request, e.text || 'The entry changed or was consumed. Your edit is kept.');
       toast(e.text || 'The action failed. Unsent prompts can be recovered under +.'); break;
   }
 }

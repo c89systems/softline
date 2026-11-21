@@ -301,7 +301,8 @@ export class Prompt {
     if (!locked) {
       list.push(...this.menuItems);
       if (this.options.images()) list.unshift({ image: true, label: 'Add images', description: 'PNG or JPEG · also drop images here' });
-      for (const item of this.options.recovery()) list.unshift({ recover: true, source: item, text: item.text, label: 'Recover unsent prompt', description: item.text.slice(0, 60) });
+      for (const item of this.options.recovery()) list.unshift({ recover: true, source: item, text: item.text,
+        label: item.unconfirmedEpoch !== undefined ? 'Delivery unconfirmed.' : 'Recover unsent prompt', description: item.text.slice(0, 60) });
     }
     if (!list[this.menuActive] || list[this.menuActive].disabled) this.menuActive = Math.max(0, list.findIndex(item => !item.disabled));
     this.menuList = list; this.menu.replaceChildren();

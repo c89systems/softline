@@ -263,7 +263,7 @@ export async function runWebCompletionTests(source, completionSource, promptSour
       event({ type: 'image_done', id, path }); await idle();
       return { id, url, file: get('image-input').files[0] };
     }
-    const ui = { get, prompt, input, type, key, idle, queries, reply, event, sent, socket, document, window, revoked, blobs, upload, previews, opened, terminals,
+    const ui = { get, prompt, input, type, key, idle, queries, reply, event, sent, get socket() { return socket; }, document, window, revoked, blobs, upload, previews, opened, terminals,
       socketURL: () => socket.url,
       copiedImages, copiedText, clipboardCalls, canvases, decoded, narrow, finishDecode: () => pendingDecodes.shift()?.(),
       resize: target => { for (const observer of observers) if (observer.targets.includes(target)) observer.fn(); },
@@ -1101,6 +1101,63 @@ export async function runWebCompletionTests(source, completionSource, promptSour
     assert(ui.prompt.value === 'draft', 'unsynchronized connection consumed draft');
     ui.event({ type: 'session', id: 'initial' }); ui.key('Enter'); await ui.idle();
     assert(ui.sent() === 'draft', 'synchronized connection could not submit');
+  });
+  await check('same-epoch reconnect retries by default with the original request identity', async ui => {
+    await ui.type('send once'); ui.key('Enter'); await ui.idle();
+    const sent = ui.socket.sent.find(frame => frame.get('action') === 'send');
+    ui.socket.close(); ui.timeout(1000); ui.event({ type: 'session', id: 'initial' });
+    const retry = ui.socket.sent.find(frame => frame.get('action') === 'send');
+    assert(retry?.toString() === sent?.toString() && retry, 'default retry changed or lost the original request');
+    ui.event({ type: 'accepted', request: sent.get('request') });
+    ui.socket.close(); ui.timeout(1000); ui.event({ type: 'session', id: 'initial' });
+    assert(!ui.sent(), 'confirmed request was retried');
+  });
+  await check('the reconnecting host can park prompts, steers and edits as delivery unconfirmed', async ui => {
+    await ui.type('Run the tests.'); ui.key('Enter'); await ui.idle();
+    await ui.type('Use the debug build.'); ui.key('Enter', { altKey: true }); await ui.idle();
+    await ui.type('Independent draft');
+    ui.event({ type: 'capabilities', edit: '1' });
+    queueState(ui, [{ id: 'a', revision: '1' }]); shortcut(ui, 'edit');
+    ui.get('queue-edit-text').value = 'Updated approval'; ui.get('queue-edit-form').fire('submit');
+    const original = ui.socket.sent.filter(frame => ['send', 'steer', 'edit'].includes(frame.get('action')));
+    assert(original.map(frame => frame.get('action')).join(',') === 'send,steer,edit', 'fixture did not send all three actions');
+    ui.socket.close(); ui.timeout(1000);
+    ui.event({ type: 'session', id: 'initial', disable_auto_resend: '1' });
+    assert(!ui.socket.sent.length, 'a potentially accepted action was automatically resent');
+    assert(!ui.get('queue-editor').open && ui.prompt.value === 'Independent draft', 'reconnect blocked recovery or overwrote the draft');
+    ui.socket.close(); ui.timeout(1000); ui.event({ type: 'session', id: 'initial' });
+    assert(!ui.socket.sent.length, 'a later reconnect retried a recovered action');
+    ui.get('plus').click(); await ui.idle();
+    const recovery = () => ui.get('completions').children.filter(item => item.textContent.includes('Delivery unconfirmed.'));
+    assert(recovery().length === 3, 'unconfirmed requests are missing from recovery');
+    ui.event({ type: 'accepted', request: original[0].get('request') });
+    assert(recovery().length === 2, 'a late receipt left a confirmed prompt in recovery');
+    ui.event({ type: 'error', request: original[1].get('request'), text: 'Steer rejected' });
+    assert(recovery().length === 1 && ui.get('completions').textContent.includes('Recover unsent prompt'), 'a late rejection did not retain the text as a failed request');
+    assert(recovery()[0].textContent.includes('Updated approval'), 'recovery lost the edited text');
+    recovery()[0].click(); await ui.idle();
+    assert(ui.prompt.value === 'Independent draft\nUpdated approval', 'manual recovery did not preserve both texts');
+    assert(!ui.socket.sent.some(frame => ['send', 'steer', 'edit'].includes(frame.get('action'))), 'manual recovery submitted an action');
+  });
+  await check('a host epoch change preserves a full batch of unconfirmed requests', async ui => {
+    for (let i = 0; i < 32; ++i) {
+      ui.input(`Prompt number ${i}.`); ui.key('Enter'); await ui.idle();
+    }
+    const original = ui.socket.sent.filter(frame => frame.get('action') === 'send');
+    assert(original.length === 32, 'fixture did not fill the pending request window');
+    ui.event({ type: 'capabilities', edit: '1' });
+    queueState(ui, [{ id: 'a', revision: '1' }]); shortcut(ui, 'edit');
+    ui.get('queue-edit-text').value = 'Keep this edit'; ui.get('queue-edit-form').fire('submit');
+    assert(!ui.socket.sent.some(frame => frame.get('action') === 'edit') && ui.get('queue-edit-text').value === 'Keep this edit' &&
+      ui.get('queue-edit-error').textContent.includes('pending requests'), 'a full pending window did not leave the unsent edit available');
+    ui.get('queue-edit-cancel').click();
+    ui.socket.close(); ui.timeout(1000); ui.event({ type: 'session', id: 'new' });
+    assert(!ui.socket.sent.length, 'a request crossed into a new epoch');
+    ui.get('plus').click(); await ui.idle();
+    const recovery = () => ui.get('completions').children.filter(item => item.textContent.includes('Delivery unconfirmed.'));
+    assert(recovery().length === 32, 'recovery dropped part of the pending batch');
+    ui.event({ type: 'accepted', request: original[0].get('request') });
+    assert(recovery().length === 32, 'a new epoch changed the outcome of an old request');
   });
   await check('host epoch changes reset conversation IDs, queue and reasoning while retaining the draft', async ui => {
     ui.event({ type: 'session', id: 'old' }); await ui.type('keep this draft');
