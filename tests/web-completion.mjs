@@ -363,6 +363,27 @@ export async function runWebCompletionTests(source, completionSource, promptSour
     ui.timeout(50); ui.timeout(50);
     assert(changes.join(',') === '60px', 'composer did not grow once at the wrap');
   });
+  await check('the simulated caret follows the draft through both grace periods', async ui => {
+    const composer = ui.get('composer'), before = ui.get('projection-before'), scroll = ui.get('scroll');
+    scroll.focus();
+    simulate(ui, 'a\nb', '50', 'q');
+    assert(composer.dataset.simulating === '1' && !before.textContent, 'caret was absent at the start of grace');
+    ui.timeout(1000); ui.timeout(50);
+    assert(before.textContent === 'a\n', 'caret did not follow the newline');
+    ui.timeout(50);
+    assert(composer.dataset.simulating === '1' && before.textContent === 'a\nb' && !ui.sent(), 'caret was absent while waiting to submit');
+    assert(ui.document.activeElement === scroll, 'simulated caret moved keyboard focus');
+    ui.timeout(2000); await ui.idle();
+    assert(composer.dataset.simulating !== '1' && ui.sent() === 'a\nb', 'caret stayed active after submission');
+  });
+  await check('a long simulated draft scrolls its caret into view', async ui => {
+    ui.prompt.clientHeight = 200;
+    simulate(ui, 'lines\n'.repeat(12), '0', 'q');
+    ui.prompt.scrollHeight = 320;
+    ui.timeout(1000);
+    assert(ui.prompt.scrollTop > 0 && ui.get('prompt-projection').scrollTop === ui.prompt.scrollTop,
+      'caret projection did not follow the scrolling textarea');
+  });
   await check('a simulated send preserves the reading position and focus', async ui => {
     const scroll = ui.get('scroll');
     scroll.scrollHeight = 1000; scroll.clientHeight = 250; scroll.scrollTop = 123;
@@ -385,9 +406,11 @@ export async function runWebCompletionTests(source, completionSource, promptSour
     ui.timeout(1000); ui.input('!');
     ui.timeout(2000); await ui.idle();
     assert(!ui.sent() && ui.prompt.value === 'follows!', 'manual edit was submitted or lost');
+    assert(ui.get('composer').dataset.simulating !== '1', 'manual input left the simulated caret visible');
     ui.prompt.value = '';
     simulate(ui, 'disconnecting', '0', 'q');
     ui.timeout(1000); ui.socket.close();
+    assert(ui.get('composer').dataset.simulating !== '1', 'disconnect left the simulated caret visible');
     ui.event({ type: 'session', id: 'initial' });
     ui.timeout(2000); await ui.idle();
     assert(!ui.sent(), 'reconnection resumed unfinished automation');
@@ -401,6 +424,7 @@ export async function runWebCompletionTests(source, completionSource, promptSour
     simulate(ui, 'typing finished', '0', 'q');
     ui.timeout(1000);
     ui.event({ type: 'prompt_state', disabled: '1' });
+    assert(ui.get('composer').dataset.simulating !== '1', 'prompt lock left the simulated caret visible');
     ui.event({ type: 'prompt_state', disabled: '0' });
     ui.timeout(2000); await ui.idle();
     assert(ui.prompt.value === 'typing finished' && !ui.sent(), 'unlock resumed cancelled submission');

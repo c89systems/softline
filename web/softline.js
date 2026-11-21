@@ -272,7 +272,10 @@ function sendPrompt(text, action) {
   return true;
 }
 function stopSimulation() {
-  if (simulation) clearTimeout(simulation.timer);
+  if (simulation) {
+    clearTimeout(simulation.timer);
+    delete $('composer').dataset.simulating;
+  }
   simulation = simulationInput = null;
 }
 function canSimulate() {
@@ -307,6 +310,8 @@ function simulationEvent(event) {
   if (!text.trim() || prompt.value || !canSimulate()) return;
   job.chunks = [];
   simulation = job;
+  $('composer').dataset.simulating = '1';
+  editor.render();
   const segments = job.pace && (typeof Intl.Segmenter === 'function'
     ? new Intl.Segmenter().segment(text)[Symbol.iterator]() : text[Symbol.iterator]());
   let next = segments ? segments.next() : { value: text, done: false };
@@ -314,8 +319,12 @@ function simulationEvent(event) {
     if (simulation !== job || !canSimulate()) { if (simulation === job) stopSimulation(); return; }
     const at = prompt.value.length;
     prompt.setRangeText(next.value.segment ?? next.value, at, at, 'end');
-    if (at) resizePrompt();
+    if (at) editor.render();
     else editor.reset();
+    if (prompt.scrollHeight > prompt.clientHeight) {
+      prompt.scrollTop = prompt.scrollHeight;
+      editor.syncScroll();
+    }
     next = segments ? segments.next() : { done: true };
     if (!next.done) job.timer = setTimeout(tick, job.pace);
     else job.timer = setTimeout(() => editor.enqueue(() => {

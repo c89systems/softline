@@ -73,7 +73,9 @@ export class Prompt {
   }
   render() {
     this.selection = [this.input.selectionStart, this.input.selectionEnd];
-    const projection = this.model.projection(), ghost = this.get('completion-ghost');
+    const projection = this.get('composer').dataset.simulating === '1'
+      ? { before: this.input.value, ghost: '', after: '' } : this.model.projection();
+    const ghost = this.get('completion-ghost');
     this.get('projection-before').textContent = projection.before;
     ghost.textContent = projection.ghost;
     this.get('projection-after').textContent = projection.after;

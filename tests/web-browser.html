@@ -164,6 +164,21 @@ function inputDraft(text,inputType='insertText'){
 }
 function lastAction(action){return frame.contentWindow.softlineTestSocket.sent.map(value=>new URLSearchParams(value)).filter(value=>value.get('action')===action).at(-1)}
 function sendDraft(){const w=frame.contentWindow;frame.contentDocument.querySelector('#composer').dispatchEvent(new w.Event('submit',{bubbles:true,cancelable:true}))}
+await uiCheck('simulated caret blinks at the end of the draft without taking focus',async()=>{
+  const w=frame.contentWindow,doc=frame.contentDocument,p=doc.querySelector('#prompt');
+  const caret=doc.querySelector('#simulation-caret'),theme=doc.querySelector('#theme');
+  theme.focus();
+  event({type:'simulate_begin',start:'60',pace:'0',submit:'1000',mode:'q'});
+  event({type:'simulate_text',text:'First line\nSecond line'});event({type:'simulate_end'});
+  const start=caret.getBoundingClientRect(),blink=w.getComputedStyle(caret,'::after');
+  assert(!p.value&&start.height>0&&w.getComputedStyle(caret).visibility==='visible','caret missing during grace');
+  assert(blink.animationName===(w.matchMedia('(prefers-reduced-motion: reduce)').matches?'none':'caret-blink'),'caret blink timing is inactive');
+  await waitFor(()=>p.value==='First line\nSecond line');
+  const end=caret.getBoundingClientRect();
+  assert(end.left>start.left&&end.top>start.top&&doc.activeElement===theme,'caret did not follow the draft or took focus');
+  await waitFor(()=>lastAction('send')?.get('text')==='First line\nSecond line');
+  assert(w.getComputedStyle(caret).display==='none'&&doc.activeElement===theme,'simulated caret stayed active after send');
+});
 await uiCheck('send-button submission commits a typed file trigger',async()=>{
   inputDraft('@README.md');sendDraft();assert(lastAction('send')?.get('text')==='README.md','@ reached the prompt payload');
 });
