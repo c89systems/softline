@@ -38,9 +38,10 @@ selector offers None through Extra large and insets the chat and composer.
 Extra large uses 24% of the available chat width on wide layouts, with smaller
 vertical margins. The terminal and transcript use the workspace edges.
 The **Width** selector controls the conversation and prompt together. Standard
-caps them at 820 px. Wide uses the space inside the Extra large chat margins
-when that space exceeds 820 px, and Medium is halfway between. Toolbar
-visibility, margin size and width are saved in the browser.
+caps them at 820 px. Wide targets 75% of the chat column before margins, with
+820 px as its minimum target. Medium is halfway between. All three fit within
+the selected chat margins. Toolbar visibility, margin size and width are saved
+in the browser.
 Set `SOFTLINE_WEB_ANIMATIONS=1` to try the animated page in any browser chat
 example, for example `SOFTLINE_WEB_ANIMATIONS=1 make run-chat-web-only`.
 `SOFTLINE_QUEUE_DISPLAY_DELAY_MS` defaults to 500 and affects only Q/S/pending

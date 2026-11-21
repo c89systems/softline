@@ -42,8 +42,7 @@
   --chat-margin-step:clamp(min(4cqw,12px),calc((100cqw - 480px) / 8),6cqw);
   --chat-margin:calc(var(--chat-margin-steps,0) * var(--chat-margin-step));
   --content-width-standard:820px;
-  /* Wide uses four margin steps on each side of the chat slot. */
-  --content-width-extra:max(0px,calc(100cqw - 8 * var(--chat-margin-step) - var(--content-width-standard)));
+  --content-width-extra:max(0px,calc(75cqw - var(--content-width-standard)));
   --content-width:calc(var(--content-width-standard) + var(--content-width-scale,0) * var(--content-width-extra));
   margin:min(calc(var(--chat-margin) / 3),10cqh) var(--chat-margin);
 }

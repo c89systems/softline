@@ -131,7 +131,7 @@ await uiCheck('toolbar toggle reclaims layout space and margins only inset chat'
 await uiCheck('width presets size messages and the composer from the same limits', async () => {
   const w = frame.contentWindow, doc = frame.contentDocument;
   const margin = doc.querySelector('#margin'), width = doc.querySelector('#width');
-  const chat = doc.querySelector('#chat'), scroll = doc.querySelector('#scroll');
+  const chat = doc.querySelector('#chat'), slot = doc.querySelector('#chat-slot'), scroll = doc.querySelector('#scroll');
   const messages = doc.querySelector('#messages'), composer = doc.querySelector('#composer-area');
   const select = (control, value) => { control.value = value; control.dispatchEvent(new w.Event('change')); };
   const previousWidth = frame.style.width, previousMargin = margin.value, previousPreset = width.value;
@@ -143,16 +143,20 @@ await uiCheck('width presets size messages and the composer from the same limits
   try {
     frame.style.width = '1920px';
     await waitFor(() => w.innerWidth >= 1910 && w.innerWidth <= 1920);
-    select(margin, 'extra-large');
-    const wide = chat.getBoundingClientRect().width;
     select(margin, 'none');
+    const wide = slot.getBoundingClientRect().width * .75;
     for (const [preset, expected] of [['standard', 820], ['medium', (820 + wide) / 2], ['wide', wide]]) {
       select(width, preset); checkWidth(expected, expected);
     }
     select(margin, 'extra-large');
-    checkWidth(scroll.clientWidth, wide);
-    frame.style.width = '1440px';
-    await waitFor(() => w.innerWidth >= 1430 && w.innerWidth <= 1440);
+    checkWidth(scroll.clientWidth, chat.getBoundingClientRect().width);
+    frame.style.width = '1697px';
+    await waitFor(() => w.innerWidth >= 1690 && w.innerWidth <= 1697);
+    select(margin, 'none');
+    const resizedWide = slot.getBoundingClientRect().width * .75;
+    checkWidth(resizedWide, resizedWide);
+    frame.style.width = '1024px';
+    await waitFor(() => w.innerWidth >= 1014 && w.innerWidth <= 1024);
     select(margin, 'none'); checkWidth(820, 820);
   } finally { select(margin, previousMargin); select(width, previousPreset); frame.style.width = previousWidth; }
 });

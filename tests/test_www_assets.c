@@ -258,9 +258,8 @@ int main(int argc, char **argv) {
   CHECK(strstr(html, "data-width=\"standard\"") &&
         strstr(css, "--content-width-standard:820px;") &&
         strstr(css, "[data-margin=extra-large]{--chat-margin-steps:4}") &&
-        strstr(css,
-               "--content-width-extra:max(0px,calc(100cqw - 8 * "
-               "var(--chat-margin-step) - var(--content-width-standard)));"));
+        strstr(css, "--content-width-extra:max(0px,calc(75cqw - "
+                    "var(--content-width-standard)));"));
   CHECK(strstr(css, "#messages{max-width:var(--content-width);") &&
         strstr(css, "#composer-area{width:min(var(--content-width),100%);"));
   CHECK(strstr(css, "#terminal-panel{flex:none;") &&
