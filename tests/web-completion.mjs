@@ -110,7 +110,7 @@ export async function runWebCompletionTests(source, completionSource, promptSour
     document.getElementById = id => {
       if (!elements.has(id)) {
         const element = new Element(); element.id = id; element.ownerDocument = document;
-        element.tagName = { prompt: 'TEXTAREA', 'queue-edit-text': 'TEXTAREA', theme: 'SELECT', font: 'SELECT', margin: 'SELECT', 'image-input': 'INPUT', 'queue-editor': 'DIALOG', 'image-viewer': 'DIALOG' }[id] || 'DIV';
+        element.tagName = { prompt: 'TEXTAREA', 'queue-edit-text': 'TEXTAREA', theme: 'SELECT', font: 'SELECT', margin: 'SELECT', width: 'SELECT', 'image-input': 'INPUT', 'queue-editor': 'DIALOG', 'image-viewer': 'DIALOG' }[id] || 'DIV';
         elements.set(id, element);
       }
       return elements.get(id);
@@ -172,7 +172,8 @@ export async function runWebCompletionTests(source, completionSource, promptSour
     get('image-preview').append(get('image-preview-content'));
     get('theme').options = [{ value: 'default' }]; get('font').options = [{ value: 'sans' }];
     get('margin').options = ['none', 'small', 'medium', 'large', 'extra-large'].map(value => ({ value }));
-    get('toolbar').append(get('brand'), get('theme'), get('font'), get('margin'), get('transcript-toggle'), get('connection'));
+    get('width').options = ['standard', 'medium', 'wide'].map(value => ({ value }));
+    get('toolbar').append(get('brand'), get('theme'), get('font'), get('margin'), get('width'), get('transcript-toggle'), get('connection'));
     get('scroll-frame').append(get('scroll'));
     for (const id of ['completions', 'prompt-projection', 'queue', 'uploads', 'latest', 'toast', 'image-preview', 'terminal-panel']) get(id).hidden = true;
     function event(value) { socket.fire('message', { data: JSON.stringify(value) }); }
@@ -342,14 +343,20 @@ export async function runWebCompletionTests(source, completionSource, promptSour
     assert(!toolbar.hidden && ui.get('plus').disabled && ui.prompt.readOnly &&
       ui.preferences.get('softline.toolbarHidden') === '0', 'menu restore changed the prompt lock or missed the preference');
   });
-  await check('the workspace margin and toolbar visibility load from browser preferences', async ui => {
-    const margin = ui.get('margin');
+  await check('appearance controls load and save browser preferences', async ui => {
+    const margin = ui.get('margin'), width = ui.get('width');
     assert(ui.get('toolbar').hidden && margin.options.length === 5 && margin.value === 'large' &&
       ui.document.documentElement.dataset.margin === 'large', 'saved appearance was not applied at startup');
+    assert(width.value === 'wide' && ui.document.documentElement.dataset.width === 'wide', 'saved content width was not applied');
     ui.window.fire('keydown', { key: 'F9' });
     margin.value = 'small'; margin.fire('change');
     assert(ui.document.documentElement.dataset.margin === 'small' && ui.preferences.get('softline.margin') === 'small', 'margin change did not update or persist');
-  }, { preferences: { 'softline.toolbarHidden': '1', 'softline.margin': 'large' } });
+    width.value = 'medium'; width.fire('change');
+    assert(ui.document.documentElement.dataset.width === 'medium' && ui.preferences.get('softline.width') === 'medium', 'width change did not update or persist');
+  }, { preferences: { 'softline.toolbarHidden': '1', 'softline.margin': 'large', 'softline.width': 'wide' } });
+  await check('an invalid saved width falls back to Standard', async ui => {
+    assert(ui.get('width').value === 'standard' && ui.document.documentElement.dataset.width === 'standard', 'invalid width escaped the preset list');
+  }, { preferences: { 'softline.width': 'other' } });
   for (const motion of [true, false]) await check(`top scroll edge follows overflow in the ${motion ? 'animated' : 'plain'} page`, async ui => {
     const scroll = ui.get('scroll'), frame = ui.get('scroll-frame');
     scroll.scrollHeight = 1000;
@@ -686,6 +693,19 @@ export async function runWebCompletionTests(source, completionSource, promptSour
   function transcript(ui, id, type = 'open', fields = {}) {
     ui.event({ type: 'transcript_' + type, id, title: id, rows: '24', columns: '80', ...fields });
   }
+  await check('chat appearance changes preserve terminal and transcript visibility', async ui => {
+    const frame = openTerminal(ui), terminal = ui.get('terminal-panel'), viewer = ui.get('transcripts');
+    transcript(ui, 'log'); ui.get('transcript-toggle').click();
+    const margin = ui.get('margin'), width = ui.get('width');
+    margin.value = 'extra-large'; margin.fire('change');
+    width.value = 'wide'; width.fire('change');
+    assert(!terminal.hidden && terminal.children[0] === frame && !viewer.hidden, 'chat appearance changed an open pane');
+    shortcut(ui, 'terminal');
+    assert(terminal.hidden && !viewer.hidden, 'margin coupled the terminal and transcript');
+    ui.get('transcript-close').click();
+    assert(viewer.hidden && ui.document.documentElement.dataset.margin === 'extra-large' &&
+      ui.document.documentElement.dataset.width === 'wide', 'closing a pane reset chat appearance');
+  });
   await check('animated shell close stops the transport immediately and protects a reopened split', async ui => {
     const shell = openTerminal(ui), panel = ui.get('terminal-panel'), divider = ui.get('terminal-divider');
     terminalEvent(ui, { type: 'softline-terminal-size', rowHeight: 18, chromeHeight: 40 });

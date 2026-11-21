@@ -34,6 +34,7 @@ function preference(id, fallback) {
   });
 }
 preference('theme', 'default'); preference('font', 'sans'); preference('margin', 'none');
+preference('width', 'standard');
 try { toolbar.hidden = localStorage.getItem('softline.toolbarHidden') === '1'; } catch {}
 function toggleToolbar() {
   const hiding = !toolbar.hidden;

@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en" data-theme="default" data-font="sans" data-margin="none">
+<html lang="en" data-theme="default" data-font="sans" data-margin="none" data-width="standard">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
@@ -26,12 +26,16 @@
       <label>Margin <select id="margin" aria-label="Margin">
         <option value="none">None</option><option value="small">Small</option><option value="medium">Medium</option><option value="large">Large</option><option value="extra-large">Extra large</option>
       </select></label>
+      <label>Width <select id="width" aria-label="Content and prompt width">
+        <option value="standard">Standard</option><option value="medium">Medium</option><option value="wide">Wide</option>
+      </select></label>
     </div>
     <button id="transcript-toggle" type="button" aria-controls="transcripts" aria-expanded="false" aria-keyshortcuts="F8" title="Cycle transcripts (F8)" hidden>Transcripts</button>
     <span id="connection" role="status">Connecting</span>
   </header>
   <div id="workspace">
   <div id="conversation-pane">
+  <div id="chat-slot">
   <main id="chat" class="welcome-state">
     <div id="scroll-frame">
       <div id="scroll" tabindex="0" aria-label="Conversation">
@@ -58,6 +62,7 @@
       <div class="composer-hint"><span>Enter to send · Shift+Enter for a new line · Alt+Enter to steer</span></div>
     </div>
   </main>
+  </div>
   <div id="terminal-divider" class="pane-divider" role="separator" aria-label="Terminal height" aria-controls="terminal-panel" aria-orientation="horizontal" tabindex="0" hidden></div>
   <section id="terminal-panel" aria-label="Server terminal panel" hidden></section>
   </div>

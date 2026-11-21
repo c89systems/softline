@@ -227,6 +227,7 @@ int main(int argc, char **argv) {
   }
   CHECK(!select_presets(html, css, "theme", "default", 13));
   CHECK(!select_presets(html, css, "margin", "none", 5));
+  CHECK(!select_presets(html, css, "width", "standard", 3));
   for (at = css; *at; ++at) {
     if (*at == '{')
       ++depth;
@@ -241,17 +242,27 @@ int main(int argc, char **argv) {
       strstr(
           html,
           "id=\"terminal-panel\" aria-label=\"Server terminal panel\" hidden"));
-  CHECK(
-      strstr(css, "#chat{flex:1;min-height:0;") &&
-      strstr(css, "#scroll-frame{flex:1;min-height:0;position:relative}") &&
-      !strstr(css, "#scroll-frame::before") &&
-      strstr(css, "#workspace{display:flex;flex:1;min-height:0;") &&
-      strstr(css, "margin:min(calc(var(--workspace-margin,0px) / 3),10dvh)") &&
-      strstr(html, "id=\"toolbar\"") && strstr(html, "data-margin=\"none\""));
-  CHECK(strstr(css, "--workspace-margin-step:clamp(min(4vw,12px),"
-                    "calc((100vw - 480px) / 8),6vw)") &&
-        strstr(css, "[data-margin=extra-large]{--workspace-margin:"
-                    "calc(4 * var(--workspace-margin-step))}"));
+  CHECK(strstr(css, "#chat{flex:1;min-height:0;") &&
+        strstr(css, "#scroll-frame{flex:1;min-height:0;position:relative}") &&
+        !strstr(css, "#scroll-frame::before") &&
+        strstr(css, "#workspace{display:flex;flex:1;min-height:0;min-width:0;"
+                    "overflow:hidden}") &&
+        strstr(html, "id=\"toolbar\"") && strstr(html, "data-margin=\"none\""));
+  CHECK(strstr(html, "id=\"chat-slot\"") &&
+        strstr(css, "#chat-slot{display:flex;flex-direction:column;flex:1;"
+                    "min-height:0;min-width:0;container-type:size}") &&
+        strstr(css, "#chat{\n  --chat-margin-step:clamp(min(4cqw,12px),"
+                    "calc((100cqw - 480px) / 8),6cqw)") &&
+        strstr(css, "margin:min(calc(var(--chat-margin) / 3),10cqh) "
+                    "var(--chat-margin);"));
+  CHECK(strstr(html, "data-width=\"standard\"") &&
+        strstr(css, "--content-width-standard:820px;") &&
+        strstr(css, "[data-margin=extra-large]{--chat-margin-steps:4}") &&
+        strstr(css,
+               "--content-width-extra:max(0px,calc(100cqw - 8 * "
+               "var(--chat-margin-step) - var(--content-width-standard)));"));
+  CHECK(strstr(css, "#messages{max-width:var(--content-width);") &&
+        strstr(css, "#composer-area{width:min(var(--content-width),100%);"));
   CHECK(strstr(css, "#terminal-panel{flex:none;") &&
         strstr(css, "height:var(--pane-size,0px)") &&
         strstr(css, "flex:0 0 var(--pane-size,clamp(220px,42%,720px))") &&

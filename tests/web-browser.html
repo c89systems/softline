@@ -90,9 +90,10 @@ window.WebSocket=class extends EventTarget {
 frame.srcdoc=(await (await fetch('/')).text()).replace('<head>','<head>'+bootstrap);
 await uiCheck('actual frontend starts with mock host',async()=>{await waitFor(()=>frame.contentWindow.softlineTestSocket&&frame.contentDocument.querySelector('#connection')?.textContent==='Connected')});
 function event(value){const w=frame.contentWindow;w.softlineTestSocket.dispatchEvent(new w.MessageEvent('message',{data:JSON.stringify(value)}))}
-await uiCheck('toolbar toggle reclaims layout space and margins only inset the workspace', async () => {
+await uiCheck('toolbar toggle reclaims layout space and margins only inset chat', async () => {
   const w = frame.contentWindow, doc = frame.contentDocument;
   const toolbar = doc.querySelector('#toolbar'), workspace = doc.querySelector('#workspace');
+  const chat = doc.querySelector('#chat'), chatSlot = doc.querySelector('#chat-slot');
   const margin = doc.querySelector('#margin');
   const toggle = () => w.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'F9', cancelable: true }));
   const select = value => { margin.value = value; margin.dispatchEvent(new w.Event('change')); };
@@ -104,25 +105,56 @@ await uiCheck('toolbar toggle reclaims layout space and margins only inset the w
       await waitFor(() => w.innerWidth <= width && w.innerWidth > width - 8);
       select('none');
       const bar = toolbar.getBoundingClientRect();
-      assert(Math.abs(workspace.getBoundingClientRect().top - bar.bottom) < 1, 'None still added a margin');
+      const work = workspace.getBoundingClientRect(), slot = chatSlot.getBoundingClientRect();
+      assert(Math.abs(chat.getBoundingClientRect().top - bar.bottom) < 1, 'None still added a margin');
       let previous = 0;
       for (const option of [...margin.options].slice(1)) {
         select(option.value);
-        const box = workspace.getBoundingClientRect(), currentBar = toolbar.getBoundingClientRect();
-        const vertical = box.top - currentBar.bottom;
-        assert(box.left > previous && vertical > 0 && box.left > vertical, 'invalid margin size or axis ratio');
-        assert(Math.abs(w.innerWidth - box.right - box.left) < 1 && Math.abs(w.innerHeight - box.bottom - vertical) < 1, 'workspace margins are uneven');
+        const box = chat.getBoundingClientRect(), currentBar = toolbar.getBoundingClientRect();
+        const horizontal = box.left - slot.left, vertical = box.top - slot.top;
+        const changedWork = workspace.getBoundingClientRect();
+        assert(horizontal > previous && vertical > 0 && horizontal > vertical, 'invalid margin size or axis ratio');
+        assert(Math.abs(slot.right - box.right - horizontal) < 1 && Math.abs(slot.bottom - box.bottom - vertical) < 1, 'chat margins are uneven');
         assert(currentBar.left === bar.left && currentBar.right === bar.right, 'margin inset the toolbar');
-        previous = box.left;
+        assert(changedWork.left === work.left && changedWork.top === work.top && changedWork.width === work.width && changedWork.height === work.height, 'chat margin inset the workspace');
+        previous = horizontal;
       }
       assert(previous >= w.innerWidth * inset, 'Extra large left too little space around the workspace');
-      assert(workspace.getBoundingClientRect().width >= Math.min(480, w.innerWidth - 96) - 1, 'Extra large squeezed the workspace');
+      assert(chat.getBoundingClientRect().width >= Math.min(480, w.innerWidth - 96) - 1, 'Extra large squeezed the chat');
     }
     const before = workspace.getBoundingClientRect();
     margin.focus(); toggle();
     const after = workspace.getBoundingClientRect();
     assert(toolbar.hidden && after.height > before.height && after.top < before.top && doc.activeElement === doc.querySelector('#prompt'), 'hidden toolbar still took space or focus');
   } finally { select(previousMargin); if (toolbar.hidden !== hidden) toggle(); frame.style.width = previousWidth; }
+});
+await uiCheck('width presets size messages and the composer from the same limits', async () => {
+  const w = frame.contentWindow, doc = frame.contentDocument;
+  const margin = doc.querySelector('#margin'), width = doc.querySelector('#width');
+  const chat = doc.querySelector('#chat'), scroll = doc.querySelector('#scroll');
+  const messages = doc.querySelector('#messages'), composer = doc.querySelector('#composer-area');
+  const select = (control, value) => { control.value = value; control.dispatchEvent(new w.Event('change')); };
+  const previousWidth = frame.style.width, previousMargin = margin.value, previousPreset = width.value;
+  const near = (actual, expected) => Math.abs(actual - expected) < 1;
+  const checkWidth = (messageWidth, promptWidth) => {
+    assert(near(messages.getBoundingClientRect().width, messageWidth) &&
+      near(composer.getBoundingClientRect().width, promptWidth), `unexpected message or prompt width for ${width.value}`);
+  };
+  try {
+    frame.style.width = '1920px';
+    await waitFor(() => w.innerWidth >= 1910 && w.innerWidth <= 1920);
+    select(margin, 'extra-large');
+    const wide = chat.getBoundingClientRect().width;
+    select(margin, 'none');
+    for (const [preset, expected] of [['standard', 820], ['medium', (820 + wide) / 2], ['wide', wide]]) {
+      select(width, preset); checkWidth(expected, expected);
+    }
+    select(margin, 'extra-large');
+    checkWidth(scroll.clientWidth, wide);
+    frame.style.width = '1440px';
+    await waitFor(() => w.innerWidth >= 1430 && w.innerWidth <= 1440);
+    select(margin, 'none'); checkWidth(820, 820);
+  } finally { select(margin, previousMargin); select(width, previousPreset); frame.style.width = previousWidth; }
 });
 await uiCheck('animated scroll edges fade and blur only on the sides with overflow', async () => {
   const w = frame.contentWindow, doc = frame.contentDocument;
@@ -149,6 +181,17 @@ await uiCheck('animated scroll edges fade and blur only on the sides with overfl
     if (animated) await waitFor(() => top().opacity === '1' && bottom().opacity === '0');
   } finally { latest.click(); event({type:'reset'}); }
 });
+function checkPaneMargins(pane) {
+  const doc = pane.ownerDocument, margin = doc.querySelector('#margin'), previous = margin.value;
+  const select = value => { margin.value = value; margin.dispatchEvent(new doc.defaultView.Event('change')); };
+  try {
+    select('none');
+    const before = pane.getBoundingClientRect();
+    select('extra-large');
+    const after = pane.getBoundingClientRect();
+    assert(['left', 'top', 'width', 'height'].every(key => before[key] === after[key]), 'chat margin changed the pane bounds');
+  } finally { select(previous); }
+}
 function checkSplit(panel, neighbor, size, edge, contents, closing = false) {
   const divider = panel.previousElementSibling;
   const animation = panel.getAnimations().find(item => closing ? item.id === 'split-close' : item.animationName === 'split-open');
@@ -186,6 +229,7 @@ if (animatedSplits) await uiCheck('transcript split moves the conversation as it
       toggle.click();
       const contents = panel.querySelector('.transcript-content');
       checkSplit(panel, conversation, size, edge, contents);
+      checkPaneMargins(panel);
       doc.querySelector('#transcript-close').click();
       checkSplit(panel, conversation, size, edge, contents, true);
       await waitFor(() => panel.hidden);
@@ -206,6 +250,7 @@ await uiCheck('terminal docks below the composer and fits short and tall viewpor
   if (animatedSplits) checkSplit(panel, doc.querySelector('#chat'), 'height', 'bottom', panel.querySelector('iframe'));
   await waitFor(()=>!panel.hidden&&panel.querySelector('iframe')?.contentDocument?.querySelector('.xterm-screen'));
   const terminalFrame=panel.querySelector('iframe');
+  checkPaneMargins(panel);
   const terminalDocument=terminalFrame.contentDocument,grid=terminalDocument.querySelector('#terminal'),footer=terminalDocument.querySelector('.terminal-footer');
   assert(!terminalDocument.querySelector('header')&&Math.abs(grid.getBoundingClientRect().top)<1,'terminal still has a top status bar');
   assert(footer&&Math.abs(footer.getBoundingClientRect().height-24)<1&&footer.getBoundingClientRect().top>=grid.getBoundingClientRect().bottom-1,'terminal status is not a compact footer');
