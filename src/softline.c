@@ -49,7 +49,7 @@ typedef struct sl_render {
   int queue_visible;
 } sl_render_t;
 
-enum { SL_BACKLOG_LINES = 1000, SL_BACKLOG_BYTES = 1024 * 1024 };
+enum { SL_BACKLOG_LINES = 1000, SL_BACKLOG_BYTES = 256 * 1024 };
 
 struct sl_output_backlog {
   size_t head, used, lines;

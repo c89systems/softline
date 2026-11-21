@@ -48,7 +48,7 @@ The watch and idle callbacks, queue delivery, and browser feeds keep running.
 While a transcript occupies the terminal, native chat output is validated and
 queued for display. When chat returns, Softline restores the terminal's normal
 screen and replays the retained output above the current draft. The backlog
-holds up to 1,000 newline-delimited lines or 1 MiB, whichever fills first.
+holds up to 1,000 newline-delimited lines or 256 KiB, whichever fills first.
 Older lines fall out first. A single line too large to fit is dropped through
 its next newline. Replay after a cutoff starts with default text styling.
 Outside the transcript viewer, chat output goes directly to the terminal.

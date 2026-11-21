@@ -31,6 +31,8 @@
   sl_transcript_write(sl, id, SL_TRANSCRIPT_VT, text, sizeof(text) - 1)
 #define CHAT(sl, text) sl_output_stream_write(sl, text, sizeof(text) - 1)
 
+enum { CHAT_BACKLOG_LIMIT = 256 * 1024 };
+
 typedef struct fixture {
   sl_transcript_id_t log, worker;
   int master, phase, handoff, viewer_idle_ticks;
@@ -207,7 +209,7 @@ static void drive(sl_t *sl, void *context) {
     break;
   case 9:
     CHECK(sl_transcript_visible(sl));
-    long_line(sl, 1024 * 1024 + 4096);
+    long_line(sl, CHAT_BACKLOG_LIMIT + 4096);
     CHECK(sl_transcript_remove(sl, f->log) == SL_OK);
     CHECK(!sl_transcript_visible(sl));
     capture(f);
@@ -216,7 +218,7 @@ static void drive(sl_t *sl, void *context) {
     break;
   case 10:
     CHECK(sl_transcript_visible(sl));
-    long_line(sl, 1024 * 1024 - 7);
+    long_line(sl, CHAT_BACKLOG_LIMIT - 7);
     CHECK(CHAT(sl, "\n\033[38;5;2mkept-after-oversized-line\033[0m\n") ==
           SL_OK);
     CHECK(sl_transcript_remove(sl, f->worker) == SL_OK);

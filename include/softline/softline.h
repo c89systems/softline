@@ -1997,7 +1997,7 @@ int sl_output_stream_begin(sl_t *self);
 int sl_output_stream_reconcile(sl_t *self);
 
 /** Forward length bytes to the live output session. While a read-only
- * transcript is selected, keep the newest 1,000 logical lines or 1 MiB for
+ * transcript is selected, keep the newest 1,000 logical lines or 256 KiB for
  * replay on return to chat. Otherwise forward output immediately. Zero length
  * is a no-op; no newline or response boundary is implied. Valid bytes are
  * printable UTF-8, LF/CR/Tab, ANSI SGR, and opt-in OSC 8; malformed or
