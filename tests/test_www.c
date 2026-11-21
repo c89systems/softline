@@ -120,11 +120,13 @@ int main(void) {
   size_t i;
   memset(&h, 0, sizeof(h));
   sl_www_config_init(&config);
-  CHECK(!config.enabled && !config.header &&
+  CHECK(!config.enabled && !config.animations && !config.header &&
         !strcmp(config.welcome, "Welcome to softline"));
+  config.animations = 1;
   h.web = sl_www_create(&config);
   CHECK(h.web && h.web->asset(h.web, "/", &asset) == SL_ERROR_INVALID);
   sl_www_destroy(h.web);
+  config.animations = 0;
   {
     sl_www_asset_t custom;
     custom.path = "/banner.svg";

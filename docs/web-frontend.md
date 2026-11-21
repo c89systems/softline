@@ -66,6 +66,7 @@ sl_www_config_t config;
 sl_www_t *web;
 sl_www_config_init(&config);
 config.enabled = 1;
+config.animations = 1; /* Optional animated browser page. */
 config.action = host_action;
 config.binary = host_image_chunk;
 config.replay = host_replay;
@@ -81,12 +82,13 @@ web = sl_www_create(&config);
  */
 ```
 
-Use `sl_www_create_with_flags(&config, SL_WWW_ANIMATIONS)` to serve the animated
-chat page. The handler adds the separate motion stylesheet and module to the
-page it serves at `/`. The composer moves into place on the first successful
-send or when opening a shell from the welcome screen, and user bubbles glide
-and fade into place. The shell split opens from the bottom and the transcript
-split opens from the right, or from the top when stacked on narrow screens.
+Set `config.animations = 1` before `sl_www_create(&config)` to serve the animated
+chat page. The setting defaults to zero. The handler adds the separate motion
+stylesheet and module to the page it serves at `/`. The composer moves into
+place on the first successful send or when opening a shell from the welcome
+screen, and user bubbles glide and fade into place. The shell split opens from
+the bottom and the transcript split opens from the right, or from the top when
+stacked on narrow screens.
 Both splits collapse toward the same edge when closed. The shell is asked to
 stop as soon as its pane begins closing.
 The conversation fades and blurs at the top once scrolled away from the start,

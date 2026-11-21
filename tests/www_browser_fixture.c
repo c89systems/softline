@@ -3,6 +3,7 @@
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 static volatile sig_atomic_t done;
 static void stop(int signum) {
   (void)signum;
@@ -10,6 +11,7 @@ static void stop(int signum) {
 }
 int main(int argc, char **argv) {
   sl_www_config_t config;
+  const char *animations = getenv("SOFTLINE_WEB_ANIMATIONS");
   sl_www_asset_t asset;
   demo_www_t *www;
   FILE *file;
@@ -37,6 +39,7 @@ int main(int argc, char **argv) {
   fclose(file);
   sl_www_config_init(&config);
   config.enabled = 1;
+  config.animations = animations && !strcmp(animations, "1");
   asset.path = "/browser-check.html";
   asset.content_type = "text/html; charset=utf-8";
   asset.data = bytes;

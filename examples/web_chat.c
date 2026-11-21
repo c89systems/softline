@@ -754,6 +754,7 @@ demo_web_chat_t *demo_web_open(sl_t *editor, const demo_web_ops_t *ops,
                                void *context, unsigned short default_port,
                                int *enabled) {
   const char *on = getenv("SOFTLINE_WEB"), *port = getenv("SOFTLINE_WEB_PORT");
+  const char *animations = getenv("SOFTLINE_WEB_ANIMATIONS");
   int terminal_lock;
   demo_web_chat_t *w;
   sl_www_config_t config;
@@ -790,6 +791,7 @@ demo_web_chat_t *demo_web_open(sl_t *editor, const demo_web_ops_t *ops,
   }
   sl_www_config_init(&config);
   config.enabled = 1;
+  config.animations = animations && !strcmp(animations, "1");
   config.action = action;
   config.binary = binary;
   config.replay = replay;

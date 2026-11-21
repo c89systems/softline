@@ -50,13 +50,16 @@ static int motion_assets(sl_www_t *plain, const sl_www_config_t *cfg,
   static const char tags[] =
       "  <link rel=\"stylesheet\" href=\"./motion.css\">\n"
       "  <script type=\"module\" src=\"./motion.js\"></script>\n";
-  sl_www_t *animated = sl_www_create_with_flags(cfg, SL_WWW_ANIMATIONS);
+  sl_www_config_t animated_config = *cfg;
+  sl_www_t *animated;
   sl_www_asset_t a;
   const char *close_head = strstr(html, "</head>");
   char *page, *css;
   size_t prefix;
+  animated_config.animations = 1;
+  animated = sl_www_create(&animated_config);
+  animated_config.animations = 0;
   CHECK(animated && close_head);
-  CHECK(!sl_www_create_with_flags(cfg, SL_WWW_ANIMATIONS << 1));
   CHECK(!strstr(html, "./motion.") &&
         sl_www_asset(plain, "/motion.css", &a) == SL_ERROR_INVALID &&
         sl_www_asset(plain, "/motion.js", &a) == SL_ERROR_INVALID);
