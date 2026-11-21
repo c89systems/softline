@@ -32,7 +32,7 @@
 #workspace{flex-direction:row}
 .assistant .body>:last-child,.note .body>:last-child{margin-bottom:0}
 #conversation-pane{display:flex;flex-direction:column;flex:1;min-height:0;min-width:0}
-.pane-divider{position:relative;flex:0 0 8px;touch-action:none;outline:none}
+.pane-divider{--pane-divider-size:8px;position:relative;flex:0 0 var(--pane-divider-size);touch-action:none;outline:none}
 .pane-divider::before{content:"";position:absolute;inset:0;margin:auto;background:var(--line)}
 .pane-divider[aria-orientation="vertical"]{cursor:col-resize}
 .pane-divider[aria-orientation="vertical"]::before{width:1px}

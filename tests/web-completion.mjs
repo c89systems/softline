@@ -6,7 +6,7 @@ export async function runWebCompletionTests(source, completionSource, promptSour
   class Target {
     constructor() { this.listeners = new Map(); }
     addEventListener(name, fn) { const list = this.listeners.get(name) || []; list.push(fn); this.listeners.set(name, list); }
-    dispatchEvent(event) { return !this.fire(event.type).defaultPrevented; }
+    dispatchEvent(event) { return !this.fire(event.type, { detail: event.detail }).defaultPrevented; }
     fire(name, fields = {}) {
       const event = { target: this, key: '', altKey: false, shiftKey: false, ctrlKey: false, metaKey: false, isComposing: false, defaultPrevented: false, preventDefault() { this.defaultPrevented = true; }, stopImmediatePropagation() { this.stopped = true; }, ...fields };
       for (const fn of this.listeners.get(name) || []) { fn(event); if (event.stopped) break; }
@@ -22,7 +22,7 @@ export async function runWebCompletionTests(source, completionSource, promptSour
         setProperty(name, value) { this[name] = value; }
       };
       this.scrollHeight = this.clientHeight = 36; this.scrollTop = 0;
-      this.classList = { add() {}, remove() {} };
+      this.classList = { add() {}, remove() {}, contains() { return false; } };
     }
     setAttribute(name, value) { this[name] = value; }
     removeAttribute(name) { delete this[name]; }
@@ -85,7 +85,7 @@ export async function runWebCompletionTests(source, completionSource, promptSour
     const elements = new Map(), timers = new Map(), observers = [];
     let serial = 0, now = 0, socket, previews;
     const document = new Target(), window = new Target(), revoked = [], blobs = [], copiedImages = [], clipboardCalls = [], canvases = [], decoded = [], pendingDecodes = [], opened = [];
-    const terminals = [], animations = [];
+    const terminals = [], animations = [], splits = [];
     const Terminal = class {
       constructor(options) {
         this.options = options; this.chunks = []; this.osc = new Set();
@@ -105,7 +105,8 @@ export async function runWebCompletionTests(source, completionSource, promptSour
     window.innerWidth = 1024; window.innerHeight = 768;
     const narrow = new Target();
     narrow.matches = false;
-    window.matchMedia = query => query === '(prefers-reduced-motion: reduce)' ? { matches: !!options.reducedMotion } : narrow;
+    const reduced = new Target(); reduced.matches = !!options.reducedMotion;
+    window.matchMedia = query => query === '(prefers-reduced-motion: reduce)' ? reduced : narrow;
     document.getElementById = id => {
       if (!elements.has(id)) {
         const element = new Element(); element.id = id; element.ownerDocument = document;
@@ -142,6 +143,21 @@ export async function runWebCompletionTests(source, completionSource, promptSour
     get('transcript-divider').hidden = get('terminal-divider').hidden = true;
     get('workspace').rect = { width: 1024, height: 704 };
     get('transcript-divider').rect = get('terminal-divider').rect = { width: 8, height: 8 };
+    if (options.motion) for (const id of ['terminal-panel', 'terminal-divider', 'transcripts', 'transcript-divider']) {
+      const element = get(id);
+      element.getAnimations = () => splits.filter(animation => animation.element === element && !animation.cancelled);
+      element.animate = (keyframes, timing) => {
+        let resolve, reject;
+        const animation = {
+          element, keyframes, timing,
+          finished: new Promise((done, cancelled) => { resolve = done; reject = cancelled; }),
+          finish() { resolve(); },
+          cancel() { this.cancelled = true; reject(new Error('animation cancelled')); }
+        };
+        splits.push(animation);
+        return animation;
+      };
+    }
     get('copy-icon').content = { cloneNode: () => document.createElement('svg') };
     get('transcripts').append(get('transcript-tabs'), get('transcript-close'), get('transcript-screen'));
     get('conversation-pane').rect = { top: 64, height: 704 };
@@ -276,7 +292,7 @@ export async function runWebCompletionTests(source, completionSource, promptSour
       event({ type: 'image_done', id, path }); await idle();
       return { id, url, file: get('image-input').files[0] };
     }
-    const ui = { get, prompt, input, type, key, idle, queries, reply, event, sent, get socket() { return socket; }, document, window, revoked, blobs, upload, previews, opened, terminals, animations,
+    const ui = { get, prompt, input, type, key, idle, queries, reply, event, sent, get socket() { return socket; }, document, window, revoked, blobs, upload, previews, opened, terminals, animations, splits, reduced,
       socketURL: () => socket.url,
       copiedImages, copiedText, clipboardCalls, canvases, decoded, narrow, finishDecode: () => pendingDecodes.shift()?.(),
       resize: target => { for (const observer of observers) if (observer.targets.includes(target)) observer.fn(); },
@@ -630,6 +646,55 @@ export async function runWebCompletionTests(source, completionSource, promptSour
   function transcript(ui, id, type = 'open', fields = {}) {
     ui.event({ type: 'transcript_' + type, id, title: id, rows: '24', columns: '80', ...fields });
   }
+  await check('animated shell close stops the transport immediately and protects a reopened split', async ui => {
+    const shell = openTerminal(ui), panel = ui.get('terminal-panel'), divider = ui.get('terminal-divider');
+    terminalEvent(ui, { type: 'softline-terminal-size', rowHeight: 18, chromeHeight: 40 });
+    panel.rect = { height: 170 };
+    shortcut(ui, 'terminal');
+    assert(shell.contentWindow.messages.some(message => message.data.type === 'softline-terminal-stop') &&
+      !panel.hidden && panel.inert && divider.inert && panel.children[0] === shell, 'closing delayed shell shutdown or lost the outgoing frame');
+    assert(ui.document.activeElement === ui.prompt && ui.splits[0].keyframes[0].flexBasis === '170px' &&
+      ui.splits[0].keyframes[1].flexBasis === '0px', 'close did not start from the current split or restore focus');
+    panel.rect.height = 95;
+    const replacement = openTerminal(ui);
+    await ui.idle();
+    assert(ui.splits[0].cancelled && ui.splits[2].keyframes[0].flexBasis === '95px' &&
+      panel.children[0] === replacement && !panel.inert, 'reopening snapped the split or lost the replacement');
+    terminalEvent(ui, { type: 'softline-terminal-closed' }, shell.contentWindow);
+    assert(panel.children[0] === replacement, 'late exit from the stopped shell closed its replacement');
+    shortcut(ui, 'terminal');
+    assert(!panel.children.length && !panel.hidden, 'closing before mount retained a frame that could still start a shell');
+    ui.splits.slice(-2).forEach(animation => animation.finish()); await ui.idle();
+    assert(panel.hidden && divider.hidden, 'finished close left the split in the layout');
+  }, { motion: true });
+  await check('animated transcript close retains the screen until it hides and can reverse into another tab', async ui => {
+    transcript(ui, 'first'); transcript(ui, 'second');
+    const panel = ui.get('transcripts'), toggle = ui.get('transcript-toggle');
+    const [first, second] = ui.get('transcript-screen').children;
+    toggle.click(); toggle.click();
+    ui.get('transcript-close').click();
+    assert(!panel.hidden && panel.inert && !second.hidden && toggle['aria-expanded'] === 'false', 'closing lost the outgoing screen or left it interactive');
+    toggle.click(); await ui.idle();
+    assert(ui.splits[0].cancelled && second.hidden && !first.hidden && !panel.inert, 'reopening exposed an old transcript or kept the pane inert');
+    ui.get('transcript-close').click();
+    ui.reduced.matches = true; ui.reduced.fire('change'); await ui.idle();
+    assert(panel.hidden && ui.get('transcript-divider').hidden && first.hidden, 'enabling reduced motion did not finish closing');
+    toggle.click(); ui.get('transcript-close').click();
+    assert(panel.hidden && ui.splits.length === 6, 'reduced motion delayed closing a new split');
+  }, { motion: true });
+  await check('shell exit and host transcript removal animate independently in the same workspace', async ui => {
+    openTerminal(ui);
+    terminalEvent(ui, { type: 'softline-terminal-size', rowHeight: 18, chromeHeight: 40 });
+    transcript(ui, 'log'); ui.get('transcript-toggle').click();
+    const shell = ui.get('terminal-panel'), viewer = ui.get('transcripts');
+    terminalEvent(ui, { type: 'softline-terminal-closed' });
+    transcript(ui, 'log', 'remove');
+    assert(shell.inert && viewer.inert && !shell.hidden && !viewer.hidden && ui.terminals[0].disposed, 'host cleanup or split exit was skipped');
+    ui.splits.slice(2, 4).forEach(animation => animation.finish()); await ui.idle();
+    assert(viewer.hidden && !shell.hidden, 'closing the transcript hid the shell before its own animation finished');
+    ui.splits.slice(0, 2).forEach(animation => animation.finish()); await ui.idle();
+    assert(shell.hidden && !shell.children.length, 'shell exit left a frame behind');
+  }, { motion: true });
   await check('read-only transcripts retain independent geometry and do not interrupt chat', async ui => {
     const decode = bytes => Array.from(bytes, byte => String.fromCharCode(byte)).join('');
     assert(ui.get('transcript-toggle').hidden && !ui.window.fire('keydown', { key: 'F8' }).defaultPrevented, 'empty registry intercepted F8');

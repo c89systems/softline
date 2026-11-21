@@ -90,27 +90,32 @@ window.WebSocket=class extends EventTarget {
 frame.srcdoc=(await (await fetch('/')).text()).replace('<head>','<head>'+bootstrap);
 await uiCheck('actual frontend starts with mock host',async()=>{await waitFor(()=>frame.contentWindow.softlineTestSocket&&frame.contentDocument.querySelector('#connection')?.textContent==='Connected')});
 function event(value){const w=frame.contentWindow;w.softlineTestSocket.dispatchEvent(new w.MessageEvent('message',{data:JSON.stringify(value)}))}
-function checkSplit(panel, neighbor, size, edge, contents) {
-  const animation = panel.getAnimations().find(item => item.animationName === 'split-open');
-  assert(animation, 'split has no opening animation');
+function checkSplit(panel, neighbor, size, edge, contents, closing = false) {
+  const divider = panel.previousElementSibling;
+  const animation = panel.getAnimations().find(item => closing ? item.id === 'split-close' : item.animationName === 'split-open');
+  const dividerAnimation = closing && divider.getAnimations().find(item => item.id === 'split-close');
+  assert(animation && (!closing || dividerAnimation), 'split has no pane or divider animation');
+  const animations = closing ? [animation, dividerAnimation] : [animation];
   const duration = animation.effect.getTiming().duration;
   const measure = time => {
-    animation.currentTime = time;
+    for (const effect of animations) effect.currentTime = time;
     return [panel.getBoundingClientRect()[size], neighbor.getBoundingClientRect()[size],
-      panel.getBoundingClientRect()[edge], contents.getBoundingClientRect()[size]];
+      panel.getBoundingClientRect()[edge], contents.getBoundingClientRect()[size], divider.getBoundingClientRect()[size]];
   };
   try {
-    animation.pause();
+    for (const effect of animations) effect.pause();
     const start = measure(0), middle = measure(duration / 2), end = measure(duration);
-    assert(start[0] < 1 && middle[0] > start[0] && middle[0] < end[0], 'pane bounds did not expand during the animation');
-    assert(start[1] > middle[1] && middle[1] > end[1], 'neighbor reserved the final split immediately');
+    const [collapsed, expanded] = closing ? [end, start] : [start, end];
+    assert(collapsed[0] < 1 && middle[0] > collapsed[0] && middle[0] < expanded[0], 'pane bounds did not change gradually');
+    assert(collapsed[1] > middle[1] && middle[1] > expanded[1], 'chat snapped to the final split');
     assert(Math.abs(start[2] - end[2]) < 1 && Math.abs(middle[2] - end[2]) < 1, 'pane left its entry edge');
-    assert(Math.abs(start[3] - end[3]) < 1 && Math.abs(middle[3] - end[3]) < 1, 'pane contents resized during opening');
-  } finally { animation.finish(); }
+    assert(Math.abs(start[3] - end[3]) < 1 && Math.abs(middle[3] - end[3]) < 1, 'pane contents resized during the animation');
+    if (closing) assert(start[4] > middle[4] && end[4] < 1, 'divider remained in the collapsed split');
+  } finally { for (const effect of animations) effect.finish(); }
 }
 const animatedSplits = frame.contentDocument.querySelector('link[href="./motion.css"]') &&
   frame.contentWindow.matchMedia('(prefers-reduced-motion: no-preference)').matches;
-if (animatedSplits) await uiCheck('transcript split moves the conversation as it opens', async () => {
+if (animatedSplits) await uiCheck('transcript split moves the conversation as it opens and closes', async () => {
   const doc = frame.contentDocument, panel = doc.querySelector('#transcripts');
   const conversation = doc.querySelector('#conversation-pane'), toggle = doc.querySelector('#transcript-toggle');
   const previousWidth = frame.style.width;
@@ -120,7 +125,11 @@ if (animatedSplits) await uiCheck('transcript split moves the conversation as it
       await waitFor(() => frame.contentWindow.matchMedia('(max-width: 640px)').matches === (width <= 640));
       event({type:'transcript_open',id:'split',title:'Split fixture',rows:'25',columns:'80'});
       toggle.click();
-      checkSplit(panel, conversation, size, edge, panel.querySelector('.transcript-content'));
+      const contents = panel.querySelector('.transcript-content');
+      checkSplit(panel, conversation, size, edge, contents);
+      doc.querySelector('#transcript-close').click();
+      checkSplit(panel, conversation, size, edge, contents, true);
+      await waitFor(() => panel.hidden);
       event({type:'transcript_remove',id:'split'});
       panel.getBoundingClientRect();
     }
@@ -153,6 +162,10 @@ await uiCheck('terminal docks below the composer and fits short and tall viewpor
   event({type:'terminal_state',active:'2',disable_prompt:'1'});
   assert(p.readOnly&&doc.querySelector('#composer').dataset.disabled==='1'&&!doc.querySelector('#scroll').inert,'lock disabled conversation scrolling');
   terminalFrame.contentDocument.querySelector('#terminal-close').click();
+  if (animatedSplits) {
+    await waitFor(() => panel.inert);
+    checkSplit(panel, doc.querySelector('#chat'), 'height', 'bottom', terminalFrame, true);
+  }
   await waitFor(()=>panel.hidden&&!panel.querySelector('iframe'));
   assert(p.readOnly,'closing terminal overrode host lock');
   event({type:'terminal_state',active:'1',disable_prompt:'1'});assert(p.readOnly,'another active handoff lost its lock');

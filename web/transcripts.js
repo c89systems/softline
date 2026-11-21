@@ -22,7 +22,7 @@ export class Transcripts {
     this.handle = document.getElementById('transcript-divider');
     this.stacked = window.matchMedia('(max-width: 640px)');
     this.sizes = {};
-    this.divider = new PaneDivider(this.handle, this.workspace, (value, axis) => {
+    this.divider = new PaneDivider(this.handle, this.workspace, this.panel, (value, axis) => {
       this.sizes[axis] = value;
       this.resize();
     });
@@ -64,7 +64,7 @@ export class Transcripts {
   }
 
   resize() {
-    if (this.panel.hidden) return;
+    if (!this.active) return;
     const workspace = this.workspace.getBoundingClientRect();
     const handle = this.handle.getBoundingClientRect();
     const stacked = this.stacked.matches;
@@ -87,21 +87,20 @@ export class Transcripts {
     const previous = this.views.get(this.active);
     const focused = this.document.activeElement;
     if (previous && previous !== next) {
-      previous.stage.hidden = true;
+      if (next) previous.stage.hidden = true;
       previous.tab.tabIndex = -1;
       previous.tab.setAttribute('aria-selected', 'false');
     }
     this.active = next ? id : '';
-    this.panel.hidden = !next;
-    this.handle.hidden = !next;
     this.toggle.setAttribute('aria-expanded', String(!!next));
     if (!next) {
-      this.divider.cancel();
       if (focused === this.handle || this.panel.contains(focused)) {
         this.toggle.focus({ preventScroll: true });
       }
+      if (previous) this.divider.hide(() => { previous.stage.hidden = true; });
       return;
     }
+    this.divider.show(this.stacked.matches ? 'y' : 'x');
     this.resize();
     next.stage.hidden = false;
     next.tab.tabIndex = 0;

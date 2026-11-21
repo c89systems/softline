@@ -77,6 +77,8 @@ page it serves at `/`. The composer moves into place on the first successful
 send or when opening a shell from the welcome screen, and user bubbles glide
 and fade into place. The shell split opens from the bottom and the transcript
 split opens from the right, or from the top when stacked on narrow screens.
+Both splits collapse toward the same edge when closed. The shell is asked to
+stop as soon as its pane begins closing.
 The motion respects the browser’s reduced-motion preference. Sending and paced
 typing keep their usual timing.
 

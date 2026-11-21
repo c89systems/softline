@@ -1,7 +1,8 @@
 export class PaneDivider {
-  constructor(handle, workspace, resize) {
+  constructor(handle, workspace, panel, resize) {
     this.handle = handle;
     this.workspace = workspace;
+    this.panel = panel;
     this.resize = resize;
     handle.addEventListener('pointerdown', event => {
       if (event.button !== 0 || !event.isPrimary || workspace.dataset.paneResizing ||
@@ -35,6 +36,35 @@ export class PaneDivider {
       event.preventDefault();
       this.setSize(size);
     });
+  }
+
+  show(axis) {
+    const cleanup = this.pendingHide;
+    this.pendingHide = null;
+    cleanup?.();
+    this.panel.hidden = this.handle.hidden = false;
+    this.panel.inert = this.handle.inert = false;
+    if (cleanup) this.splitVisibility(axis);
+  }
+
+  hide(cleanup) {
+    if (this.panel.hidden || this.pendingHide) return;
+    this.cancel();
+    this.pendingHide = cleanup;
+    this.panel.inert = this.handle.inert = true;
+    const finish = () => {
+      if (this.pendingHide !== cleanup) return;
+      this.pendingHide = null;
+      this.panel.hidden = this.handle.hidden = true;
+      cleanup();
+    };
+    if (this.splitVisibility(this.axis, finish)) finish();
+  }
+
+  splitVisibility(axis, finish) {
+    return this.panel.dispatchEvent(new CustomEvent('softline:split-visibility', {
+      cancelable: !!finish, detail: { axis, divider: this.handle, finish }
+    }));
   }
 
   position(event) {

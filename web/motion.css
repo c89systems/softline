@@ -14,6 +14,7 @@
   }
   #terminal-panel > .terminal-frame { height: var(--pane-size); }
   #transcripts > .transcript-content { width: var(--pane-size); }
+  .pane-divider[inert] { overflow: clip; }
   @media (max-width: 640px) {
     #transcripts { justify-content: flex-end; }
     #transcripts > .transcript-content {

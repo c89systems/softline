@@ -9,7 +9,7 @@ export class TerminalPanel {
     this.panel = document.getElementById('terminal-panel');
     this.conversation = document.getElementById('conversation-pane');
     this.handle = document.getElementById('terminal-divider');
-    this.divider = new PaneDivider(this.handle, document.getElementById('workspace'), height => {
+    this.divider = new PaneDivider(this.handle, document.getElementById('workspace'), this.panel, height => {
       this.height = height;
       this.resize();
     });
@@ -19,6 +19,7 @@ export class TerminalPanel {
       const data = event.data;
       if (data?.type === 'softline-terminal-closed') this.close();
       else if (data?.type === 'softline-terminal-size' && Number.isFinite(data.rowHeight) && data.rowHeight >= 8 && data.rowHeight <= 100 && Number.isFinite(data.chromeHeight) && data.chromeHeight >= 0 && data.chromeHeight <= 300) {
+        this.frameMounted = true;
         this.rowHeight = data.rowHeight; this.chromeHeight = data.chromeHeight; this.resize();
       }
     });
@@ -39,8 +40,9 @@ export class TerminalPanel {
     frame.src = url.href;
     const chat = this.document.getElementById('chat');
     chat.dispatchEvent(new Event('softline:composer-dock'));
-    this.frame = frame; this.panel.replaceChildren(frame); this.panel.hidden = false;
-    this.handle.hidden = false;
+    this.frameMounted = false;
+    this.frame = frame; this.panel.replaceChildren(frame);
+    this.divider.show('y');
     chat.classList.remove('welcome-state');
     this.resize();
     frame.focus({ preventScroll: true });
@@ -68,9 +70,9 @@ export class TerminalPanel {
     if (!this.frame) return;
     const frame = this.frame; this.frame = null;
     frame.contentWindow.postMessage({ type: 'softline-terminal-stop' }, this.origin);
-    this.divider.cancel();
-    this.handle.hidden = true;
-    this.panel.hidden = true; this.panel.replaceChildren();
+    // A loading frame may have missed the stop message and never opened a PTY.
+    if (!this.frameMounted) frame.remove();
+    this.divider.hide(() => frame.remove());
     this.closed();
   }
 }
