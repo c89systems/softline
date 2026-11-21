@@ -150,8 +150,12 @@ typing, between visible characters, and before submission, plus queue or
 steer intent. Zero typing delay inserts the full text in one operation.
 The browser needs an unlocked composer. It clears whitespace-only drafts and
 preserves drafts with content by declining the simulation. After the final
-delay it uses the normal send action. Manual edits take over the draft.
-Delivery is transient and a disconnect cancels unfinished automation.
+delay it uses the normal send action. A draft edit or successful manual send
+takes over the composer. Escape cancels and clears simulated text. Navigation,
+queue editing, and terminal handoffs can run while typing when the host allows
+concurrent prompt input. A host prompt lock, a replaced draft, or an image
+attachment in progress stops automatic submission. Delivery is transient and
+a disconnect or session change cancels unfinished automation.
 
 For optional feedback, call `sl_www_simulate_prompt_tracked()` with a fresh
 simulation ID and the selected peer's writer. The browser sends advisory

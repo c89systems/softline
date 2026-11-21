@@ -250,7 +250,11 @@ function adjustAnchor(before, after, syntax) {
   }
 }
 const editor = new Prompt({
-  document, send, mutate: adjustAnchor, resize: resizePrompt, toast, submit,
+  document, send, resize: resizePrompt, toast, submit,
+  mutate: (before, after, syntax) => {
+    if (before !== after) stopSimulation('manual_input');
+    adjustAnchor(before, after, syntax);
+  },
   actions: actionItems, action: promptAction,
   lockedActions: () => [
     ...(canUnlockPrompt() ? [{ id: 'terminal-unlock', label: state.terminalUnlockCommand,
@@ -345,7 +349,6 @@ function simulationUnavailable() {
   if (!state.online) return 'offline';
   if (state.promptDisabled) return 'prompt_locked';
   if (state.attachments.length) return 'image_pending';
-  if (state.edit) return 'queue_edit_active';
   return '';
 }
 function simulationEvent(event) {
@@ -392,12 +395,11 @@ function simulationEvent(event) {
   if (prompt.value) {
     prompt.value = '';
     prompt.setSelectionRange(0, 0);
-    editor.reset();
   }
   job.chunks = [];
   simulation = job;
   $('composer').dataset.simulating = '1';
-  editor.render();
+  editor.reset();
   const segments = job.pace && (typeof Intl.Segmenter === 'function'
     ? new Intl.Segmenter().segment(text)[Symbol.iterator]() : text[Symbol.iterator]());
   let next = segments ? segments.next() : { value: text, done: false };
@@ -407,8 +409,7 @@ function simulationEvent(event) {
     if (reason) { stopSimulation(reason); return; }
     const at = prompt.value.length;
     prompt.setRangeText(next.value.segment ?? next.value, at, at, 'end');
-    if (at) editor.render();
-    else editor.reset();
+    editor.render();
     if (prompt.scrollHeight > prompt.clientHeight) {
       prompt.scrollTop = prompt.scrollHeight;
       editor.syncScroll();
@@ -428,25 +429,22 @@ function simulationEvent(event) {
   job.timer = setTimeout(tick, job.start);
   reportSimulation(id, 'started');
 }
-for (const event of ['beforeinput', 'input', 'compositionstart'])
-  prompt.addEventListener(event, () => stopSimulation('manual_input'));
 prompt.addEventListener('keydown', event => {
-  if (!simulation || ['Shift', 'Control', 'Alt', 'Meta'].includes(event.key)) return;
-  stopSimulation(event.key === 'Escape' ? 'user_cancelled' : 'manual_input');
-  if (event.key !== 'Escape') return;
+  if (!simulation || event.key !== 'Escape' || event.isComposing) return;
+  stopSimulation('user_cancelled');
   event.preventDefault();
   event.stopImmediatePropagation();
   prompt.value = '';
   editor.reset();
 }, true);
 function submit(steer = false, automatic = false) {
-  stopSimulation('manual_input');
   if (state.promptDisabled || state.attachments.length) return;
   editor.finish();
   if (!prompt.value.trim()) return;
   if (new TextEncoder().encode(prompt.value).length > 128 * 1024) { toast('The prompt exceeds 128 KiB. Your draft is kept.'); return; }
   const request = sendPrompt(prompt.value, steer ? 'steer' : 'send');
   if (request) {
+    stopSimulation('manual_input');
     $('chat').dispatchEvent(new Event('softline:composer-dock'));
     prompt.value = ''; prompt.setSelectionRange(0, 0); started();
     if (!automatic) state.follow = true;
@@ -522,6 +520,7 @@ async function uploadFile(upload) {
   editor.finish();
   const insertion = (upload.anchor && !/\s$/u.test(prompt.value.slice(0, upload.anchor)) ? ' ' : '') + result.path +
     (upload.anchor < prompt.value.length && !/^\s/u.test(prompt.value.slice(upload.anchor)) ? ' ' : '');
+  stopSimulation('manual_input');
   prompt.setRangeText(insertion, upload.anchor, upload.anchor, 'preserve');
   previews.remember(result.path, upload.url, file.name, file, png ? 'image/png' : 'image/jpeg');
   upload.url = null;
@@ -616,8 +615,9 @@ function receive(event) {
     case 'limits': if (Number(e.image_bytes) > 0) state.imageLimit = Number(e.image_bytes); break;
     case 'completion_provider': case 'complete': case 'complete_end': editor.receive(e); break;
     case 'draft': {
-      stopSimulation('draft_replaced');
-      const before = prompt.value; prompt.value = e.text || ''; adjustAnchor(before, prompt.value); editor.reset(); prompt.focus(); break;
+      const before = prompt.value, text = e.text || '';
+      if (before !== text) stopSimulation('draft_replaced');
+      prompt.value = text; adjustAnchor(before, text); editor.reset(); prompt.focus(); break;
     }
     case 'image_credit': if (e.id === state.upload?.id) credit('ready'); break;
     case 'image_done': if (e.id === state.upload?.id) credit({ path: e.path }); break;

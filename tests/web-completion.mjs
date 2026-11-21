@@ -577,6 +577,59 @@ export async function runWebCompletionTests(source, completionSource, promptSour
       reports[1].get('reason') === 'manual_input' && ui.prompt.value === 'typed!' && !ui.sent(),
       'manual takeover lost the draft or reported the wrong outcome');
   });
+  await check('opening the terminal and moving the cursor leave a paced prompt running', async ui => {
+    ui.event({ type: 'capabilities', terminal: '/terminal' });
+    const text = '@README.md';
+    simulate(ui, text, '50', 'q', 'shell'); ui.timeout(1000);
+    shortcut(ui, 'terminal');
+    ui.event({ type: 'terminal_state', active: '1', disable_prompt: '0' });
+    assert(!ui.get('terminal-panel').hidden && ui.get('composer').dataset.simulating === '1', 'the terminal shortcut cancelled typing');
+    for (let i = 1; i < text.length; ++i) ui.timeout(50);
+    ui.prompt.fire('input', { inputType: 'insertCompositionText', isComposing: true });
+    ui.prompt.focus(); ui.key('ArrowLeft'); ui.prompt.fire('click'); ui.key('End'); ui.key('Tab');
+    ui.prompt.fire('compositionstart'); ui.prompt.fire('compositionend');
+    ui.prompt.fire('beforeinput', { inputType: 'deleteContentForward', cancelable: true });
+    ui.prompt.fire('input', { inputType: 'deleteContentForward' });
+    assert(ui.prompt.value === text && !ui.queries().length && ui.get('composer').dataset.simulating === '1', 'cursor movement, composition or a no-op edit took over the simulated draft');
+    ui.timeout(2000); await ui.idle();
+    assert(ui.sent() === text && simulationReports(ui, 'shell').map(report => report.get('status')).join(',') === 'started,submitted', 'chat did not submit while the terminal remained open');
+  });
+  await check('a separate queue editor leaves the simulated composer available', async ui => {
+    ui.event({ type: 'capabilities', edit: '1' });
+    queueState(ui, [{ id: 'edit-existing', revision: '1' }]);
+    simulate(ui, 'background prompt', '0', 's');
+    shortcut(ui, 'edit');
+    ui.timeout(1000); ui.timeout(2000); await ui.idle();
+    assert(ui.get('queue-editor').open && ui.sent('steer') === 'background prompt', 'queue editing stopped a prompt in the separate composer');
+  });
+  await check('a simulated prompt stops on a real queued newline edit', async ui => {
+    simulate(ui, 'typed', '0', 'q', 'newline'); ui.timeout(1000);
+    ui.key('Enter', { shiftKey: true }); await ui.idle();
+    ui.timeout(2000); await ui.idle();
+    assert(ui.prompt.value === 'typed\n' && !ui.sent() &&
+      simulationReports(ui, 'newline').at(-1)?.get('reason') === 'manual_input', 'queued edit did not stop auto-submit or retain the newline');
+  });
+  await check('a simulated prompt stops when native IME input changes the draft', async ui => {
+    simulate(ui, 'typed', '0', 'q', 'ime'); ui.timeout(1000);
+    ui.prompt.value += 'あ';
+    ui.prompt.fire('input', { inputType: 'insertCompositionText', isComposing: true });
+    ui.timeout(2000); await ui.idle();
+    assert(ui.prompt.value === 'typedあ' && !ui.sent() &&
+      simulationReports(ui, 'ime').at(-1)?.get('reason') === 'manual_input', 'IME composition hid a real draft edit');
+  });
+  await check('Enter only takes over a simulation when it submits a prompt', async ui => {
+    simulate(ui, 'type this', '0', 's', 'send');
+    ui.key('Enter'); await ui.idle();
+    assert(ui.get('composer').dataset.simulating === '1' && !ui.sent(), 'empty Enter cancelled the initial delay');
+    ui.timeout(1000); ui.key('Enter'); await ui.idle();
+    ui.timeout(2000); await ui.idle();
+    assert(ui.sent() === 'type this' && !ui.sent('steer') && simulationReports(ui, 'send').at(-1)?.get('reason') === 'manual_input', 'manual send did not replace automatic submission');
+  });
+  await check('Escape deliberately cancels a simulated draft', async ui => {
+    simulate(ui, 'discard this', '0', 'q', 'escape'); ui.timeout(1000);
+    ui.key('Escape'); ui.timeout(2000); await ui.idle();
+    assert(!ui.prompt.value && !ui.sent() && simulationReports(ui, 'escape').at(-1)?.get('reason') === 'user_cancelled', 'Escape did not cancel and clear simulated text');
+  });
   await check('simulated characters resize the composer only when they need more room', async ui => {
     let height = ui.prompt.style.height;
     const changes = [];

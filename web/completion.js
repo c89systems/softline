@@ -22,8 +22,9 @@ function clusterEnd(text, at) {
 // activation, separate continuation levels, and a stable original Tab cycle.
 // Only edit()/finish() mutate the real draft; projection() never does.
 export class Completion {
-  constructor(current, edit, resolve, redraw) {
+  constructor(current, edit, resolve, redraw, canActivate) {
     this.current = current; this.edit = edit; this.resolve = resolve; this.redraw = redraw;
+    this.canActivate = canActivate;
     this.providers = new Map(); this.session = null; this.revision = 0;
   }
   provider(rule) { this.providers.set(rule.trigger, rule); }
@@ -44,7 +45,7 @@ export class Completion {
     return session.levels.get(prefix).promise;
   }
   activate(text, cursor, literalInput = false) {
-    if (this.session || literalInput || !cursor) return;
+    if (this.session || literalInput || !cursor || !this.canActivate()) return;
     let start = cursor;
     while (start && !space(text[start - 1])) --start;
     const rule = this.providers.get(text[start]);

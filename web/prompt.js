@@ -13,12 +13,13 @@ export class Prompt {
   constructor(options) {
     this.options = options;
     const get = this.get = id => options.document.getElementById(id);
-    this.input = get('prompt'); this.menu = get('completions');
+    this.input = get('prompt'); this.menu = get('completions'); this.composer = get('composer');
     this.requests = new Map(); this.serial = 0; this.menuOpen = false;
     this.menuItems = []; this.menuActive = 0; this.jobs = []; this.busy = false;
     this.before = this.input.value; this.literalInput = false;
     this.model = new Completion(() => this.current(), (text, cursor, edit) => this.apply(text, cursor, edit),
-      (prefix, session) => this.resolve(prefix, session), () => this.render());
+      (prefix, session) => this.resolve(prefix, session), () => this.render(),
+      () => this.composer.dataset.simulating !== '1');
     this.input.addEventListener('beforeinput', event => this.beforeInput(event));
     this.input.addEventListener('input', event => this.changed(event));
     this.input.addEventListener('keydown', event => this.key(event));
@@ -73,7 +74,9 @@ export class Prompt {
   }
   render() {
     this.selection = [this.input.selectionStart, this.input.selectionEnd];
-    const projection = this.get('composer').dataset.simulating === '1'
+    const simulating = this.composer.dataset.simulating === '1';
+    if (simulating) this.before = this.input.value;
+    const projection = simulating
       ? { before: this.input.value, ghost: '', after: '' } : this.model.projection();
     const ghost = this.get('completion-ghost');
     this.get('projection-before').textContent = projection.before;
@@ -184,8 +187,8 @@ export class Prompt {
     this.literalInput = literal; this.before = this.input.value;
   }
   changed(event) {
-    if (event.isComposing) this.model.reset();
     const before = this.before;
+    if (event.isComposing) this.model.reset();
     this.options.mutate(before, this.input.value);
     this.model.input(before, this.input.value, this.input.selectionStart, this.literalInput);
     this.before = this.input.value; this.hideMenu();
