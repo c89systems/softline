@@ -91,6 +91,9 @@ Both splits collapse toward the same edge when closed. The shell is asked to
 stop as soon as its pane begins closing.
 The conversation fades and blurs at the top once scrolled away from the start,
 and at the bottom while the jump-to-latest arrow is visible.
+While following a streamed response, the viewport eases into the extra space
+as each line appears. Scrolling back lets you read earlier output. The
+jump-to-latest arrow moves straight to the bottom.
 The motion respects the browser’s reduced-motion preference. Sending and paced
 typing keep their usual timing.
 

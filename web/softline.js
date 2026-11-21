@@ -64,19 +64,23 @@ function resizePrompt() {
   $('send').disabled = state.promptDisabled || !state.online || !prompt.value.trim() || !!state.attachments.length;
   previews.draft();
 }
-function follow() { if (state.follow) scroll.scrollTop = scroll.scrollHeight; }
+function follow(immediate = false) {
+  if (state.follow && scroll.dispatchEvent(new CustomEvent('softline:feed-follow', { cancelable: true, detail: immediate })))
+    scroll.scrollTop = scroll.scrollHeight;
+}
 scroll.addEventListener('scroll', () => {
+  if (!scroll.dispatchEvent(new Event('softline:feed-scroll', { cancelable: true }))) return;
   state.follow = scroll.scrollHeight - scroll.clientHeight - scroll.scrollTop < 65;
   $('latest').hidden = state.follow;
 }, { passive: true });
-$('latest').addEventListener('click', () => { state.follow = true; follow(); $('latest').hidden = true; });
+$('latest').addEventListener('click', () => { state.follow = true; follow(true); $('latest').hidden = true; });
 let promptWidth = prompt.clientWidth;
-const followResize = new ResizeObserver(() => {
+const followResize = new ResizeObserver(entries => {
   if (prompt.clientWidth !== promptWidth) {
     promptWidth = prompt.clientWidth;
     resizePrompt();
   }
-  follow();
+  follow(entries.some(entry => entry.target === scroll));
 });
 followResize.observe(messages); followResize.observe(scroll); followResize.observe(prompt);
 function started() { $('chat').classList.remove('welcome-state'); }

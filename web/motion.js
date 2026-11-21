@@ -11,6 +11,42 @@ function updateScrollEdge() {
 scroll.addEventListener('scroll', updateScrollEdge, { passive: true });
 updateScrollEdge();
 
+let feedFrame = null, feedTop, feedTime;
+function stopFeedMotion() {
+  if (feedFrame !== null) window.cancelAnimationFrame(feedFrame);
+  feedFrame = null;
+}
+function advanceFeed(time) {
+  feedFrame = null;
+  const top = scroll.scrollTop;
+  if (top !== feedTop) return;
+  const bottom = Math.max(0, scroll.scrollHeight - scroll.clientHeight);
+  const remaining = bottom - top;
+  if (reduced.matches || remaining <= 1 || remaining > scroll.clientHeight) {
+    if (bottom !== top) scroll.scrollTop = bottom;
+    return;
+  }
+  // Ease toward the latest height so each new line can extend the same motion.
+  const step = Math.max(1, remaining * (1 - Math.exp(-Math.max(0, time - feedTime) / 38)));
+  scroll.scrollTop = top + step;
+  feedTop = scroll.scrollTop;
+  feedTime = time;
+  feedFrame = window.requestAnimationFrame(advanceFeed);
+}
+scroll.addEventListener('softline:feed-follow', event => {
+  if (event.detail || reduced.matches) { stopFeedMotion(); return; }
+  event.preventDefault();
+  if (feedFrame !== null) return;
+  feedTop = scroll.scrollTop;
+  feedTime = performance.now();
+  feedFrame = window.requestAnimationFrame(advanceFeed);
+});
+scroll.addEventListener('softline:feed-scroll', event => {
+  if (feedFrame === null) return;
+  if (scroll.scrollTop === feedTop) event.preventDefault();
+  else stopFeedMotion();
+});
+
 chat.addEventListener('softline:composer-dock', () => {
   if (reduced.matches || !chat.classList.contains('welcome-state')) return;
   const top = composer.getBoundingClientRect().top;

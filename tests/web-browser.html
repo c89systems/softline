@@ -219,9 +219,28 @@ function checkSplit(panel, neighbor, size, edge, contents, closing = false) {
     if (closing) assert(start[4] > middle[4] && end[4] < 1, 'divider remained in the collapsed split');
   } finally { for (const effect of animations) effect.finish(); }
 }
-const animatedSplits = frame.contentDocument.querySelector('link[href="./motion.css"]') &&
+const motionEnabled = frame.contentDocument.querySelector('link[href="./motion.css"]') &&
   frame.contentWindow.matchMedia('(prefers-reduced-motion: no-preference)').matches;
-if (animatedSplits) await uiCheck('transcript split moves the conversation as it opens and closes', async () => {
+if (motionEnabled) await uiCheck('streamed lines ease the feed without moving the draft', async () => {
+  const w = frame.contentWindow, doc = frame.contentDocument;
+  const scroll = doc.querySelector('#scroll'), prompt = doc.querySelector('#prompt'), latest = doc.querySelector('#latest');
+  const id = 'scroll-motion-fixture', draft = prompt.value;
+  try {
+    event({type:'delta',id,role:'assistant',text:'Earlier output.\n\n'.repeat(85)});
+    await new Promise(resolve => w.requestAnimationFrame(() => w.requestAnimationFrame(resolve)));
+    latest.click();
+    await waitFor(() => scroll.scrollTop > 200);
+    const start = scroll.scrollTop;
+    event({type:'delta',id,role:'assistant',text:'A new line of output.\n\n'});
+    const bottom = scroll.scrollHeight - scroll.clientHeight;
+    assert(bottom > start + 10 && Math.abs(scroll.scrollTop - start) < 1, 'streamed growth immediately snapped to the bottom');
+    await new Promise(resolve => w.requestAnimationFrame(resolve));
+    assert(scroll.scrollTop > start && scroll.scrollTop < bottom, 'feed skipped its intermediate scroll position');
+    await waitFor(() => Math.abs(scroll.scrollTop - bottom) <= 1);
+    assert(latest.hidden && prompt.value === draft, 'following changed the draft or revealed the jump arrow');
+  } finally { latest.click(); event({type:'reset'}); }
+});
+if (motionEnabled) await uiCheck('transcript split moves the conversation as it opens and closes', async () => {
   const doc = frame.contentDocument, panel = doc.querySelector('#transcripts');
   const conversation = doc.querySelector('#conversation-pane'), toggle = doc.querySelector('#transcript-toggle');
   const previousWidth = frame.style.width;
@@ -251,7 +270,7 @@ await uiCheck('terminal docks below the composer and fits short and tall viewpor
   event({type:'capabilities',terminal:'/terminal'});
   p.dispatchEvent(new w.KeyboardEvent('keydown',{key:'`',code:'Backquote',ctrlKey:true,bubbles:true,cancelable:true}));
   const panel=doc.querySelector('#terminal-panel');
-  if (animatedSplits) checkSplit(panel, doc.querySelector('#chat'), 'height', 'bottom', panel.querySelector('iframe'));
+  if (motionEnabled) checkSplit(panel, doc.querySelector('#chat'), 'height', 'bottom', panel.querySelector('iframe'));
   await waitFor(()=>!panel.hidden&&panel.querySelector('iframe')?.contentDocument?.querySelector('.xterm-screen'));
   const terminalFrame=panel.querySelector('iframe');
   checkPaneMargins(panel);
@@ -270,7 +289,7 @@ await uiCheck('terminal docks below the composer and fits short and tall viewpor
   event({type:'terminal_state',active:'2',disable_prompt:'1'});
   assert(p.readOnly&&doc.querySelector('#composer').dataset.disabled==='1'&&!doc.querySelector('#scroll').inert,'lock disabled conversation scrolling');
   terminalFrame.contentDocument.querySelector('#terminal-close').click();
-  if (animatedSplits) {
+  if (motionEnabled) {
     await waitFor(() => panel.inert);
     checkSplit(panel, doc.querySelector('#chat'), 'height', 'bottom', terminalFrame, true);
   }

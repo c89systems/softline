@@ -82,7 +82,7 @@ export async function runWebCompletionTests(source, completionSource, promptSour
   const TerminalPanel = new Function('PaneDivider', stripImports(panelSource) + '\nreturn TerminalPanel;')(PaneDivider);
   const { ImagePreviews, imageReferences } = new Function('ImageViewer', stripImports(imagesSource) + '\nreturn { ImagePreviews, imageReferences };')(ImageViewer);
   async function boot(options = {}) {
-    const elements = new Map(), timers = new Map(), observers = [];
+    const elements = new Map(), timers = new Map(), frames = new Map(), observers = [];
     let serial = 0, now = 0, socket, previews;
     const document = new Target(), window = new Target(), revoked = [], blobs = [], copiedImages = [], clipboardCalls = [], canvases = [], decoded = [], pendingDecodes = [], opened = [];
     const terminals = [], animations = [], splits = [];
@@ -216,6 +216,8 @@ export async function runWebCompletionTests(source, completionSource, promptSour
     window.URL = env.URL;
     window.location = env.location; window.ResizeObserver = env.ResizeObserver;
     window.setTimeout = env.setTimeout; window.clearTimeout = env.clearTimeout;
+    window.requestAnimationFrame = callback => { const id = ++serial; frames.set(id, callback); return id; };
+    window.cancelAnimationFrame = id => frames.delete(id);
     window.Blob = class { constructor(parts, settings) { this.parts = parts; this.type = settings.type; } };
     window.Image = class {
       constructor() { this.naturalWidth = 640; this.naturalHeight = 480; }
@@ -238,7 +240,7 @@ export async function runWebCompletionTests(source, completionSource, promptSour
     if (options.noImageClipboard) delete window.navigator.clipboard.write;
     const names = Object.keys(env), values = Object.values(env);
     env.Prompt = new Function('Completion', ...names, stripImports(promptSource) + '\nreturn Prompt;')(Completion, ...values);
-    if (options.motion) new Function('document', 'window', motionSource)(document, window);
+    if (options.motion) new Function('document', 'window', 'performance', motionSource)(document, window, env.performance);
     const AsyncFunction = Object.getPrototypeOf(async function() {}).constructor;
     await new AsyncFunction(...Object.keys(env), stripImports(source))(...Object.values(env));
     socket.fire('open');
@@ -301,7 +303,11 @@ export async function runWebCompletionTests(source, completionSource, promptSour
     const ui = { get, prompt, input, type, key, idle, queries, reply, event, sent, get socket() { return socket; }, document, window, revoked, blobs, upload, previews, opened, terminals, animations, splits, reduced, preferences,
       socketURL: () => socket.url,
       copiedImages, copiedText, clipboardCalls, canvases, decoded, narrow, finishDecode: () => pendingDecodes.shift()?.(),
-      resize: target => { for (const observer of observers) if (observer.targets.includes(target)) observer.fn(); },
+      resize: target => { for (const observer of observers) if (observer.targets.includes(target)) observer.fn([{ target }]); },
+      frame: () => {
+        now += 16;
+        for (const [id, callback] of [...frames]) if (frames.delete(id)) callback(now);
+      },
       form: () => get('composer').fire('submit'), ghost: () => get('completion-ghost').textContent || '',
       timeout: delay => { for (const [id, timer] of [...timers]) if (timer.delay === delay) { timers.delete(id); timer.fn(); } },
       advance: delay => {
@@ -367,6 +373,42 @@ export async function runWebCompletionTests(source, completionSource, promptSour
     scroll.scrollTop = 0; scroll.fire('scroll');
     assert(frame.dataset.scrolled === (motion ? '0' : undefined), 'top edge covered the start of the conversation');
   }, { motion });
+  await check('streamed lines ease the feed toward its latest height without unlatching follow', async ui => {
+    const scroll = ui.get('scroll'), latest = ui.get('latest');
+    scroll.scrollHeight = 1000; scroll.clientHeight = 250; scroll.scrollTop = 750;
+    scroll.scrollHeight += 24;
+    ui.event({ type: 'delta', id: 'reply', role: 'assistant', text: 'One line\n' });
+    assert(scroll.scrollTop === 750, 'the first line snapped the viewport');
+    ui.frame();
+    assert(scroll.scrollTop > 750 && scroll.scrollTop < 774, 'the first frame missed the intermediate scroll position');
+    scroll.scrollHeight += 96;
+    ui.event({ type: 'delta', id: 'reply', role: 'assistant', text: 'Several more lines\n' });
+    ui.resize(ui.get('messages'));
+    scroll.fire('scroll');
+    assert(latest.hidden, 'a catch-up frame turned follow off');
+    const firstStep = scroll.scrollTop;
+    ui.frame();
+    assert(scroll.scrollTop > firstStep && scroll.scrollTop < 870, 'new growth snapped or restarted the scroll');
+    for (let i = 0; i < 16; ++i) { scroll.fire('scroll'); ui.frame(); }
+    assert(scroll.scrollTop === 870 && latest.hidden, 'the feed did not reach the new bottom');
+  }, { motion: true });
+  await check('a reader can interrupt feed motion and jump to the latest output immediately', async ui => {
+    const scroll = ui.get('scroll'), latest = ui.get('latest');
+    scroll.scrollHeight = 1024; scroll.clientHeight = 250; scroll.scrollTop = 750;
+    ui.event({ type: 'delta', id: 'reply', role: 'assistant', text: 'One line\n' }); ui.frame();
+    scroll.scrollTop = 400; ui.frame(); scroll.fire('scroll');
+    scroll.scrollHeight += 24;
+    ui.event({ type: 'delta', id: 'reply', role: 'assistant', text: 'Another line\n' }); ui.frame();
+    assert(scroll.scrollTop === 400 && !latest.hidden, 'streaming pulled the reader back to the bottom');
+    latest.click();
+    assert(scroll.scrollTop === scroll.scrollHeight && latest.hidden, 'jump to latest waited for a feed animation');
+  }, { motion: true });
+  for (const [motion, reducedMotion] of [[false, false], [true, true]]) await check(`feed scrolls immediately with ${motion ? 'reduced motion' : 'plain assets'}`, async ui => {
+    const scroll = ui.get('scroll');
+    scroll.scrollHeight = 1024; scroll.clientHeight = 250; scroll.scrollTop = 750;
+    ui.event({ type: 'delta', id: 'reply', role: 'assistant', text: 'One line\n' });
+    assert(scroll.scrollTop === scroll.scrollHeight, 'feed waited for motion');
+  }, { motion, reducedMotion });
   await check('the optional motion module docks the composer once after a successful first send', async ui => {
     await ui.type('initial draft');
     assert(!ui.animations.length && ui.get('chat').classList.contains('welcome-state'), 'typing moved the composer');
@@ -957,14 +999,14 @@ export async function runWebCompletionTests(source, completionSource, promptSour
     terminalEvent(ui, { type: 'softline-terminal-closed' }, frame.contentWindow);
     assert(ui.get('terminal-panel').children[0] === replacement, 'old shell exit closed its replacement');
   });
-  await check('changing chat height follows the latest output only while follow is enabled', async ui => {
+  for (const motion of [false, true]) await check(`changing chat height follows the latest output only while follow is enabled with ${motion ? 'animated' : 'plain'} assets`, async ui => {
     openTerminal(ui);
     const scroll = ui.get('scroll'); scroll.scrollHeight = 1000; scroll.clientHeight = 250;
     ui.resize(scroll); assert(scroll.scrollTop === 1000, 'opening panel lost latest-output following');
     scroll.scrollTop = 100; scroll.fire('scroll');
     scroll.clientHeight = 200; ui.resize(scroll);
     assert(scroll.scrollTop === 100, 'resizing panel moved the reader away from older content');
-  });
+  }, { motion });
   await check('embedded chat uses its document base for mounted conversation and terminal routes', async ui => {
     assert(ui.socketURL().pathname === '/nested/events', 'conversation endpoint ignored document base');
     ui.event({ type: 'capabilities', terminal: '/nested/terminal' }); shortcut(ui, 'terminal');
