@@ -34,9 +34,10 @@ examples. `SOFTLINE_WEB_HEADER` optionally supplies trusted HTML, SVG or image
 markup in the upper-left toolbar; that area is hidden and unbranded by default.
 Use F9 or **Hide toolbar** and **Show toolbar** in the `+` menu to toggle the
 toolbar. F9 also works from the embedded terminal. The toolbar's **Margin**
-selector offers None through Extra large. It adds more space at the sides of
-the workspace than above and below it. Toolbar visibility and margin size are
-saved in the browser.
+selector offers None through Extra large. On wide windows, the largest preset
+insets each side by 24% of the viewport width. Margins scale down on narrow
+windows, with less space above and below the workspace. Toolbar visibility and
+margin size are saved in the browser.
 Set `SOFTLINE_WEB_ANIMATIONS=1` to try the animated page in any browser chat
 example, for example `SOFTLINE_WEB_ANIMATIONS=1 make run-chat-web-only`.
 `SOFTLINE_QUEUE_DISPLAY_DELAY_MS` defaults to 500 and affects only Q/S/pending

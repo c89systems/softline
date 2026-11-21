@@ -99,7 +99,7 @@ await uiCheck('toolbar toggle reclaims layout space and margins only inset the w
   const previousWidth = frame.style.width, previousMargin = margin.value, hidden = toolbar.hidden;
   try {
     if (toolbar.hidden) toggle();
-    for (const width of [760, 360]) {
+    for (const [width, inset] of [[1280, .23], [760, .17], [360, .12]]) {
       frame.style.width = `${width}px`;
       await waitFor(() => w.innerWidth <= width && w.innerWidth > width - 8);
       select('none');
@@ -115,6 +115,8 @@ await uiCheck('toolbar toggle reclaims layout space and margins only inset the w
         assert(currentBar.left === bar.left && currentBar.right === bar.right, 'margin inset the toolbar');
         previous = box.left;
       }
+      assert(previous >= w.innerWidth * inset, 'Extra large left too little space around the workspace');
+      assert(workspace.getBoundingClientRect().width >= Math.min(480, w.innerWidth - 96) - 1, 'Extra large squeezed the workspace');
     }
     const before = workspace.getBoundingClientRect();
     margin.focus(); toggle();

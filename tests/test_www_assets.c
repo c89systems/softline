@@ -241,12 +241,17 @@ int main(int argc, char **argv) {
       strstr(
           html,
           "id=\"terminal-panel\" aria-label=\"Server terminal panel\" hidden"));
-  CHECK(strstr(css, "#chat{flex:1;min-height:0;") &&
-        strstr(css, "#scroll-frame{flex:1;min-height:0;position:relative}") &&
-        !strstr(css, "#scroll-frame::before") &&
-        strstr(css, "#workspace{display:flex;flex:1;min-height:0;") &&
-        strstr(css, "margin:min(calc(var(--workspace-margin,0px) / 3),4dvh)") &&
-        strstr(html, "id=\"toolbar\"") && strstr(html, "data-margin=\"none\""));
+  CHECK(
+      strstr(css, "#chat{flex:1;min-height:0;") &&
+      strstr(css, "#scroll-frame{flex:1;min-height:0;position:relative}") &&
+      !strstr(css, "#scroll-frame::before") &&
+      strstr(css, "#workspace{display:flex;flex:1;min-height:0;") &&
+      strstr(css, "margin:min(calc(var(--workspace-margin,0px) / 3),10dvh)") &&
+      strstr(html, "id=\"toolbar\"") && strstr(html, "data-margin=\"none\""));
+  CHECK(strstr(css, "--workspace-margin-step:clamp(min(4vw,12px),"
+                    "calc((100vw - 480px) / 8),6vw)") &&
+        strstr(css, "[data-margin=extra-large]{--workspace-margin:"
+                    "calc(4 * var(--workspace-margin-step))}"));
   CHECK(strstr(css, "#terminal-panel{flex:none;") &&
         strstr(css, "height:var(--pane-size,0px)") &&
         strstr(css, "flex:0 0 var(--pane-size,clamp(220px,42%,720px))") &&
