@@ -49,6 +49,16 @@ typedef struct sl_render {
   int queue_visible;
 } sl_render_t;
 
+enum { SL_BACKLOG_LINES = 1000, SL_BACKLOG_BYTES = 1024 * 1024 };
+
+struct sl_output_backlog {
+  size_t head, used, lines;
+  int dropping_line, truncated, initial_newlines, osc8;
+  sl_surface_t *validator;
+  char bytes[SL_BACKLOG_BYTES];
+  char partial[SL_OSC8_MAX_BYTES];
+};
+
 typedef struct sl_rgb {
   unsigned char red;
   unsigned char green;
@@ -228,8 +238,11 @@ static int sl_cursor_report_end(sl_t *self, const struct termios *original,
                                 int temporary);
 static int sl_enable_raw(sl_t *self);
 static void sl_disable_raw(sl_t *self);
+static void sl_output_discard_backlog(sl_impl_t *impl);
 static int sl_output_write_validated(sl_t *self, const char *bytes,
                                      size_t length);
+static int sl_print_above_backlog(sl_t *self, sl_stream_callback_t callback,
+                                  void *userdata);
 
 static sl_impl_t *sl_impl(sl_t *self) {
   if (!self || (self->impl && ((sl_impl_t *)self->impl)->image_callback_active))
@@ -1205,6 +1218,7 @@ static void sl_disable_raw(sl_t *self) {
   impl = sl_impl(self);
   if (!impl || !impl->raw_active)
     return;
+  sl_output_discard_backlog(impl);
   if (sl_tty_guard_end(impl->raw_guard, 1, !impl->terminal_guard))
     sl_set_error(self, "failed to restore terminal attributes");
   impl->raw_guard = NULL;
@@ -4630,6 +4644,7 @@ void sl_terminal_abandon(sl_t *self) {
   sl_impl_t *impl = sl_impl(self);
   if (!impl)
     return;
+  sl_output_discard_backlog(impl);
   sl_disable_raw(self);
   sl_surface_destroy(impl->output_surface);
   impl->output_surface = NULL;
@@ -5144,11 +5159,11 @@ static int sl_print_above_method(sl_t *self, sl_stream_callback_t callback,
   int previous, result;
   if (!impl)
     return SL_ERROR_INVALID;
-  if (sl_transcript_visible(self))
-    return SL_ERROR_NOT_READY;
   previous = impl->output_write_active;
   impl->output_write_active = 1;
-  result = sl_print_above_method_impl(self, callback, userdata);
+  result = sl_transcript_visible(self)
+               ? sl_print_above_backlog(self, callback, userdata)
+               : sl_print_above_method_impl(self, callback, userdata);
   impl->output_write_active = previous;
   if (result == SL_OK && impl->active_prompt && impl->live_scroll_region &&
       !sl_prompt_uses_absolute_rows(impl))
@@ -5156,15 +5171,52 @@ static int sl_print_above_method(sl_t *self, sl_stream_callback_t callback,
   return result;
 }
 
+static struct sl_output_backlog *sl_output_get_backlog(sl_t *self) {
+  sl_impl_t *impl = sl_impl(self);
+  if (!impl->output_backlog) {
+    impl->output_backlog = calloc(1, sizeof(*impl->output_backlog));
+    if (!impl->output_backlog) {
+      sl_set_error(self, "failed to allocate deferred chat output");
+      return NULL;
+    }
+    impl->output_backlog->initial_newlines = impl->output_trailing_newlines;
+  }
+  return impl->output_backlog;
+}
+
+static sl_surface_t *sl_output_validator(sl_impl_t *impl) {
+  if (!impl->output_surface && impl->output_backlog)
+    return impl->output_backlog->validator;
+  return impl->output_surface;
+}
+
+static void sl_output_discard_backlog(sl_impl_t *impl) {
+  struct sl_output_backlog *backlog = impl->output_backlog;
+  if (!backlog)
+    return;
+  impl->output_trailing_newlines = backlog->initial_newlines;
+  impl->output_pending_len = 0;
+  sl_surface_reset_native_validation(impl->output_surface);
+  sl_surface_destroy(backlog->validator);
+  free(backlog);
+  impl->output_backlog = NULL;
+}
+
 static int sl_output_stream_begin_method(sl_t *self) {
   sl_impl_t *impl;
   sl_surface_t *previous_surface;
   impl = sl_impl(self);
-  if (sl_transcript_visible(self))
-    return SL_ERROR_NOT_READY;
   if (!impl || impl->output_stream_active) {
     sl_set_error(self, "live output stream is already open");
     return SL_ERROR_INVALID;
+  }
+  if (sl_transcript_visible(self)) {
+    if (!sl_output_get_backlog(self))
+      return SL_ERROR_NOMEM;
+    impl->output_stream_active = 1;
+    impl->output_ansi_state = 0;
+    impl->output_pending_len = 0;
+    return SL_OK;
   }
   previous_surface = impl->output_surface;
   if (!sl_surface_is_native(impl->output_surface) && impl->active_prompt &&
@@ -5220,14 +5272,13 @@ failed:
 static int sl_output_stream_reconcile_method(sl_t *self) {
   sl_impl_t *impl = sl_impl(self);
   int result;
-  if (sl_transcript_visible(self))
-    return SL_ERROR_NOT_READY;
   if (!impl || !impl->output_stream_active || impl->output_write_active ||
       impl->output_reconcile_active) {
     sl_set_error(self, "reconciliation requires an open stream outside a feed");
     return SL_ERROR_INVALID;
   }
-  if (!isatty(impl->input_fd) || !isatty(impl->output_fd))
+  if (sl_transcript_visible(self) || !isatty(impl->input_fd) ||
+      !isatty(impl->output_fd))
     return SL_OK;
   /* This explicit owner operation may observe input. Never enter it from a
    * producer feed, and leave its incremental UTF-8/SGR validator untouched. */
@@ -5310,13 +5361,70 @@ static int sl_output_write_native(sl_t *self, const char *bytes, size_t length,
   return result;
 }
 
+static void sl_backlog_drop_line(struct sl_output_backlog *backlog) {
+  size_t first = SL_BACKLOG_BYTES - backlog->head, length;
+  const char *end;
+  if (first > backlog->used)
+    first = backlog->used;
+  end = memchr(backlog->bytes + backlog->head, '\n', first);
+  if (end)
+    length = (size_t)(end - (backlog->bytes + backlog->head)) + 1;
+  else {
+    end = memchr(backlog->bytes, '\n', backlog->used - first);
+    length = first + (size_t)(end - backlog->bytes) + 1;
+  }
+  backlog->head = (backlog->head + length) % SL_BACKLOG_BYTES;
+  backlog->used -= length;
+  --backlog->lines;
+}
+
+/* The validator hands us complete units. LF cannot occur inside a supported
+ * control, so evicting at LF also preserves ANSI and UTF-8 boundaries. */
+static void sl_backlog_append(struct sl_output_backlog *backlog,
+                              const char *bytes, size_t length) {
+  while (length) {
+    const char *end = memchr(bytes, '\n', length);
+    size_t count = end ? (size_t)(end - bytes) + 1 : length;
+    if (!backlog->dropping_line) {
+      size_t tail, first;
+      while (backlog->lines == SL_BACKLOG_LINES ||
+             count > SL_BACKLOG_BYTES - backlog->used) {
+        backlog->truncated = 1;
+        if (!backlog->lines) {
+          backlog->used = 0;
+          backlog->dropping_line = 1;
+          break;
+        }
+        sl_backlog_drop_line(backlog);
+      }
+      if (!backlog->dropping_line) {
+        tail = (backlog->head + backlog->used) % SL_BACKLOG_BYTES;
+        first = SL_BACKLOG_BYTES - tail;
+        if (first > count)
+          first = count;
+        memcpy(backlog->bytes + tail, bytes, first);
+        memcpy(backlog->bytes, bytes + first, count - first);
+        backlog->used += count;
+        if (end)
+          ++backlog->lines;
+      }
+    }
+    if (end)
+      backlog->dropping_line = 0;
+    length -= count;
+    bytes += count;
+  }
+}
+
 static int sl_output_flush_redirected(sl_t *self, const char *bytes,
                                       size_t length) {
   sl_impl_t *impl;
   impl = sl_impl(self);
   if (length == 0)
     return SL_OK;
-  if (sl_surface_is_native(impl->output_surface)) {
+  if (sl_transcript_visible(self)) {
+    sl_backlog_append(impl->output_backlog, bytes, length);
+  } else if (sl_surface_is_native(impl->output_surface)) {
     int row;
     int written;
     /* Validation may span a resize after the session was prepared. Use the
@@ -5346,36 +5454,53 @@ static int sl_output_flush_redirected(sl_t *self, const char *bytes,
 static int sl_output_write_validated(sl_t *self, const char *bytes,
                                      size_t length) {
   sl_impl_t *impl;
+  sl_surface_t *validator;
   int result;
   char ready[4096];
   size_t ready_len;
   size_t i;
   impl = sl_impl(self);
+  validator = sl_output_validator(impl);
+  if (sl_transcript_visible(self)) {
+    struct sl_output_backlog *backlog = sl_output_get_backlog(self);
+    if (!backlog)
+      return SL_ERROR_NOMEM;
+    if (!validator) {
+      if (!backlog->validator)
+        backlog->validator = sl_surface_create_validator(-1);
+      validator = backlog->validator;
+      if (!validator) {
+        sl_set_error(self, "failed to allocate deferred output validator");
+        return SL_ERROR_NOMEM;
+      }
+    }
+    sl_surface_set_osc8(validator, impl->osc8.enabled);
+    backlog->osc8 |= impl->osc8.enabled;
+  }
   ready_len = 0;
   for (i = 0; i < length; i++) {
     size_t accepted;
-    result = sl_surface_validate(impl->output_surface, bytes + i, 1, &accepted);
+    result = sl_surface_validate(validator, bytes + i, 1, &accepted);
     if (result != 0) {
       impl->output_pending_len = 0;
-      sl_surface_reset_partial(impl->output_surface);
+      sl_surface_reset_partial(validator);
       if (sl_output_flush_redirected(self, ready, ready_len) != SL_OK)
         return SL_ERROR_IO;
       sl_set_error(
           self, "live output contains an unsupported or invalid byte sequence");
       return SL_ERROR_INVALID;
     }
-    if (impl->output_pending_len > 0 ||
-        !sl_surface_complete(impl->output_surface)) {
+    if (impl->output_pending_len > 0 || !sl_surface_complete(validator)) {
       if (impl->output_pending_len >= sizeof(impl->output_pending)) {
         impl->output_pending_len = 0;
-        sl_surface_reset_partial(impl->output_surface);
+        sl_surface_reset_partial(validator);
         if (sl_output_flush_redirected(self, ready, ready_len) != SL_OK)
           return SL_ERROR_IO;
         sl_set_error(self, "live output escape sequence is too long");
         return SL_ERROR_INVALID;
       }
       impl->output_pending[impl->output_pending_len++] = bytes[i];
-      if (!sl_surface_complete(impl->output_surface))
+      if (!sl_surface_complete(validator))
         continue;
       if (impl->output_pending_len > sizeof(ready) - ready_len) {
         if (sl_output_flush_redirected(self, ready, ready_len) != SL_OK)
@@ -5410,8 +5535,6 @@ static int sl_output_stream_write_method(sl_t *self, const char *bytes,
   sl_impl_t *impl;
   int result, previous;
   impl = sl_impl(self);
-  if (sl_transcript_visible(self))
-    return SL_ERROR_NOT_READY;
   if (!impl || !impl->output_stream_active || (!bytes && length > 0)) {
     sl_set_error(self, "live output write requires an open stream and bytes");
     return SL_ERROR_INVALID;
@@ -5420,7 +5543,8 @@ static int sl_output_stream_write_method(sl_t *self, const char *bytes,
     return SL_OK;
   previous = impl->output_write_active;
   impl->output_write_active = 1;
-  result = isatty(impl->input_fd) && isatty(impl->output_fd)
+  result = !sl_transcript_visible(self) && isatty(impl->input_fd) &&
+                   isatty(impl->output_fd)
                ? sl_prepare_native_output(self)
                : SL_OK;
   if (result == SL_OK)
@@ -5576,7 +5700,8 @@ static int sl_output_stream_write_quoted_prompt_impl(sl_t *self,
         self, "quoted prompt requires an open stream and printable UTF-8 text");
     return SL_ERROR_INVALID;
   }
-  if (impl->output_surface && !sl_surface_complete(impl->output_surface)) {
+  if (impl->output_pending_len ||
+      (impl->output_surface && !sl_surface_complete(impl->output_surface))) {
     sl_set_error(self,
                  "quoted prompt requires complete preceding output bytes");
     return SL_ERROR_INVALID;
@@ -5609,7 +5734,9 @@ static int sl_output_stream_write_quoted_prompt_impl(sl_t *self,
     return SL_ERROR;
   }
   /* A quoted user prompt is a distinct output record, never a producer link. */
-  if (sl_surface_hyperlink_active(impl->output_surface)) {
+  if (sl_transcript_visible(self)
+          ? sl_surface_validated_hyperlink_active(sl_output_validator(impl))
+          : sl_surface_hyperlink_active(impl->output_surface)) {
     result = sl_output_stream_write_method(self, "\033]8;;\033\\", 7);
     if (result != SL_OK)
       return result;
@@ -5727,8 +5854,6 @@ static int sl_output_stream_write_quoted_prompt_method(sl_t *self,
   int previous, result;
   if (!impl)
     return SL_ERROR_INVALID;
-  if (sl_transcript_visible(self))
-    return SL_ERROR_NOT_READY;
   previous = impl->output_write_active;
   impl->output_write_active = 1;
   result = sl_output_stream_write_quoted_prompt_impl(self, text);
@@ -5740,16 +5865,19 @@ static int sl_output_stream_end_method(sl_t *self) {
   sl_impl_t *impl;
   int prompt_origin;
   impl = sl_impl(self);
-  if (sl_transcript_visible(self))
-    return SL_ERROR_NOT_READY;
   if (!impl || !impl->output_stream_active) {
     sl_set_error(self, "no live output stream is open");
     return SL_ERROR_INVALID;
   }
-  if (impl->output_surface && !sl_surface_complete(impl->output_surface)) {
+  if (impl->output_pending_len ||
+      (impl->output_surface && !sl_surface_complete(impl->output_surface))) {
     sl_set_error(self,
                  "live output ends in an incomplete ANSI or UTF-8 sequence");
     return SL_ERROR_INVALID;
+  }
+  if (sl_transcript_visible(self)) {
+    impl->output_stream_active = 0;
+    return SL_OK;
   }
   prompt_origin = impl->active_prompt && impl->rendered_rows > 0
                       ? impl->rendered_top_row
@@ -5801,6 +5929,96 @@ static int sl_output_stream_end_method(sl_t *self) {
     return SL_ERROR_IO;
   }
   return SL_OK;
+}
+
+static int sl_print_above_backlog(sl_t *self, sl_stream_callback_t callback,
+                                  void *userdata) {
+  sl_impl_t *impl = sl_impl(self);
+  int result, ended;
+  if (!callback)
+    return SL_ERROR_INVALID;
+  result = sl_output_stream_begin_method(self);
+  if (result != SL_OK)
+    return result;
+  for (;;) {
+    const char *bytes = NULL;
+    size_t length = 0;
+    result = callback(self, userdata, &bytes, &length);
+    if (result != SL_OK || !length)
+      break;
+    result = sl_output_stream_write_method(self, bytes, length);
+    if (result != SL_OK)
+      break;
+  }
+  if (impl->output_pending_len) {
+    if (result == SL_OK) {
+      sl_set_error(self, "output ends in an incomplete ANSI or UTF-8 sequence");
+      result = SL_ERROR_INVALID;
+    }
+    impl->output_pending_len = 0;
+    sl_surface_reset_partial(sl_output_validator(impl));
+  }
+  ended = sl_output_stream_end_method(self);
+  return result == SL_OK ? ended : result;
+}
+
+int sl_output_replay_transcript(sl_t *self) {
+  sl_impl_t *impl = sl_impl(self);
+  struct sl_output_backlog *backlog = impl->output_backlog;
+  int active, previous, display, result = SL_OK;
+  size_t partial, first;
+  if (!backlog)
+    return SL_OK;
+  impl->output_backlog = NULL;
+  active = impl->output_stream_active;
+  previous = impl->output_write_active;
+  display = backlog->used || backlog->truncated;
+  /* Restart validation for replay across the ring's wrap, then restore the
+   * producer's trailing partial unit for the next live feed. */
+  partial = impl->output_pending_len;
+  memcpy(backlog->partial, impl->output_pending, partial);
+  impl->output_pending_len = 0;
+  impl->output_ansi_state = 0;
+  impl->output_trailing_newlines = backlog->initial_newlines;
+  sl_surface_reset_native_validation(impl->output_surface);
+  if (!sl_surface_is_native(impl->output_surface) && (display || active)) {
+    impl->output_stream_active = 0;
+    result = sl_output_stream_begin_method(self);
+  }
+  if (result == SL_OK && display)
+    result = sl_prepare_native_output(self);
+  impl->output_write_active = 1;
+  sl_surface_set_osc8(impl->output_surface,
+                      backlog->osc8 || impl->osc8.enabled);
+  if (result == SL_OK && backlog->truncated) {
+    if (sl_surface_hyperlink_active(impl->output_surface))
+      result = sl_output_write_validated(self, "\033]8;;\033\\", 7);
+    if (result == SL_OK) {
+      const char *boundary =
+          impl->output_trailing_newlines ? "\033[0m\r" : "\033[0m\r\n";
+      result = sl_output_write_validated(self, boundary, strlen(boundary));
+    }
+  }
+  if (result == SL_OK && backlog->used) {
+    first = SL_BACKLOG_BYTES - backlog->head;
+    if (first > backlog->used)
+      first = backlog->used;
+    result =
+        sl_output_write_validated(self, backlog->bytes + backlog->head, first);
+    if (result == SL_OK && first < backlog->used)
+      result = sl_output_write_validated(self, backlog->bytes,
+                                         backlog->used - first);
+  }
+  sl_surface_set_osc8(impl->output_surface, impl->osc8.enabled);
+  if (result == SL_OK && partial)
+    result = sl_output_write_validated(self, backlog->partial, partial);
+  if (result == SL_OK && !active && impl->output_stream_active)
+    result = sl_output_stream_end_method(self);
+  impl->output_stream_active = active;
+  impl->output_write_active = previous;
+  sl_surface_destroy(backlog->validator);
+  free(backlog);
+  return result;
 }
 
 static ssize_t sl_read_terminal_byte(sl_impl_t *impl, char *ch,
@@ -8382,6 +8600,8 @@ static char *sl_readline_impl(sl_t *self, const char *prompt,
       deferred_since_render = 0;
     }
   }
+  if (failed)
+    sl_output_discard_backlog(impl);
   if (sl_transcript_leave(self))
     failed = 1;
   if (!failed && !suspended && sl_completion_finish(self) != SL_OK)
@@ -8633,6 +8853,7 @@ static void sl_destroy_method(sl_t *self) {
   }
   if (impl) {
     (void)sl_cancel_prompt_simulation_method(self);
+    sl_output_discard_backlog(impl);
     sl_transcript_destroy(self);
     sl_image_destroy(self);
     sl_terminal_cleanup(impl);
@@ -8701,6 +8922,8 @@ static int sl_set_osc8_mode_method(sl_t *self, sl_osc8_mode_t mode) {
     return SL_ERROR_INVALID;
   }
   if (impl->output_stream_active ||
+      (impl->output_backlog &&
+       sl_surface_validated_hyperlink_active(sl_output_validator(impl))) ||
       (impl->output_surface &&
        (!sl_surface_complete(impl->output_surface) ||
         sl_surface_hyperlink_active(impl->output_surface)))) {
@@ -8712,7 +8935,7 @@ static int sl_set_osc8_mode_method(sl_t *self, sl_osc8_mode_t mode) {
   impl->osc8.detected = sl_osc8_detect(impl->output_fd);
   impl->osc8.enabled =
       mode == SL_OSC8_ON || (mode == SL_OSC8_AUTO && impl->osc8.detected);
-  sl_surface_set_osc8(impl->output_surface, impl->osc8.enabled);
+  sl_surface_set_osc8(sl_output_validator(impl), impl->osc8.enabled);
   return SL_OK;
 }
 

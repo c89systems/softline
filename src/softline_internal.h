@@ -140,6 +140,7 @@ typedef struct sl_impl {
   struct sl_pty *terminal_children;
   int terminal_active;
   struct sl_transcripts *transcripts;
+  struct sl_output_backlog *output_backlog;
   int input_fd;
   int output_fd;
   int screen_width;
@@ -268,6 +269,7 @@ void sl_transcript_destroy(sl_t *self);
 int sl_transcript_key(sl_t *self, int key);
 int sl_transcript_paint(sl_t *self, int rows, int columns);
 int sl_transcript_leave(sl_t *self);
+int sl_output_replay_transcript(sl_t *self);
 
 int sl_image_start(sl_t *, sl_image_paste_id_t *);
 int sl_image_start_source(sl_t *, const sl_image_paste_source_t *,

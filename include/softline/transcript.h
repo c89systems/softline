@@ -32,8 +32,8 @@ int sl_transcript_resize(sl_t *, sl_transcript_id_t, int rows, int columns);
 int sl_transcript_reset(sl_t *, sl_transcript_id_t);
 /** Remove a viewer, returning to the editor if it was visible. */
 int sl_transcript_remove(sl_t *, sl_transcript_id_t);
-/** Nonzero while a transcript occupies the native terminal. Chat feeds may
- * skip native output then and stream catch-up from a host-owned source later.
+/** Nonzero while a transcript occupies the native terminal. Chat output
+ * continues into a bounded backlog and is replayed when chat becomes visible.
  */
 int sl_transcript_visible(const sl_t *);
 

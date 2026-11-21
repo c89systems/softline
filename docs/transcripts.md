@@ -45,12 +45,13 @@ and 320 columns each. Native normal-screen scrollback retains up to 2,000
 rows or 2 MiB per viewer, whichever is reached first.
 
 The watch and idle callbacks, queue delivery, and browser feeds keep running.
-While `sl_transcript_visible(editor)` is true, native chat output operations
-return `SL_ERROR_NOT_READY` without consuming their chunks. Hosts can skip
-native chat output at that point. On return, the original chat screen and
-draft are available. A host with an existing replay source can stream missed
-output from that source before resuming live output. With no replay source,
-resume with new output at a complete formatting boundary.
+While a transcript occupies the terminal, native chat output is validated and
+queued for display. When chat returns, Softline restores the terminal's normal
+screen and replays the retained output above the current draft. The backlog
+holds up to 1,000 newline-delimited lines or 1 MiB, whichever fills first.
+Older lines fall out first. A single line too large to fit is dropped through
+its next newline. Replay after a cutoff starts with default text styling.
+Outside the transcript viewer, chat output goes directly to the terminal.
 
 ## Web handler
 

@@ -994,8 +994,7 @@ single-owner rendering rule.
 active prompt. Softline retains cursor geometry and bounded parser state, with
 scalar cell counts shared with prompt layout. Producer output has no glyph-span
 or cluster reconstruction model. A bounded counter of viewport shifts helps
-compute cursor deltas when growth restores only part of the terminal history;
-no transcript rows, cells or strings are kept by Softline.
+compute cursor deltas when growth restores only part of the terminal history.
 The terminal owns transcript cells and scrollback. Physical resizing leaves
 surviving output cells as the terminal reflowed them; changing the output
 margin does not scroll them again. Output clipped off the top is not recovered
@@ -1004,6 +1003,11 @@ fragment starts at the first visible output row instead of adding empty rows
 down to the prompt. If the clipped position was at a hard line boundary, new
 output starts next to the prompt. Native scrollback cells and spacing remain
 unchanged.
+
+While a [read-only transcript viewer](transcripts.md) occupies the alternate
+screen, Softline retains only new chat output in a bounded backlog. The normal
+screen receives that output when the viewer closes.
+
 Positions are tracked relative to the terminal bottom,
 without terminal cursor save/restore. Resize reconciliation queries the live
 input cursor to account for terminal movement and adjusts only owned prompt
@@ -1024,7 +1028,7 @@ the active input loop observes resize before dispatching producer watches.
 Missing:
 
 - scrollback buffer abstraction for alternate-screen applications
-- offscreen transcript replay or scrollback
+- replay of already displayed native scrollback
 - caller-driven reflow of already emitted content after resize
 - arbitrary terminal controls beyond documented SGR and opt-in OSC 8
 

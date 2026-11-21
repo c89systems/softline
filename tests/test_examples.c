@@ -635,6 +635,40 @@ static void test_chat_live_queue(const char *path) {
   PASS();
 }
 
+static void test_chat_transcript_replay(const char *path) {
+  struct terminal t;
+  pid_t pid;
+  int fd;
+  size_t view;
+  TEST("chat finishes a response while the transcript is visible");
+  ASSERT_TRUE(setenv("SOFTLINE_CHAT_CHAR_MS", "10", 1) == 0,
+              "failed to set stream delay");
+  pid = spawn(path, &fd, 80, 16);
+  ASSERT_TRUE(setenv("SOFTLINE_CHAT_CHAR_MS", "2", 1) == 0,
+              "failed to restore stream delay");
+  ASSERT_TRUE(pid > 0, "spawn failed");
+  term_init(&t, fd, 80, 16);
+  ASSERT_TRUE(wait_raw(&t, "\033[?2004h", CHAT_READY_TIMEOUT_MS) == 0,
+              "editor missing");
+  ASSERT_TRUE(write(fd, "first\r", 6) == 6 &&
+                  wait_screen(&t, "! Thinking...", 3000) == 0,
+              "response did not start");
+  ASSERT_TRUE(write(fd, "draft\024", 6) == 6 &&
+                  wait_raw(&t, "1/2 Run log", 3000) == 0,
+              "transcript did not open");
+  view = t.raw_len;
+  ASSERT_TRUE(wait_raw_since(&t, view, "Responses received: 1", 6000) == 0 &&
+                  !strstr(t.raw + view, "Next step"),
+              "chat did not finish in the background or leaked into the log");
+  ASSERT_TRUE(write(fd, "\033", 1) == 1 &&
+                  wait_raw_after(&t, "\033[?1049l", "Next step", 3000) == 0 &&
+                  wait_screen(&t, "> draft", 3000) == 0,
+              "chat output or the draft was lost on return");
+  ASSERT_TRUE(write(fd, "\033q", 2) == 2 && finish(pid, fd) == 0,
+              "chat did not exit cleanly");
+  PASS();
+}
+
 static void test_chat_long_unbroken_editor_word(const char *path) {
   int fd;
   int first_row;
@@ -1908,6 +1942,7 @@ int main(int argc, char **argv) {
   test_chat_eof_goodbye(argv[2], 1);
   test_simple(argv[1]);
   test_chat_live_queue(argv[2]);
+  test_chat_transcript_replay(argv[2]);
   test_chat_long_unbroken_editor_word(argv[2]);
   test_chat_queued_quit(argv[2]);
   test_chat_promoted_quit(argv[2]);

@@ -1344,7 +1344,9 @@ struct sl {
    * sessions are a no-op. Terminal modes are restored before return. */
   int (*output_stream_reconcile)(sl_t *self);
   /** Forward exactly length bytes into the open session. Complete parsed
-   * input is visible before return; a write boundary adds no newline or
+   * input is visible before return unless a read-only transcript is selected.
+   * In that case, output enters the bounded native display backlog and is
+   * replayed on return to chat. A write boundary adds no newline or
    * document boundary. bytes may be NULL only when
    * length is zero. Input must be printable UTF-8, LF/CR/Tab, ANSI SGR, or
    * OSC 8 when enabled by set_osc8_mode();
@@ -1356,8 +1358,7 @@ struct sl {
    * release disable expansion for the write and restore it before returning,
    * without flushing pending input. Feed calls add no intentional delay and
    * never request or wait for terminal cursor replies, including on resize.
-   * Cursor advances use local scalar cell widths shared with prompt layout;
-   * no producer transcript, glyph spans or grapheme tail is buffered.
+   * Cursor advances use local scalar cell widths shared with prompt layout.
    * Terminal Unicode versions and cluster shaping can differ from the
    * Unicode 16.0 scalar accounting.
    * A physical resize can race a VT write and misplace even ASCII output;
@@ -1990,10 +1991,14 @@ int sl_output_stream_begin(sl_t *self);
  * and split UTF-8/SGR parsing. Never retains or replays transcript bytes.
  * A required cursor report waits at most 100 ms; failure returns SL_ERROR_IO.
  * Do not resume output assuming reconciliation after failure. No-op off-TTY.
+ * With a read-only transcript selected, return immediately and reconcile the
+ * terminal when chat returns, before displaying the backlog.
  * Call before the first write after resize; feeds remain observation-free. */
 int sl_output_stream_reconcile(sl_t *self);
 
-/** Forward length bytes immediately to the live output session. Zero length
+/** Forward length bytes to the live output session. While a read-only
+ * transcript is selected, keep the newest 1,000 logical lines or 1 MiB for
+ * replay on return to chat. Otherwise forward output immediately. Zero length
  * is a no-op; no newline or response boundary is implied. Valid bytes are
  * printable UTF-8, LF/CR/Tab, ANSI SGR, and opt-in OSC 8; malformed or
  * unsupported control sequences report SL_ERROR_INVALID. A failed write may

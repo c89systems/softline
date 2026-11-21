@@ -317,7 +317,7 @@ int sl_transcript_leave(sl_t *self) {
     }
     views->selected = -1;
   }
-  return 0;
+  return sl_output_replay_transcript(self) == SL_OK ? 0 : -1;
 }
 
 int sl_transcript_remove(sl_t *self, sl_transcript_id_t id) {

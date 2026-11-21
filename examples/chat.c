@@ -184,8 +184,6 @@ static int sink_to_softline(void *userdata, const char *bytes, size_t length) {
   state = (struct chat_state *)userdata;
   if (!state || (!bytes && length > 0))
     return -1;
-  if (sl_transcript_visible(state->sl))
-    return 0;
   return sl_output_stream_write(state->sl, bytes, length) == SL_OK ? 0 : -1;
 }
 
@@ -308,8 +306,6 @@ static int render_note(struct chat_state *state, const char *note) {
 static int render_user_prompt(struct chat_state *state, const char *line) {
   web_flush(state);
   demo_web_message(state->web, "user", line);
-  if (sl_transcript_visible(state->sl))
-    return 0;
   return sl_output_stream_write_quoted_prompt(state->sl, line) == SL_OK ? 0
                                                                         : -1;
 }
@@ -363,8 +359,7 @@ static int finish_response_document(struct chat_state *state) {
 static int command_message(struct chat_state *state, const char *message) {
   demo_web_status(state->web, message, state->busy);
   return set_chat_message(state->sl, message) == SL_OK &&
-                 (sl_transcript_visible(state->sl) ||
-                  sl_output_stream_reconcile(state->sl) == SL_OK)
+                 sl_output_stream_reconcile(state->sl) == SL_OK
              ? 0
              : -1;
 }
