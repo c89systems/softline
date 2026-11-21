@@ -76,6 +76,11 @@ static int motion_assets(sl_www_t *plain, const sl_www_config_t *cfg,
         strstr(css, ".message.user > .body:not(:empty)") &&
         strstr(css, "animation: message-arrive 410ms") &&
         strstr(css, "opacity: 0; transform: translate(16px, 14px)"));
+  CHECK(strstr(css, "#scroll-frame::before, #scroll-frame::after") &&
+        strstr(css, "pointer-events: none") &&
+        strstr(css, "backdrop-filter: blur(5px)") &&
+        strstr(css, "#scroll-frame[data-scrolled=\"1\"]::before") &&
+        strstr(css, ":has(#latest:not([hidden])) #scroll-frame::after"));
   CHECK(strstr(css,
                "#terminal-panel:not([hidden]), #transcripts:not([hidden])") &&
         strstr(css, "animation: split-open 540ms") &&
@@ -87,6 +92,35 @@ static int motion_assets(sl_www_t *plain, const sl_www_config_t *cfg,
   free(css);
   free(page);
   sl_www_destroy(animated);
+  return 0;
+}
+
+static int select_presets(const char *html, const char *css, const char *name,
+                          const char *fallback, size_t expected) {
+  char id[64], selector[128];
+  const char *at, *last;
+  size_t total = 0;
+  (void)snprintf(id, sizeof(id), "<select id=\"%s\"", name);
+  at = strstr(html, id);
+  CHECK(at);
+  last = strstr(at, "</select>");
+  CHECK(last);
+  while ((at = strstr(at, "<option value=\"")) && at < last) {
+    const char *end;
+    size_t length;
+    ++total;
+    at += 15;
+    end = strchr(at, '"');
+    CHECK(end && end < last);
+    length = (size_t)(end - at);
+    CHECK(length < 60);
+    if (length == strlen(fallback) && !memcmp(at, fallback, length))
+      continue;
+    (void)snprintf(selector, sizeof(selector), "data-%s=%.*s]", name,
+                   (int)length, at);
+    CHECK(strstr(css, selector));
+  }
+  CHECK(total == expected);
   return 0;
 }
 
@@ -191,23 +225,8 @@ int main(int argc, char **argv) {
     id[n + 5] = 0;
     CHECK(strstr(html, id));
   }
-  for (at = html; (at = strstr(at, "<option value=\"")) != NULL; ++at) {
-    char selector[128], *end;
-    size_t n;
-    at += 15;
-    end = strchr(at, '"');
-    CHECK(end);
-    n = (size_t)(end - at);
-    CHECK(n < 60);
-    if (!strncmp(at, "sans", n) || !strncmp(at, "mono", n) ||
-        !strncmp(at, "default", n))
-      continue;
-    strcpy(selector, "data-theme=");
-    memcpy(selector + 11, at, n);
-    selector[11 + n] = ']';
-    selector[12 + n] = 0;
-    CHECK(strstr(css, selector));
-  }
+  CHECK(!select_presets(html, css, "theme", "default", 13));
+  CHECK(!select_presets(html, css, "margin", "none", 5));
   for (at = css; *at; ++at) {
     if (*at == '{')
       ++depth;
@@ -222,8 +241,13 @@ int main(int argc, char **argv) {
       strstr(
           html,
           "id=\"terminal-panel\" aria-label=\"Server terminal panel\" hidden"));
-  CHECK(strstr(css, "#workspace #chat{height:auto;flex:1;min-height:0}") &&
-        strstr(css, "#terminal-panel{flex:none;") &&
+  CHECK(strstr(css, "#chat{flex:1;min-height:0;") &&
+        strstr(css, "#scroll-frame{flex:1;min-height:0;position:relative}") &&
+        !strstr(css, "#scroll-frame::before") &&
+        strstr(css, "#workspace{display:flex;flex:1;min-height:0;") &&
+        strstr(css, "margin:min(calc(var(--workspace-margin,0px) / 3),4dvh)") &&
+        strstr(html, "id=\"toolbar\"") && strstr(html, "data-margin=\"none\""));
+  CHECK(strstr(css, "#terminal-panel{flex:none;") &&
         strstr(css, "height:var(--pane-size,0px)") &&
         strstr(css, "flex:0 0 var(--pane-size,clamp(220px,42%,720px))") &&
         strstr(css, "#transcripts{flex-basis:var(--pane-size,38%)}") &&
@@ -241,8 +265,7 @@ int main(int argc, char **argv) {
           terminal_divider && terminal && terminal_divider < terminal);
     CHECK(strstr(transcripts, "id=\"transcript-tabs\" role=\"tablist\"") &&
           strstr(transcripts, "aria-label=\"Close transcript pane\""));
-    CHECK(strstr(css, "#workspace{flex-direction:row}") &&
-          strstr(css, "#workspace{flex-direction:column-reverse}"));
+    CHECK(strstr(css, "#workspace{flex-direction:column-reverse}"));
     CHECK(strstr(css, ".pane-divider[aria-orientation=\"vertical\"]") &&
           strstr(css, ".pane-divider[aria-orientation=\"horizontal\"]"));
   }

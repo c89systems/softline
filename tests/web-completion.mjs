@@ -110,7 +110,7 @@ export async function runWebCompletionTests(source, completionSource, promptSour
     document.getElementById = id => {
       if (!elements.has(id)) {
         const element = new Element(); element.id = id; element.ownerDocument = document;
-        element.tagName = { prompt: 'TEXTAREA', 'queue-edit-text': 'TEXTAREA', theme: 'SELECT', font: 'SELECT', 'image-input': 'INPUT', 'queue-editor': 'DIALOG', 'image-viewer': 'DIALOG' }[id] || 'DIV';
+        element.tagName = { prompt: 'TEXTAREA', 'queue-edit-text': 'TEXTAREA', theme: 'SELECT', font: 'SELECT', margin: 'SELECT', 'image-input': 'INPUT', 'queue-editor': 'DIALOG', 'image-viewer': 'DIALOG' }[id] || 'DIV';
         elements.set(id, element);
       }
       return elements.get(id);
@@ -171,6 +171,9 @@ export async function runWebCompletionTests(source, completionSource, promptSour
     }
     get('image-preview').append(get('image-preview-content'));
     get('theme').options = [{ value: 'default' }]; get('font').options = [{ value: 'sans' }];
+    get('margin').options = ['none', 'small', 'medium', 'large', 'extra-large'].map(value => ({ value }));
+    get('toolbar').append(get('brand'), get('theme'), get('font'), get('margin'), get('transcript-toggle'), get('connection'));
+    get('scroll-frame').append(get('scroll'));
     for (const id of ['completions', 'prompt-projection', 'queue', 'uploads', 'latest', 'toast', 'image-preview', 'terminal-panel']) get(id).hidden = true;
     function event(value) { socket.fire('message', { data: JSON.stringify(value) }); }
     function reply(query, values, status = 'ok') {
@@ -196,11 +199,13 @@ export async function runWebCompletionTests(source, completionSource, promptSour
       }
       close() { this.readyState = 0; this.fire('close'); }
     }
+    const preferences = new Map(Object.entries(options.preferences || {}));
     const env = {
       document, window, TerminalPanel, Transcripts, ImagePreviews: class extends ImagePreviews { constructor(...args) { super(...args); previews = this; } },
       WebSocket: Socket, TextEncoder: Encoder, TextDecoder: Decoder, URLSearchParams: Params,
       URL: class extends globalThis.URL { static createObjectURL() { const url = 'blob:test-image-' + (++serial); blobs.push(url); return url; } static revokeObjectURL(url) { revoked.push(url); } }, location: { href: 'http://localhost/', protocol: 'http:', origin: 'http://localhost' },
-      crypto: { getRandomValues(array) { return array.fill(++serial); } }, localStorage: { getItem() {}, setItem() {} },
+      crypto: { getRandomValues(array) { return array.fill(++serial); } },
+      localStorage: { getItem: name => preferences.get(name), setItem: (name, value) => preferences.set(name, value) },
       ResizeObserver: class { constructor(fn) { this.fn = fn; this.targets = []; observers.push(this); } observe(target) { this.targets.push(target); } }, performance: { now: () => now },
       MarkdownStream: class { write() {} end() {} },
       fetch: async () => { options.beforeConfig?.(document); return { ok: true, json: async () => ({ images: options.images ? '1' : '0', ...options.config }) }; },
@@ -292,7 +297,7 @@ export async function runWebCompletionTests(source, completionSource, promptSour
       event({ type: 'image_done', id, path }); await idle();
       return { id, url, file: get('image-input').files[0] };
     }
-    const ui = { get, prompt, input, type, key, idle, queries, reply, event, sent, get socket() { return socket; }, document, window, revoked, blobs, upload, previews, opened, terminals, animations, splits, reduced,
+    const ui = { get, prompt, input, type, key, idle, queries, reply, event, sent, get socket() { return socket; }, document, window, revoked, blobs, upload, previews, opened, terminals, animations, splits, reduced, preferences,
       socketURL: () => socket.url,
       copiedImages, copiedText, clipboardCalls, canvases, decoded, narrow, finishDecode: () => pendingDecodes.shift()?.(),
       resize: target => { for (const observer of observers) if (observer.targets.includes(target)) observer.fn(); },
@@ -320,6 +325,41 @@ export async function runWebCompletionTests(source, completionSource, promptSour
     for (const item of entries) ui.event({ type: 'queue_item', mode: 'queued', held: '1', text: 'Approval text', ...item });
     ui.event({ type: 'queue_end' });
   }
+  await check('F9 and the actions menu hide and restore the toolbar without losing the draft', async ui => {
+    const toolbar = ui.get('toolbar');
+    await ui.type('preserve the draft'); ui.prompt.setSelectionRange(2, 6);
+    ui.get('margin').focus();
+    assert(!toolbar.hidden && !ui.window.fire('keydown', { key: 'F9', altKey: true }).defaultPrevented, 'modified F9 changed the toolbar');
+    assert(ui.window.fire('keydown', { key: 'F9' }).defaultPrevented && toolbar.hidden &&
+      ui.document.activeElement === ui.prompt && ui.preferences.get('softline.toolbarHidden') === '1', 'F9 did not hide the toolbar, restore focus or save the preference');
+    ui.window.fire('keydown', { key: 'F9', repeat: true });
+    assert(toolbar.hidden && ui.prompt.value === 'preserve the draft' && ui.prompt.selectionStart === 2 && ui.prompt.selectionEnd === 6, 'key repeat or focus transfer changed the draft');
+    ui.event({ type: 'prompt_state', disabled: '1' });
+    ui.get('plus').click();
+    const restore = ui.get('completions').children.find(item => item.textContent.includes('Show toolbar'));
+    assert(restore && !ui.get('plus').disabled, 'hidden toolbar could not be restored during a host lock');
+    restore.click();
+    assert(!toolbar.hidden && ui.get('plus').disabled && ui.prompt.readOnly &&
+      ui.preferences.get('softline.toolbarHidden') === '0', 'menu restore changed the prompt lock or missed the preference');
+  });
+  await check('the workspace margin and toolbar visibility load from browser preferences', async ui => {
+    const margin = ui.get('margin');
+    assert(ui.get('toolbar').hidden && margin.options.length === 5 && margin.value === 'large' &&
+      ui.document.documentElement.dataset.margin === 'large', 'saved appearance was not applied at startup');
+    ui.window.fire('keydown', { key: 'F9' });
+    margin.value = 'small'; margin.fire('change');
+    assert(ui.document.documentElement.dataset.margin === 'small' && ui.preferences.get('softline.margin') === 'small', 'margin change did not update or persist');
+  }, { preferences: { 'softline.toolbarHidden': '1', 'softline.margin': 'large' } });
+  for (const motion of [true, false]) await check(`top scroll edge follows overflow in the ${motion ? 'animated' : 'plain'} page`, async ui => {
+    const scroll = ui.get('scroll'), frame = ui.get('scroll-frame');
+    scroll.scrollHeight = 1000;
+    scroll.scrollTop = 140; scroll.fire('scroll');
+    assert(frame.dataset.scrolled === (motion ? '1' : undefined) && !ui.get('latest').hidden, 'scrolling did not expose the expected edges or jump arrow');
+    ui.get('latest').click(); scroll.fire('scroll');
+    assert(frame.dataset.scrolled === (motion ? '1' : undefined) && ui.get('latest').hidden, 'jump-to-latest retained the bottom edge trigger');
+    scroll.scrollTop = 0; scroll.fire('scroll');
+    assert(frame.dataset.scrolled === (motion ? '0' : undefined), 'top edge covered the start of the conversation');
+  }, { motion });
   await check('the optional motion module docks the composer once after a successful first send', async ui => {
     await ui.type('initial draft');
     assert(!ui.animations.length && ui.get('chat').classList.contains('welcome-state'), 'typing moved the composer');
@@ -878,6 +918,15 @@ export async function runWebCompletionTests(source, completionSource, promptSour
     terminalEvent(ui, { type: 'softline-terminal-closed' });
     assert(ui.get('terminal-panel').hidden && !ui.get('terminal-panel').children.length && ui.document.activeElement === ui.prompt, 'shell exit did not remove the panel and return focus');
     assert(frame.contentWindow.messages.some(message => message.data.type === 'softline-terminal-stop'), 'closing did not request transport teardown');
+  });
+  await check('F9 from the live terminal toggles the toolbar without leaving the shell', async ui => {
+    const frame = openTerminal(ui), toolbar = ui.get('toolbar');
+    const toggle = { type: 'softline-toggle-toolbar' };
+    terminalEvent(ui, toggle, {});
+    terminalEvent(ui, toggle, frame.contentWindow, 'http://other.example');
+    assert(!toolbar.hidden, 'untrusted terminal message changed the toolbar');
+    terminalEvent(ui, toggle);
+    assert(toolbar.hidden && ui.document.activeElement === frame && ui.get('terminal-panel').children[0] === frame, 'toolbar shortcut moved focus or closed the shell');
   });
   await check('terminal follows theme changes and closing invalidates stale frame messages', async ui => {
     const frame = openTerminal(ui); frame.fire('load');

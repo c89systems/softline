@@ -90,6 +90,63 @@ window.WebSocket=class extends EventTarget {
 frame.srcdoc=(await (await fetch('/')).text()).replace('<head>','<head>'+bootstrap);
 await uiCheck('actual frontend starts with mock host',async()=>{await waitFor(()=>frame.contentWindow.softlineTestSocket&&frame.contentDocument.querySelector('#connection')?.textContent==='Connected')});
 function event(value){const w=frame.contentWindow;w.softlineTestSocket.dispatchEvent(new w.MessageEvent('message',{data:JSON.stringify(value)}))}
+await uiCheck('toolbar toggle reclaims layout space and margins only inset the workspace', async () => {
+  const w = frame.contentWindow, doc = frame.contentDocument;
+  const toolbar = doc.querySelector('#toolbar'), workspace = doc.querySelector('#workspace');
+  const margin = doc.querySelector('#margin');
+  const toggle = () => w.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'F9', cancelable: true }));
+  const select = value => { margin.value = value; margin.dispatchEvent(new w.Event('change')); };
+  const previousWidth = frame.style.width, previousMargin = margin.value, hidden = toolbar.hidden;
+  try {
+    if (toolbar.hidden) toggle();
+    for (const width of [760, 360]) {
+      frame.style.width = `${width}px`;
+      await waitFor(() => w.innerWidth <= width && w.innerWidth > width - 8);
+      select('none');
+      const bar = toolbar.getBoundingClientRect();
+      assert(Math.abs(workspace.getBoundingClientRect().top - bar.bottom) < 1, 'None still added a margin');
+      let previous = 0;
+      for (const option of [...margin.options].slice(1)) {
+        select(option.value);
+        const box = workspace.getBoundingClientRect(), currentBar = toolbar.getBoundingClientRect();
+        const vertical = box.top - currentBar.bottom;
+        assert(box.left > previous && vertical > 0 && box.left > vertical, 'invalid margin size or axis ratio');
+        assert(Math.abs(w.innerWidth - box.right - box.left) < 1 && Math.abs(w.innerHeight - box.bottom - vertical) < 1, 'workspace margins are uneven');
+        assert(currentBar.left === bar.left && currentBar.right === bar.right, 'margin inset the toolbar');
+        previous = box.left;
+      }
+    }
+    const before = workspace.getBoundingClientRect();
+    margin.focus(); toggle();
+    const after = workspace.getBoundingClientRect();
+    assert(toolbar.hidden && after.height > before.height && after.top < before.top && doc.activeElement === doc.querySelector('#prompt'), 'hidden toolbar still took space or focus');
+  } finally { select(previousMargin); if (toolbar.hidden !== hidden) toggle(); frame.style.width = previousWidth; }
+});
+await uiCheck('animated scroll edges fade and blur only on the sides with overflow', async () => {
+  const w = frame.contentWindow, doc = frame.contentDocument;
+  const scroll = doc.querySelector('#scroll'), scrollFrame = doc.querySelector('#scroll-frame');
+  const latest = doc.querySelector('#latest');
+  const top = () => w.getComputedStyle(scrollFrame, '::before');
+  const bottom = () => w.getComputedStyle(scrollFrame, '::after');
+  const animated = doc.querySelector('link[href="./motion.css"]') && w.matchMedia('(prefers-reduced-motion: no-preference)').matches;
+  try {
+    event({type:'delta',id:'edge-fixture',role:'assistant',text:'Scrollable conversation output.\n\n'.repeat(85)});
+    event({type:'end',id:'edge-fixture'});
+    await waitFor(() => scroll.scrollHeight > scroll.clientHeight + 200);
+    scroll.scrollTop = 140;
+    await waitFor(() => !latest.hidden);
+    if (animated) {
+      await waitFor(() => top().opacity === '1' && bottom().opacity === '1');
+      assert(top().backdropFilter === 'blur(5px)' && bottom().backdropFilter === 'blur(5px)', 'edge effects did not blur their backdrop');
+    } else {
+      assert(top().content === 'none' && bottom().content === 'none', 'scroll edge effects appeared without motion');
+    }
+    scroll.scrollTop = 0;
+    if (animated) await waitFor(() => top().opacity === '0' && bottom().opacity === '1');
+    latest.click();
+    if (animated) await waitFor(() => top().opacity === '1' && bottom().opacity === '0');
+  } finally { latest.click(); event({type:'reset'}); }
+});
 function checkSplit(panel, neighbor, size, edge, contents, closing = false) {
   const divider = panel.previousElementSibling;
   const animation = panel.getAnimations().find(item => closing ? item.id === 'split-close' : item.animationName === 'split-open');

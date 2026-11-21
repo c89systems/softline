@@ -32,6 +32,11 @@ same chart source and data. The plain-text Lua queue example remains separate.
 `SOFTLINE_WEB_BANNER` (trusted host HTML/SVG in the welcome area) customize the
 examples. `SOFTLINE_WEB_HEADER` optionally supplies trusted HTML, SVG or image
 markup in the upper-left toolbar; that area is hidden and unbranded by default.
+Use F9 or **Hide toolbar** and **Show toolbar** in the `+` menu to toggle the
+toolbar. F9 also works from the embedded terminal. The toolbar's **Margin**
+selector offers None through Extra large. It adds more space at the sides of
+the workspace than above and below it. Toolbar visibility and margin size are
+saved in the browser.
 Set `SOFTLINE_WEB_ANIMATIONS=1` to try the animated page in any browser chat
 example, for example `SOFTLINE_WEB_ANIMATIONS=1 make run-chat-web-only`.
 `SOFTLINE_QUEUE_DISPLAY_DELAY_MS` defaults to 500 and affects only Q/S/pending
@@ -79,6 +84,8 @@ and fade into place. The shell split opens from the bottom and the transcript
 split opens from the right, or from the top when stacked on narrow screens.
 Both splits collapse toward the same edge when closed. The shell is asked to
 stop as soon as its pane begins closing.
+The conversation fades and blurs at the top once scrolled away from the start,
+and at the bottom while the jump-to-latest arrow is visible.
 The motion respects the browser’s reduced-motion preference. Sending and paced
 typing keep their usual timing.
 

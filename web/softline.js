@@ -8,7 +8,7 @@ function randomId() {
   return Array.from(crypto.getRandomValues(new Uint32Array(4)), value => value.toString(16).padStart(8, '0')).join('');
 }
 const $ = id => document.getElementById(id);
-const prompt = $('prompt'), scroll = $('scroll'), messages = $('messages');
+const prompt = $('prompt'), scroll = $('scroll'), messages = $('messages'), toolbar = $('toolbar');
 const previews = new ImagePreviews(document, window, { notice: toast });
 const requestLimit = 32;
 const state = { socket: null, online: false, follow: true, messages: new Map(),
@@ -33,7 +33,19 @@ function preference(id, fallback) {
     if (id === 'theme') { terminalPanel.theme(); transcripts.theme(); }
   });
 }
-preference('theme', 'default'); preference('font', 'sans');
+preference('theme', 'default'); preference('font', 'sans'); preference('margin', 'none');
+try { toolbar.hidden = localStorage.getItem('softline.toolbarHidden') === '1'; } catch {}
+function toggleToolbar() {
+  const hiding = !toolbar.hidden;
+  const active = document.activeElement;
+  toolbar.hidden = hiding;
+  try { localStorage.setItem('softline.toolbarHidden', hiding ? '1' : '0'); } catch {}
+  updatePlus();
+  const restoreFocus = (hiding && toolbar.contains(active)) ||
+    ($('plus').disabled && (active === $('plus') || $('completions').contains(active)));
+  if (restoreFocus && !editor.focus()) scroll.focus({ preventScroll: true });
+  editor.showMenu();
+}
 function send(action, fields = {}) {
   if (state.online && state.socket?.readyState === WebSocket.OPEN) {
     try { state.socket.send(new URLSearchParams({ action, view: state.view, ...fields }).toString()); return true; } catch {}
@@ -134,11 +146,15 @@ function editQueue(item) {
   $('queue-edit-text').value = item.text; $('queue-edit-error').textContent = '';
   $('queue-editor').showModal(); $('queue-edit-text').focus();
 }
+function toolbarAction() {
+  return { id: 'toolbar', label: toolbar.hidden ? 'Show toolbar' : 'Hide toolbar', description: 'F9' };
+}
 function actionItems() {
   const oldest = [...state.queue.values()].find(item => item.held === '1');
   const focused = state.approval && state.queue.get(state.approval.id);
   return [
     { id: 'focus', label: 'Focus prompt', description: 'Esc' },
+    toolbarAction(),
     { id: 'terminal', label: terminalPanel.frame ? 'Close terminal' : 'Open terminal', description: state.terminal ? 'Ctrl+`' : 'Ctrl+` · host terminal unavailable', disabled: !terminalPanel.frame && (!state.online || !state.terminal) },
     { id: 'edit', label: 'Edit queued message', description: 'Ctrl+Shift+Enter', disabled: !state.online || !state.canEdit || ![...state.queue.values()].some(item => item.mode !== 'pending') },
     { id: 'approvals', label: 'Focus approvals', description: 'Ctrl+Shift+1', disabled: !oldest },
@@ -151,6 +167,8 @@ function promptAction(action) {
     if (canUnlockPrompt()) sendPrompt(state.terminalUnlockCommand, 'send');
   } else if (action === 'focus') {
     editor.focus();
+  } else if (action === 'toolbar') {
+    toggleToolbar();
   } else if (action === 'approvals') {
     const item = [...state.queue.values()].find(candidate => candidate.held === '1');
     if (!item) { toast('No approvals are waiting.'); return; }
@@ -229,8 +247,11 @@ function adjustAnchor(before, after, syntax) {
 const editor = new Prompt({
   document, send, mutate: adjustAnchor, resize: resizePrompt, toast, submit,
   actions: actionItems, action: promptAction,
-  lockedActions: () => canUnlockPrompt() ? [{ id: 'terminal-unlock', label: state.terminalUnlockCommand,
-    description: 'Allow typing while terminals are open', disabled: !state.online }] : [],
+  lockedActions: () => [
+    ...(canUnlockPrompt() ? [{ id: 'terminal-unlock', label: state.terminalUnlockCommand,
+      description: 'Allow typing while terminals are open', disabled: !state.online }] : []),
+    ...(toolbar.hidden ? [toolbarAction()] : [])
+  ],
   images: () => state.images, recovery: () => state.recovery,
   recovered: item => { state.recovery = state.recovery.filter(candidate => candidate !== item); },
   imagePicker: () => $('image-input').click(),
@@ -245,7 +266,13 @@ const editor = new Prompt({
   }
 });
 window.addEventListener('focus', () => editor.focus(true));
-const terminalPanel = new TerminalPanel({ document, window, closed: () => {
+window.addEventListener('keydown', event => {
+  if (event.key !== 'F9' || event.defaultPrevented || event.isComposing || event.altKey ||
+      event.ctrlKey || event.metaKey || event.shiftKey) return;
+  event.preventDefault();
+  if (!event.repeat) toggleToolbar();
+}, { capture: true });
+const terminalPanel = new TerminalPanel({ document, window, toggleToolbar, closed: () => {
   state.restorePromptAfterTerminal = !editor.focus();
   if (state.restorePromptAfterTerminal) scroll.focus({ preventScroll: true });
 } });
@@ -257,6 +284,9 @@ function promptState(disabled, text = '') {
 function canUnlockPrompt() {
   return !!state.terminalUnlockCommand && state.promptDisabled && !state.promptExplicitDisabled;
 }
+function updatePlus() {
+  $('plus').disabled = state.promptDisabled && !canUnlockPrompt() && !toolbar.hidden;
+}
 function updatePromptState() {
   const disabled = state.promptExplicitDisabled || (state.terminalPromptLock && state.terminalHandoffs > 0);
   const wasDisabled = state.promptDisabled;
@@ -264,7 +294,7 @@ function updatePromptState() {
   prompt.setAttribute('aria-disabled', String(disabled));
   prompt.title = disabled ? state.promptExplicitDisabled ? state.promptReason || 'The host has paused prompt input.' : 'A terminal handoff is active.' : '';
   $('composer').dataset.disabled = disabled ? '1' : '0';
-  $('plus').disabled = disabled && !canUnlockPrompt();
+  updatePlus();
   $('image-input').disabled = disabled;
   if (disabled && !wasDisabled) { stopSimulation('prompt_locked'); editor.suspend(); }
   else if (!disabled && wasDisabled) {

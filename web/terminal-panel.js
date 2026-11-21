@@ -3,7 +3,7 @@ import { PaneDivider } from './pane-divider.js';
 // A layout panel around the locally served terminal view. The iframe owns its
 // PTY transport; removing it closes that transport without touching chat replay.
 export class TerminalPanel {
-  constructor({ document, window, closed }) {
+  constructor({ document, window, closed, toggleToolbar }) {
     this.document = document; this.window = window; this.closed = closed;
     this.origin = window.origin || window.location.origin;
     this.panel = document.getElementById('terminal-panel');
@@ -18,6 +18,7 @@ export class TerminalPanel {
       if (!this.frame || event.source !== this.frame.contentWindow || event.origin !== this.origin) return;
       const data = event.data;
       if (data?.type === 'softline-terminal-closed') this.close();
+      else if (data?.type === 'softline-toggle-toolbar') toggleToolbar();
       else if (data?.type === 'softline-terminal-size' && Number.isFinite(data.rowHeight) && data.rowHeight >= 8 && data.rowHeight <= 100 && Number.isFinite(data.chromeHeight) && data.chromeHeight >= 0 && data.chromeHeight <= 300) {
         this.frameMounted = true;
         this.rowHeight = data.rowHeight; this.chromeHeight = data.chromeHeight; this.resize();

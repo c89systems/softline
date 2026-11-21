@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en" data-theme="default" data-font="sans">
+<html lang="en" data-theme="default" data-font="sans" data-margin="none">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
@@ -10,7 +10,7 @@
   <script type="module" src="./softline.js"></script>
 </head>
 <body>
-  <header class="toolbar">
+  <header id="toolbar" class="toolbar">
     <div id="brand" class="brand" hidden></div>
     <div class="appearance">
       <label>Theme <select id="theme" aria-label="Theme">
@@ -23,6 +23,9 @@
         <option value="riced">Riced</option>
       </select></label>
       <label>Font <select id="font" aria-label="Font"><option value="sans">Sans</option><option value="mono">JetBrains Mono</option></select></label>
+      <label>Margin <select id="margin" aria-label="Margin">
+        <option value="none">None</option><option value="small">Small</option><option value="medium">Medium</option><option value="large">Large</option><option value="extra-large">Extra large</option>
+      </select></label>
     </div>
     <button id="transcript-toggle" type="button" aria-controls="transcripts" aria-expanded="false" aria-keyshortcuts="F8" title="Cycle transcripts (F8)" hidden>Transcripts</button>
     <span id="connection" role="status">Connecting</span>
@@ -30,8 +33,10 @@
   <div id="workspace">
   <div id="conversation-pane">
   <main id="chat" class="welcome-state">
-    <div id="scroll" tabindex="0" aria-label="Conversation">
-      <div id="messages" role="log" aria-label="Messages" aria-live="off"></div>
+    <div id="scroll-frame">
+      <div id="scroll" tabindex="0" aria-label="Conversation">
+        <div id="messages" role="log" aria-label="Messages" aria-live="off"></div>
+      </div>
     </div>
     <section id="welcome"><div id="banner"></div><div id="welcome-text">Welcome to softline</div></section>
     <div id="composer-area">

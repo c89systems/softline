@@ -1,6 +1,15 @@
 const chat = document.getElementById('chat');
 const composer = document.getElementById('composer-area');
 const reduced = window.matchMedia('(prefers-reduced-motion: reduce)');
+const scroll = document.getElementById('scroll');
+const scrollFrame = document.getElementById('scroll-frame');
+
+function updateScrollEdge() {
+  const scrolled = scroll.scrollTop > 1 ? '1' : '0';
+  if (scrolled !== scrollFrame.dataset.scrolled) scrollFrame.dataset.scrolled = scrolled;
+}
+scroll.addEventListener('scroll', updateScrollEdge, { passive: true });
+updateScrollEdge();
 
 chat.addEventListener('softline:composer-dock', () => {
   if (reduced.matches || !chat.classList.contains('welcome-state')) return;

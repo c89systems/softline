@@ -2,6 +2,26 @@
   /* Tab focus and scrollIntoView must not scroll the workspace during entry. */
   #workspace { overflow: clip; }
 
+  #scroll-frame::before, #scroll-frame::after {
+    content: "";
+    position: absolute;
+    inset-inline: 0;
+    height: min(32px, 12%);
+    pointer-events: none;
+    z-index: 1;
+    opacity: 0;
+    transition: opacity 160ms ease-out;
+    background: linear-gradient(to var(--edge-direction), var(--bg), transparent);
+    backdrop-filter: blur(5px);
+    mask-image: linear-gradient(to var(--edge-direction), #000 30%, transparent);
+  }
+  #scroll-frame::before { --edge-direction: bottom; top: 0; }
+  #scroll-frame::after { --edge-direction: top; bottom: 0; }
+  #chat:not(.welcome-state) #scroll-frame[data-scrolled="1"]::before,
+  #chat:not(.welcome-state):has(#latest:not([hidden])) #scroll-frame::after {
+    opacity: 1;
+  }
+
   .message.user > .body:empty { visibility: hidden; }
   .message.user > .body:not(:empty) {
     animation: message-arrive 410ms cubic-bezier(.32, .12, .24, 1);

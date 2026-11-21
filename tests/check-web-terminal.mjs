@@ -132,6 +132,15 @@ check('embedded terminal shortcut closes without forwarding input or closing the
   ui.document.fire('keydown', event);
   assert(event.prevented && event.stopped && ui.socket.readyState === 3 && !ui.window.closed && !ui.frames().length, 'terminal shortcut was forwarded or closed the browser');
 }, { embedded: true });
+check('embedded F9 forwards the toolbar toggle with no terminal input', ui => {
+  ui.open(); ui.event('ready');
+  const event = { key: 'F9', preventDefault() { this.prevented = true; }, stopImmediatePropagation() { this.stopped = true; } };
+  ui.document.fire('keydown', { ...event, shiftKey: true });
+  ui.document.fire('keydown', { ...event, repeat: true });
+  ui.document.fire('keydown', event);
+  const messages = ui.window.parent.messages.filter(message => message.data.type === 'softline-toggle-toolbar');
+  assert(event.prevented && event.stopped && messages.length === 1 && messages[0].origin === 'https://localhost' && ui.socket.readyState === 1 && !ui.frames().length, 'F9 went to the PTY or posted an incorrect toolbar action');
+}, { embedded: true });
 check('delayed embedded shell readiness does not steal focus back from chat', ui => {
   ui.open(); ui.event('ready');
   assert(!ui.terminal.focused && !ui.terminal.options.disableStdin, 'late readiness displaced the current chat control');

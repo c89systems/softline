@@ -122,8 +122,14 @@ export function mountTerminal({ document, window, Terminal, FitAddon }) {
   socket.addEventListener('error', () => stop('Could not connect to the server terminal.'));
   get('terminal-close').addEventListener('click', close);
   document.addEventListener('keydown', event => {
-    if (!embedded || !event.ctrlKey || event.shiftKey || event.altKey || event.metaKey || !(event.key === '`' || event.code === 'Backquote')) return;
-    event.preventDefault(); event.stopImmediatePropagation(); if (!event.repeat) close();
+    if (!embedded || event.defaultPrevented || event.isComposing || event.shiftKey || event.altKey || event.metaKey) return;
+    const toolbar = !event.ctrlKey && event.key === 'F9';
+    const closePanel = event.ctrlKey && (event.key === '`' || event.code === 'Backquote');
+    if (!toolbar && !closePanel) return;
+    event.preventDefault(); event.stopImmediatePropagation();
+    if (event.repeat) return;
+    if (toolbar) window.parent.postMessage({ type: 'softline-toggle-toolbar' }, window.location.origin);
+    else close();
   }, true);
   window.addEventListener('message', event => {
     if (!embedded || event.source !== window.parent || event.origin !== window.location.origin) return;
