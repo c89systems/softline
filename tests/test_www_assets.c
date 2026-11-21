@@ -109,6 +109,8 @@ int main(int argc, char **argv) {
         modules[2] && modules[3]);
   CHECK(!strstr(html, "/terminal-lock") && !strstr(js, "/terminal-lock") &&
         !strstr(prompt, "/terminal-lock"));
+  CHECK(!strstr(html, "/stream") && !strstr(js, "/stream") &&
+        !strstr(prompt, "/stream"));
   /* Logical DOM doubles cannot catch missing real controls. Verify the image
    * controllers' literal bindings against the actual embedded HTML as well. */
   for (i = 0; i < sizeof(modules) / sizeof(modules[0]); ++i) {

@@ -438,8 +438,11 @@ Alt-A focuses approval controls by inverting the heading; the cursor stays in
 the input prompt. While focused, Alt-Y approves, Alt-N rejects, Alt-E edits,
 and Esc or Alt-A returns to ordinary input. After Alt-E, Alt-N discards the
 edited message or approval; its editing indicator shows `Alt-N discard`.
-The two `without-delay` targets set `SOFTLINE_CHAT_CHAR_MS=0`, removing the
-example producer's simulated typing delay, with default and riced themes.
+Use `/stream` to toggle response pacing, or `/stream direct` and `/stream llm`
+to select a mode. Direct streams as fast as the example can deliver. LLM
+simulation sends small deltas about 80 ms apart by default. In local C chat
+the setting applies to the next response. The two `without-delay` targets
+start in direct mode with default and riced themes.
 `run-chat` uses Gruvbox by default; pass `THEME=...` to override it. Both C
 and Lua examples accept
 `SOFTLINE_PROMPT_THEME=default`, `plain`, `accent`, `dracula`, `gruvbox`, `monochrome`,

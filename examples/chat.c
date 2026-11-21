@@ -39,6 +39,8 @@ struct chat_state {
   pid_t worker_pid;
   int busy;
   int exit_requested;
+  unsigned int stream_initial_delay;
+  enum demo_stream_mode stream_mode;
   unsigned int turn_index;
   demo_charts_t charts;
   size_t response_bytes;
@@ -368,6 +370,14 @@ static int handle_command(struct chat_state *state, const char *line,
                           int *handled) {
   int enabled, stopped;
   *handled = 1;
+  if (command_named(line, "/stream")) {
+    enum demo_stream_mode mode = demo_stream_setting(
+        line,
+        demo_stream_delay(state->stream_mode, state->stream_initial_delay));
+    if (mode != DEMO_STREAM_INVALID)
+      state->stream_mode = mode;
+    return command_message(state, demo_stream_message(mode));
+  }
   if (command_named(line, "/terminal-lock")) {
     demo_www_t *web = demo_web_listener(state->web);
     size_t active;
@@ -470,22 +480,7 @@ static int deliver_steers(struct chat_state *state, int at_seam) {
   return sync_queue_readiness(state, 0);
 }
 
-static unsigned int character_delay_us(void) {
-  const char *value;
-  char *end;
-  long milliseconds;
-  value = getenv("SOFTLINE_CHAT_CHAR_MS");
-  if (!value || value[0] == '\0')
-    return 20000u;
-  errno = 0;
-  milliseconds = strtol(value, &end, 10);
-  if (errno != 0 || end == value || *end != '\0' || milliseconds < 0 ||
-      milliseconds > 60000)
-    return 20000u;
-  return (unsigned int)milliseconds * 1000u;
-}
-
-static void wait_character(unsigned int microseconds) {
+static void wait_delta(unsigned int microseconds) {
   struct timespec delay;
   delay.tv_sec = (time_t)(microseconds / 1000000u);
   delay.tv_nsec = (long)(microseconds % 1000000u) * 1000L;
@@ -594,7 +589,7 @@ static int start_operation(struct chat_state *state) {
   unsigned int delay;
   int gate_fd = -1;
   const char *gate = getenv("SOFTLINE_CHAT_GATE_FD");
-  size_t i, segment;
+  size_t segment;
   if (gate) {
     char *end;
     long value;
@@ -621,7 +616,7 @@ static int start_operation(struct chat_state *state) {
     return -1;
   segments[0] = answer;
   segments[1] = chart;
-  delay = character_delay_us();
+  delay = demo_stream_delay(state->stream_mode, state->stream_initial_delay);
   if (pipe(pipe_fds) != 0)
     return -1;
   flags = fcntl(pipe_fds[0], F_GETFL);
@@ -651,11 +646,21 @@ static int start_operation(struct chat_state *state) {
       } while (token != '\n');
     }
     for (segment = 0; segment < 2; ++segment) {
-      for (i = 0; segments[segment][i] != '\0'; i++) {
-        if (write(pipe_fds[1], segments[segment] + i, 1) != 1)
+      size_t length = strlen(segments[segment]), offset = 0;
+      size_t limit = delay ? DEMO_STREAM_LLM_BYTES : DEMO_STREAM_DIRECT_BYTES;
+      while (offset < length) {
+        size_t count = length - offset;
+        ssize_t written;
+        if (count > limit)
+          count = limit;
+        do {
+          written = write(pipe_fds[1], segments[segment] + offset, count);
+        } while (written < 0 && errno == EINTR);
+        if (written <= 0)
           _exit(0);
-        if (delay > 0)
-          wait_character(delay);
+        offset += (size_t)written;
+        if (delay && (offset < length || (segment == 0 && chart[0])))
+          wait_delta(delay * (unsigned int)written);
       }
     }
     close(pipe_fds[1]);
@@ -1315,6 +1320,8 @@ int main(int argc, char **argv) {
   int cancelled_busy;
 
   memset(&state, 0, sizeof(state));
+  state.stream_initial_delay =
+      demo_stream_initial_delay(getenv("SOFTLINE_CHAT_CHAR_MS"));
   demo_charts_init(&state.charts,
                    (unsigned long)time(NULL) ^ (unsigned long)getpid());
   state.reconnect_fd = -1;
@@ -1526,7 +1533,7 @@ int main(int argc, char **argv) {
 #ifdef SOFTLINE_CBOR_TCP
     if (state.remote) {
       demo_client_events(state.remote, remote_event, &state);
-      demo_client_options(state.remote, character_delay_us(),
+      demo_client_options(state.remote, state.stream_initial_delay,
                           state.approval_demo, state.approval_interval_ms,
                           state.approval_seed);
       if (demo_client_attach(state.remote, state.sl) != SL_OK ||

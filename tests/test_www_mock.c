@@ -1142,7 +1142,7 @@ int main(int argc, char **argv) {
   CHECK(until(one, data, SL_WWW_FRAME_MAX + 1, "\"value\":\"/status\"") == 0);
   CHECK(!ws_text(one, "action=complete&request=menu&text=&cursor=0&all=1"));
   {
-    int slash = 0, files = 0;
+    int slash = 0, stream = 0, files = 0;
     for (;;) {
       CHECK(!until(one, data, SL_WWW_FRAME_MAX + 1, "\"request\":\"menu\""));
       if (strstr(data, "\"type\":\"complete_end\"")) {
@@ -1150,10 +1150,11 @@ int main(int argc, char **argv) {
         break;
       }
       slash |= strstr(data, "\"value\":\"/terminal-lock\"") != NULL;
+      stream |= strstr(data, "\"value\":\"/stream\"") != NULL;
       files |= strstr(data, "\"value\":\"@\"") != NULL &&
                strstr(data, "\"continue\":\"1\"") != NULL;
     }
-    CHECK(slash && files);
+    CHECK(slash && stream && files);
   }
   {
     static const struct {
@@ -1169,6 +1170,8 @@ int main(int argc, char **argv) {
         {"text=%2Fterminal-lock&cursor=14&start=0&end=14&resolve=%2Fterminal-"
          "lock",
          "/terminal-lock on", "/terminal-lock off"},
+        {"text=%2Fstream&cursor=7&start=0&end=7&resolve=%2Fstream",
+         "/stream direct", "/stream llm"},
         {"text=%40many%2Fitem299&cursor=13&start=0&end=13&resolve=%40many%2F",
          "@many/item000", "@many/item299"}};
     size_t i;
@@ -1433,6 +1436,18 @@ int main(int argc, char **argv) {
                 0 &&
             strstr(data, expected));
     }
+  }
+  if (argc >= 4) {
+    CHECK(!ws_text(one, "action=send&view=stream&request=llm&request_seq=1"
+                        "&text=%2Fstream+llm"));
+    CHECK(!until(one, data, SL_WWW_FRAME_MAX + 1,
+                 "Streaming mode: LLM simulation."));
+    CHECK(!until(two, data, SL_WWW_FRAME_MAX + 1,
+                 "Streaming mode: LLM simulation."));
+    CHECK(!ws_text(two, "action=send&view=stream-observer&request=direct"
+                        "&request_seq=1&text=%2Fstream"));
+    CHECK(!until(one, data, SL_WWW_FRAME_MAX + 1, "Streaming mode: direct."));
+    CHECK(!until(two, data, SL_WWW_FRAME_MAX + 1, "Streaming mode: direct."));
   }
   close(one);
   one = -1;

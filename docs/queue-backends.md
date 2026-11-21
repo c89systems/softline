@@ -214,6 +214,15 @@ An attachment supplies its prior request watermark when establishing a new
 namespace, keeping outcomes lost in an owner restart unknown and preventing
 readmission under an old identity. This does not provide durable queue storage.
 
+Use `/stream` from the TUI or browser to toggle response pacing. Use
+`/stream direct` to remove the simulated delay and `/stream llm` to send
+four-byte deltas with a simulated rate of about 12.5 deltas per second by
+default. The queue owner applies the setting to the current response and
+keeps it across client reconnects. To choose the owner's startup pace, set
+`SOFTLINE_CHAT_CHAR_MS` on the server (20 ms per byte by default, 0 for
+direct). Without a server setting, the owner's initial pace can follow the
+attached client's startup setting until the first `/stream` command.
+
 The example sends one CBOR array per libcbor `C89CBOR_LENGTH32` record over
 plain TCP. Its first field is the unsigned message type, followed by unsigned
 integers, text, byte strings or null. Reply deltas use byte strings so UTF-8

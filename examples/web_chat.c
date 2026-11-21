@@ -471,7 +471,8 @@ static int complete(demo_web_chat_t *w, const sl_www_request_t *r) {
      * against the complete typed prefix, including any partial basename. */
     result = demo_resolve(w->editor, directory, completion, &c, w);
     free(directory);
-  } else if (!strcmp(prefix, "/approve") || !strcmp(prefix, "/terminal-lock"))
+  } else if (!strcmp(prefix, "/approve") || !strcmp(prefix, "/terminal-lock") ||
+             !strcmp(prefix, "/stream"))
     result = demo_resolve(w->editor, prefix, completion, &c, w);
   else {
     char trigger[2];

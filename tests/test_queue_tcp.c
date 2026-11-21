@@ -46,12 +46,15 @@ typedef struct peer {
   size_t source_bytes;
   char last_source[3];
   char source_tail[64];
+  char message[128];
+  size_t turn_deltas, largest_delta;
+  double turn_start, first_delta, turn_end;
   unsigned long delay_us;
 } peer_t;
 static double now(void) {
   struct timespec ts;
   clock_gettime(CLOCK_MONOTONIC, &ts);
-  return (double)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+  return (double)ts.tv_sec * 1000 + ts.tv_nsec / 1000000.0;
 }
 static void copy(char *out, size_t size, const char *in) {
   snprintf(out, size, "%s", in ? in : "");
@@ -155,16 +158,27 @@ static int receive(peer_t *p) {
     size_t length;
     const char *text = kind == DEMO_OUTPUT ? demo_bytes(&packet, &length)
                                            : demo_string(&packet);
-    if (kind == DEMO_RESPONSE_BEGIN)
+    if (kind == DEMO_RESPONSE_BEGIN) {
       p->active = 1;
-    if (kind == DEMO_OUTPUT_END)
+      p->turn_start = now();
+      p->turn_deltas = p->largest_delta = 0;
+    }
+    if (kind == DEMO_OUTPUT_END) {
       p->active = 0;
+      p->turn_end = now();
+    }
+    if (kind == DEMO_MESSAGE)
+      copy(p->message, sizeof(p->message), text);
     if (kind == DEMO_SHELL)
       ++p->shells;
     if (kind == DEMO_PROMPT && text && !strcmp(text, "/steer barrier"))
       ++p->barrier_steered;
     if (kind == DEMO_OUTPUT && text) {
       size_t i;
+      if (!p->turn_deltas++)
+        p->first_delta = now();
+      if (length > p->largest_delta)
+        p->largest_delta = length;
       for (i = 0; text[i]; ++i) {
         p->last_source[0] = p->last_source[1];
         p->last_source[1] = text[i];
@@ -242,6 +256,89 @@ static int call_id(peer_t *p, sl_queue_request_t *r, unsigned long id) {
 static int call(peer_t *p, sl_queue_request_t *r) {
   return call_id(p, r, ++p->serial);
 }
+
+static int stream_offer(peer_t *p, const char *text) {
+  sl_queue_request_t r = {0};
+  r.operation = SL_QUEUE_OFFER;
+  r.text = text;
+  return call(p, &r) || p->status != SL_QUEUE_ACCEPTED;
+}
+
+static int stream_start(peer_t *p) {
+  demo_packet_t packet = {0};
+  int failed;
+  if (stream_offer(p, "measure response"))
+    return -1;
+  demo_put_number(&packet, DEMO_IDLE);
+  demo_put_number(&packet, 1);
+  failed = demo_link_queue(&p->link, &packet) || flush(p);
+  demo_packet_free(&packet);
+  if (failed)
+    return -1;
+  while (!p->active)
+    if (receive(p))
+      return -1;
+  return 0;
+}
+
+static int stream_case(peer_t *p, unsigned short port) {
+  size_t paced_bytes, direct_start, paced_deltas;
+  double start, paced_first, paced_time;
+  char tail[sizeof(p->source_tail)];
+
+  /* The owner has a 20 ms byte interval. The client's hint must not override
+   * it, including when we reconnect after toggling the active turn. */
+  p->delay_us = 1;
+  CHECK(!attach(p, port, "stream-controller"));
+  start = now();
+  CHECK(!stream_start(p));
+  while (p->active)
+    CHECK(!receive(p));
+  paced_bytes = p->source_bytes;
+  paced_deltas = p->turn_deltas;
+  paced_first = p->first_delta - start;
+  paced_time = p->turn_end - start;
+  CHECK(paced_bytes > 64 && p->largest_delta == 4 &&
+        p->turn_end - p->turn_start >= 10.0 * paced_bytes);
+  copy(tail, sizeof(tail), p->source_tail);
+
+  CHECK(!stream_start(p));
+  while (!p->turn_deltas)
+    CHECK(!receive(p));
+  CHECK(p->active && !stream_offer(p, "/stream"));
+  while (!*p->message)
+    CHECK(!receive(p));
+  CHECK(p->active && !strcmp(p->message, "Streaming mode: direct."));
+  while (p->active)
+    CHECK(!receive(p));
+  CHECK(p->largest_delta > 4);
+
+  demo_link_close(&p->link);
+  p->delay_us = 60000;
+  CHECK(!attach(p, port, "stream-controller") && !stream_start(p));
+  while (p->active)
+    CHECK(!receive(p));
+  CHECK(p->largest_delta > 4);
+
+  /* Every third reply adds a chart. The fourth ordinary reply is the same
+   * template as the first, so compare equal amounts of source. */
+  direct_start = p->source_bytes;
+  start = now();
+  CHECK(!stream_start(p));
+  while (p->active)
+    CHECK(!receive(p));
+  CHECK(p->source_bytes - direct_start == paced_bytes &&
+        !strcmp(tail, p->source_tail) && p->largest_delta > 4 &&
+        p->turn_deltas < paced_deltas);
+  printf("Loopback TCP/CBOR (%lu bytes): LLM %.3f ms first delta, %.3f ms "
+         "total, %lu records; direct %.3f ms first delta, %.3f ms total, "
+         "%lu records.\n",
+         (unsigned long)paced_bytes, paced_first, paced_time,
+         (unsigned long)paced_deltas, p->first_delta - start,
+         p->turn_end - start, (unsigned long)p->turn_deltas);
+  return 0;
+}
+
 /* STOP and a direct offer update readiness as part of the acknowledged change.
  * With dispatch gated, a later snapshot must not reveal a duplicate refresh. */
 static int readiness_case(peer_t *p, unsigned short port) {
@@ -1049,9 +1146,11 @@ int main(int argc, char **argv) {
   peer_t *p;
   int terminal_only = argc == 3 && !strcmp(argv[1], "disconnect");
   int readiness_only = argc == 3 && !strcmp(argv[1], "readiness");
-  const char *owner_path = terminal_only || readiness_only ? argv[2]
-                           : argc == 2                     ? argv[1]
-                                                           : NULL;
+  int stream_only = argc == 3 && !strcmp(argv[1], "stream");
+  const char *owner_path = terminal_only || readiness_only || stream_only
+                               ? argv[2]
+                           : argc == 2 ? argv[1]
+                                       : NULL;
   if (argc == 2 && !strcmp(argv[1], "-i"))
     return nonreader_shell();
   if (argc == 2 && !strcmp(argv[1], "closed-peer"))
@@ -1084,6 +1183,10 @@ int main(int argc, char **argv) {
     close(startup[0]);
     close(startup[1]);
     setenv("SOFTLINE_CHAT_APPROVAL_DEMO", "0", 1);
+    if (stream_only)
+      setenv("SOFTLINE_CHAT_CHAR_MS", "20", 1);
+    else
+      unsetenv("SOFTLINE_CHAT_CHAR_MS");
     setenv("SOFTLINE_CHAT_TEST_SIGNALS", "1", 1);
     setenv("SHELL", terminal_only ? argv[0] : "/bin/sh", 1);
     setenv("ENV", "", 1);
@@ -1106,6 +1209,8 @@ int main(int argc, char **argv) {
              terminal_disconnect_case(p, (unsigned short)port, 1);
   else if (readiness_only)
     result = readiness_case(p, (unsigned short)port);
+  else if (stream_only)
+    result = stream_case(p, (unsigned short)port);
   else {
     result = large_owner_case(p, (unsigned short)port);
     if (!result)

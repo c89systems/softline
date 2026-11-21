@@ -64,7 +64,10 @@ typedef struct owner {
   int stopped, auto_approval, active, injection;
   int gated, input_empty, shell_pending, shell_requested, attach_wait_seam,
       initialized, demo_enabled, gate_fd, waiting_gate, stall_hello_once;
-  unsigned long delay_us, interval_ms;
+  unsigned int stream_initial_delay;
+  enum demo_stream_mode stream_mode;
+  int stream_has_owner_delay;
+  unsigned long interval_ms;
   unsigned int turn_index;
   demo_charts_t charts;
   char chart[DEMO_CHART_CAPACITY];
@@ -710,7 +713,8 @@ static void hello(owner_t *o, const char *name, unsigned long delay_us,
     disconnect(o);
     return;
   }
-  o->delay_us = delay_us;
+  if (!o->stream_has_owner_delay && o->stream_mode == DEMO_STREAM_DEFAULT)
+    o->stream_initial_delay = (unsigned int)delay_us;
   o->interval_ms = interval_ms;
   if (!o->initialized) {
     srand(seed);
@@ -830,6 +834,16 @@ static void terminal_lock_command(owner_t *o, const char *text) {
 static void host_action(owner_t *o, const char *text, int at_seam, double now) {
   if (command_named(text, "/terminal-lock")) {
     terminal_lock_command(o, text);
+  } else if (command_named(text, "/stream")) {
+    unsigned int delay =
+        demo_stream_delay(o->stream_mode, o->stream_initial_delay);
+    enum demo_stream_mode mode = demo_stream_setting(text, delay);
+    if (mode != DEMO_STREAM_INVALID) {
+      o->stream_mode = mode;
+      if (demo_stream_delay(mode, o->stream_initial_delay) != delay)
+        o->next_piece = now;
+    }
+    text_event(o, DEMO_MESSAGE, demo_stream_message(mode));
   } else if (!strcmp(text, "/status")) {
     char line[256];
     (void)snprintf(line, sizeof(line),
@@ -870,9 +884,9 @@ static void host_action(owner_t *o, const char *text, int at_seam, double now) {
 static int ready(owner_t *o, item_t *item, int at_seam) {
   if (item->value.held || item->value.edit_held)
     return 0;
-  /* This policy can change while the remote prompt is waiting for the owner.
-   * It does not consume input or start a response. */
-  if (command_named(item->value.text, "/terminal-lock"))
+  /* Conversation settings can change even while prompt dispatch is gated. */
+  if (command_named(item->value.text, "/terminal-lock") ||
+      command_named(item->value.text, "/stream"))
     return 1;
   if (o->gated)
     return 0;
@@ -949,17 +963,22 @@ static void refresh(owner_t *o) {
   }
 }
 static void pump(owner_t *o, double now) {
-  char chunk[65];
-  size_t used = 0, budget = o->delay_us ? 1 : 64;
+  char chunk[DEMO_STREAM_DIRECT_BYTES + 1];
+  size_t used = 0, produced = 0, budget;
+  unsigned int delay;
   if (o->shell_requested && !o->active)
     handoff_shell(o, NULL);
   claim_ready(o, 0, now);
+  delay = demo_stream_delay(o->stream_mode, o->stream_initial_delay);
+  budget = now < o->next_piece ? 0
+           : delay             ? DEMO_STREAM_LLM_BYTES
+                               : DEMO_STREAM_DIRECT_BYTES;
   while (o->active && !o->waiting_gate && !producer_paused &&
-         now >= o->next_piece && budget--) {
+         produced < budget) {
     char byte = o->answer[o->answer_pos++];
     if (!o->attach_wait_seam)
       chunk[used++] = byte;
-    o->next_piece = now + (double)o->delay_us / 1000.0;
+    o->next_piece = now + (double)delay * ++produced / 1000.0;
     if (byte == '\n' && o->previous == '\n') {
       if (used) {
         chunk[used] = 0;
@@ -1009,6 +1028,7 @@ int main(int argc, char **argv) {
   long port = argc > 1 ? strtol(argv[1], &end, 10) : 7635;
   owner_t *o = calloc(1, sizeof(*o));
   const char *gate = getenv("SOFTLINE_CHAT_GATE_FD");
+  const char *stream_delay = getenv("SOFTLINE_CHAT_CHAR_MS");
   if (!o)
     return 1;
   if (argc > 2 || (argc > 1 && (!*argv[1] || *end)) || port < 0 ||
@@ -1025,7 +1045,8 @@ int main(int argc, char **argv) {
     return 1;
   }
   o->revision = 1;
-  o->delay_us = 20000;
+  o->stream_initial_delay = demo_stream_initial_delay(stream_delay);
+  o->stream_has_owner_delay = stream_delay && *stream_delay;
   o->gate_fd = -1;
   if (getenv("SOFTLINE_CHAT_TEST_COMPLETION_FD")) {
     const char *value = getenv("SOFTLINE_CHAT_TEST_COMPLETION_FD");

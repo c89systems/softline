@@ -172,6 +172,7 @@ cleanup:
 
 static int no_sleep(const char *chat, const char *guard, const char *theme) {
   int master = -1, slave = -1, status, result = 1, sent = 0, quit = 0;
+  int toggle = !strcmp(theme, "riced"), ready = 0;
   pid_t child = -1;
   struct winsize size;
   struct termios attributes;
@@ -195,7 +196,7 @@ static int no_sleep(const char *chat, const char *guard, const char *theme) {
     dup2(slave, 1);
     dup2(slave, 2);
     close(slave);
-    setenv("SOFTLINE_CHAT_CHAR_MS", "0", 1);
+    setenv("SOFTLINE_CHAT_CHAR_MS", toggle ? "20" : "0", 1);
     setenv("SOFTLINE_PROMPT_THEME", theme, 1);
     setenv("LD_PRELOAD", guard, 1);
     execl(chat, chat, (char *)NULL);
@@ -231,7 +232,14 @@ static int no_sleep(const char *chat, const char *guard, const char *theme) {
         plain[p++] = bytes[i];
     }
     plain[p] = 0;
-    if (!sent && strstr(plain, "> ")) {
+    if (toggle && !ready && strstr(plain, "> ")) {
+      static const char command[] = "/stream direct\r";
+      CHECK(write(master, command, sizeof(command) - 1) == sizeof(command) - 1,
+            "direct mode command failed");
+      ready = 1;
+    }
+    if (!sent && (toggle ? strstr(plain, "Streaming mode: direct.")
+                         : strstr(plain, "> "))) {
       CHECK(write(master, "hello\r", 6) == 6, "chat input failed");
       sent = 1;
     }

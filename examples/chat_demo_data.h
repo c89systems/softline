@@ -1,6 +1,18 @@
 #ifndef SOFTLINE_CHAT_DEMO_DATA_H
 #define SOFTLINE_CHAT_DEMO_DATA_H
+#include <errno.h>
+#include <stdlib.h>
 #include <string.h>
+
+#define DEMO_STREAM_DEFAULT_DELAY_US 20000u
+#define DEMO_STREAM_LLM_BYTES 4
+#define DEMO_STREAM_DIRECT_BYTES 64
+enum demo_stream_mode {
+  DEMO_STREAM_INVALID = -1,
+  DEMO_STREAM_DEFAULT = 0,
+  DEMO_STREAM_DIRECT,
+  DEMO_STREAM_LLM
+};
 static const char *const response_templates[] = {
     "# A short answer\n\nHere is *italic* context, **bold** emphasis, and "
     "`code` in one paragraph.\n\n## Next step\n\nTry another prompt.\n",
@@ -47,8 +59,48 @@ static int command_named(const char *line, const char *name) {
 
 static int is_local_command(const char *line) {
   return !strcmp(line, "/status") || !strcmp(line, "/resume") ||
-         command_named(line, "/approve") ||
+         command_named(line, "/approve") || command_named(line, "/stream") ||
          command_named(line, "/terminal-lock");
+}
+
+static unsigned int demo_stream_initial_delay(const char *value) {
+  char *end;
+  long milliseconds;
+  if (!value || !*value)
+    return DEMO_STREAM_DEFAULT_DELAY_US;
+  errno = 0;
+  milliseconds = strtol(value, &end, 10);
+  if (errno || end == value || *end || milliseconds < 0 || milliseconds > 60000)
+    return DEMO_STREAM_DEFAULT_DELAY_US;
+  return (unsigned int)milliseconds * 1000u;
+}
+
+static unsigned int demo_stream_delay(enum demo_stream_mode mode,
+                                      unsigned int initial_delay) {
+  if (mode == DEMO_STREAM_DIRECT)
+    return 0;
+  if (mode == DEMO_STREAM_LLM && !initial_delay)
+    return DEMO_STREAM_DEFAULT_DELAY_US;
+  return initial_delay;
+}
+
+static enum demo_stream_mode demo_stream_setting(const char *line,
+                                                 unsigned int delay) {
+  if (!strcmp(line, "/stream"))
+    return delay ? DEMO_STREAM_DIRECT : DEMO_STREAM_LLM;
+  if (!strcmp(line, "/stream direct"))
+    return DEMO_STREAM_DIRECT;
+  if (!strcmp(line, "/stream llm"))
+    return DEMO_STREAM_LLM;
+  return DEMO_STREAM_INVALID;
+}
+
+static const char *demo_stream_message(enum demo_stream_mode mode) {
+  if (mode == DEMO_STREAM_DIRECT)
+    return "Streaming mode: direct.";
+  if (mode == DEMO_STREAM_LLM)
+    return "Streaming mode: LLM simulation.";
+  return "Usage: /stream [direct|llm]";
 }
 
 static int terminal_lock_setting(const char *line, int enabled) {
