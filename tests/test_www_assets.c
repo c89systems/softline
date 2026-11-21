@@ -74,10 +74,16 @@ static int motion_assets(sl_www_t *plain, const sl_www_config_t *cfg,
         strstr(css, "#workspace { overflow: clip; }") &&
         strstr(css, ".message.user > .body:empty { visibility: hidden; }") &&
         strstr(css, ".message.user > .body:not(:empty)") &&
-        strstr(css, "#terminal-panel:not([hidden])") &&
-        strstr(css, "#transcripts:not([hidden])") &&
-        strstr(css, "opacity: 0; transform: translate(16px, 14px)") &&
-        strstr(css, "translateY(100%)") && strstr(css, "translateX(100%)"));
+        strstr(css, "animation: message-arrive 410ms") &&
+        strstr(css, "opacity: 0; transform: translate(16px, 14px)"));
+  CHECK(strstr(css,
+               "#terminal-panel:not([hidden]), #transcripts:not([hidden])") &&
+        strstr(css, "animation: split-open 540ms") &&
+        strstr(css, "@keyframes split-open") &&
+        strstr(css, "from { flex-basis: 0px; }") &&
+        strstr(css, "to { flex-basis: var(--pane-size); }") &&
+        strstr(css, ".terminal-frame { height: var(--pane-size); }") &&
+        strstr(css, ".transcript-content { width: var(--pane-size); }"));
   free(css);
   free(page);
   sl_www_destroy(animated);
@@ -218,6 +224,10 @@ int main(int argc, char **argv) {
           "id=\"terminal-panel\" aria-label=\"Server terminal panel\" hidden"));
   CHECK(strstr(css, "#workspace #chat{height:auto;flex:1;min-height:0}") &&
         strstr(css, "#terminal-panel{flex:none;") &&
+        strstr(css, "height:var(--pane-size,0px)") &&
+        strstr(css, "flex:0 0 var(--pane-size,clamp(220px,42%,720px))") &&
+        strstr(css, "#transcripts{flex-basis:var(--pane-size,38%)}") &&
+        !strstr(css, "split-open") &&
         !strstr(css, "@keyframes terminal-slide-up") &&
         strstr(css, "#composer[data-disabled=\"1\"]"));
   {

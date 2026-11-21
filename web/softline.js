@@ -412,7 +412,7 @@ function submit(steer = false, automatic = false) {
   if (new TextEncoder().encode(prompt.value).length > 128 * 1024) { toast('The prompt exceeds 128 KiB. Your draft is kept.'); return; }
   const request = sendPrompt(prompt.value, steer ? 'steer' : 'send');
   if (request) {
-    $('chat').dispatchEvent(new Event('softline:submit'));
+    $('chat').dispatchEvent(new Event('softline:composer-dock'));
     prompt.value = ''; prompt.setSelectionRange(0, 0); started();
     if (!automatic) state.follow = true;
     editor.reset();

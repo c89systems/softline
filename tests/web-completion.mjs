@@ -16,7 +16,11 @@ export async function runWebCompletionTests(source, completionSource, promptSour
   class Element extends Target {
     constructor() {
       super(); this.value = ''; this.selectionStart = this.selectionEnd = 0;
-      this.hidden = false; this.children = []; this.style = {}; this.dataset = {}; this.options = [];
+      this.hidden = false; this.children = []; this.dataset = {}; this.options = [];
+      this.style = {
+        getPropertyValue(name) { return this[name] || ''; },
+        setProperty(name, value) { this[name] = value; }
+      };
       this.scrollHeight = this.clientHeight = 36; this.scrollTop = 0;
       this.classList = { add() {}, remove() {} };
     }
@@ -309,7 +313,7 @@ export async function runWebCompletionTests(source, completionSource, promptSour
     ui.key('Enter'); await ui.idle();
     assert(ui.sent() === 'initial draft' && ui.prompt.value === '' && ui.animations.length === 1, 'first send did not dock the composer');
     const { keyframes, timing } = ui.animations[0];
-    assert(keyframes[0].translate === '0 -290px' && keyframes[1].translate === '0 0' && timing.duration === 440, 'dock did not animate from the measured welcome position');
+    assert(keyframes[0].translate === '0 -290px' && keyframes[1].translate === '0 0' && timing.duration === 540, 'dock did not animate from the measured welcome position');
     await ui.type('next prompt'); ui.key('Enter'); await ui.idle();
     assert(ui.sent() === 'next prompt' && ui.animations.length === 1, 'subsequent sends animated the already docked composer');
   }, { motion: true, motionLayout: true });
@@ -701,17 +705,27 @@ export async function runWebCompletionTests(source, completionSource, promptSour
     ui.event({ type: 'delta', id: 'live', role: 'user', text: 'feed continues' });
     assert(ui.get('messages').children.at(-1).children[0].textContent === 'feed continues', 'terminal paused the feed');
   });
+  const paneSize = pane => pane.style.getPropertyValue('--pane-size');
+  await check('opening the shell from the welcome screen moves the composer from its current position', async ui => {
+    await ui.type('keep this draft');
+    const frame = openTerminal(ui);
+    await ui.idle();
+    const panel = ui.get('terminal-panel');
+    assert(panel.children[0] === frame && paneSize(panel) === '490px' && ui.prompt.value === 'keep this draft', 'welcome split changed the shell or draft');
+    assert(ui.animations.length === 1 && ui.animations[0].keyframes[0].translate === '0 -290px', 'welcome composer snapped to the dock as the split opened');
+  }, { motion: true, motionLayout: true });
   await check('terminal uses 25 measured rows or one third of the viewport without hiding the prompt', async ui => {
     openTerminal(ui);
-    assert(ui.get('terminal-panel').style.height === '490px', 'initial panel still reserves the old header');
+    const panel = ui.get('terminal-panel');
+    assert(paneSize(panel) === '490px', 'initial panel still reserves the old header');
     terminalEvent(ui, { type: 'softline-terminal-size', rowHeight: 17, chromeHeight: 58 });
-    assert(ui.get('terminal-panel').style.height === '483px', 'panel did not reserve 25 measured rows plus chrome');
+    assert(paneSize(panel) === '483px', 'panel did not reserve 25 measured rows plus chrome');
     ui.window.innerHeight = 1800; ui.get('conversation-pane').rect.height = 1736; ui.window.fire('resize');
-    assert(ui.get('terminal-panel').style.height === '600px', 'large viewport did not reserve a third');
+    assert(paneSize(panel) === '600px', 'large viewport did not reserve a third');
     ui.window.innerHeight = 420; ui.get('conversation-pane').rect.height = 356; ui.window.fire('resize');
-    assert(parseFloat(ui.get('terminal-panel').style.height) <= 165, 'short viewport hid the prompt');
+    assert(parseFloat(paneSize(panel)) <= 165, 'short viewport hid the prompt');
     ui.get('composer-area').rect.height = 200; ui.resize(ui.get('composer-area'));
-    assert(parseFloat(ui.get('terminal-panel').style.height) <= 85, 'growing prompt overflowed the viewport');
+    assert(parseFloat(paneSize(panel)) <= 85, 'growing prompt overflowed the viewport');
   });
   await check('terminal stays below the prompt when the transcript stacks above chat', async ui => {
     openTerminal(ui);
@@ -720,7 +734,7 @@ export async function runWebCompletionTests(source, completionSource, promptSour
     const conversation = ui.get('conversation-pane');
     conversation.rect = { top: 350, height: 240 };
     ui.resize(conversation);
-    assert(ui.get('terminal-panel').style.height === '64px', 'terminal sized itself against the whole viewport');
+    assert(paneSize(ui.get('terminal-panel')) === '64px', 'terminal sized itself against the whole viewport');
     assert(!ui.get('transcripts').hidden && !ui.prompt.readOnly, 'opening both panes disabled the prompt');
   });
   function pointer(handle, type, position) {
@@ -732,26 +746,26 @@ export async function runWebCompletionTests(source, completionSource, promptSour
     ui.get('transcript-toggle').click();
     const handle = ui.get('transcript-divider'), panel = ui.get('transcripts');
     const workspace = ui.get('workspace'), shell = ui.get('terminal-panel');
-    assert(!handle.hidden && handle['aria-orientation'] === 'vertical' && panel.style.flexBasis === '430px', 'desktop divider did not appear');
+    assert(!handle.hidden && handle['aria-orientation'] === 'vertical' && paneSize(panel) === '430px', 'desktop divider did not appear');
     assert(pointer(handle, 'pointerdown', { clientX: 586 }).defaultPrevented &&
       handle.hasPointerCapture(3) && workspace.dataset.paneResizing === 'x', 'drag did not capture across the shell');
     pointer(handle, 'pointermove', { clientX: 486 });
-    assert(panel.style.flexBasis === '530px' && shell.children[0] === frame && shell.style.height === '490px', 'desktop drag changed the terminal session or height');
+    assert(paneSize(panel) === '530px' && shell.children[0] === frame && paneSize(shell) === '490px', 'desktop drag changed the terminal session or height');
     pointer(handle, 'pointermove', { clientX: 0 });
-    assert(panel.style.flexBasis === '696px', 'transcript could squeeze out the conversation');
+    assert(paneSize(panel) === '696px', 'transcript could squeeze out the conversation');
     pointer(handle, 'pointerup', { clientX: 0 });
     handle.fire('keydown', { key: 'ArrowRight', shiftKey: true });
-    assert(panel.style.flexBasis === '656px' && !workspace.dataset.paneResizing, 'keyboard resize or drag cleanup failed');
+    assert(paneSize(panel) === '656px' && !workspace.dataset.paneResizing, 'keyboard resize or drag cleanup failed');
     ui.narrow.matches = true;
     ui.narrow.fire('change');
-    const start = parseInt(panel.style.flexBasis);
+    const start = parseInt(paneSize(panel));
     assert(handle['aria-orientation'] === 'horizontal' && start === 267, 'mobile divider did not switch axes');
     pointer(handle, 'pointerdown', { clientY: 267 });
     pointer(handle, 'pointermove', { clientY: 313 });
-    assert(panel.style.flexBasis === '313px', 'stacked divider did not grow the transcript downwards');
+    assert(paneSize(panel) === '313px', 'stacked divider did not grow the transcript downwards');
     ui.narrow.matches = false;
     ui.narrow.fire('change');
-    assert(panel.style.flexBasis === '656px' && !handle.hasPointerCapture(3) && !workspace.dataset.paneResizing, 'axis change left a drag active or lost desktop size');
+    assert(paneSize(panel) === '656px' && !handle.hasPointerCapture(3) && !workspace.dataset.paneResizing, 'axis change left a drag active or lost desktop size');
     ui.get('transcript-close').click();
     assert(handle.hidden && shell.children[0] === frame, 'closing the transcript hid the terminal or left its divider visible');
   });
@@ -762,17 +776,17 @@ export async function runWebCompletionTests(source, completionSource, promptSour
     pointer(handle, 'pointerdown', { clientY: 278 });
     pointer(handle, 'pointermove', { clientY: 368 });
     pointer(handle, 'pointercancel', { clientY: 368 });
-    assert(panel.style.height === '400px' && panel.children[0] === frame &&
+    assert(paneSize(panel) === '400px' && panel.children[0] === frame &&
       !workspace.dataset.paneResizing && !handle.hasPointerCapture(3), 'terminal drag replaced the shell or left the drag active');
     terminalEvent(ui, { type: 'softline-terminal-size', rowHeight: 17, chromeHeight: 58 });
-    assert(panel.style.height === '400px', 'shell measurement overrode the dragged size');
+    assert(paneSize(panel) === '400px', 'shell measurement overrode the dragged size');
     handle.fire('keydown', { key: 'ArrowUp' });
-    assert(panel.style.height === '410px', 'Arrow Up did not grow the terminal');
+    assert(paneSize(panel) === '410px', 'Arrow Up did not grow the terminal');
     handle.fire('keydown', { key: 'End' });
-    assert(panel.style.height === '496px', 'End did not use the largest size available');
+    assert(paneSize(panel) === '496px', 'End did not use the largest size available');
     ui.get('composer-area').rect.height = 200;
     ui.resize(ui.get('composer-area'));
-    assert(panel.style.height === '416px', 'resized terminal crowded out the composer');
+    assert(paneSize(panel) === '416px', 'resized terminal crowded out the composer');
     pointer(handle, 'pointerdown', { clientY: 278 });
     terminalEvent(ui, { type: 'softline-terminal-closed' });
     assert(handle.hidden && !workspace.dataset.paneResizing, 'shell exit leaked the divider or capture');
@@ -791,11 +805,11 @@ export async function runWebCompletionTests(source, completionSource, promptSour
       ui.copiedText[1] === 'First **bold**\n\n`code`' && message.children[1].children.length === 1, 'copy depends on rendering or end duplicated the action');
   });
   await check('terminal messages validate source origin and bounded measurements', async ui => {
-    const frame = openTerminal(ui), height = ui.get('terminal-panel').style.height;
+    const frame = openTerminal(ui), panel = ui.get('terminal-panel'), height = paneSize(panel);
     for (const data of [{ type: 'softline-terminal-size', rowHeight: Infinity, chromeHeight: 20 }, { type: 'softline-terminal-size', rowHeight: 0, chromeHeight: 20 }, { type: 'softline-terminal-size', rowHeight: 18, chromeHeight: -2 }]) terminalEvent(ui, data);
     terminalEvent(ui, { type: 'softline-terminal-closed' }, frame.contentWindow, 'http://other.example');
     terminalEvent(ui, { type: 'softline-terminal-closed' }, {});
-    assert(ui.get('terminal-panel').children[0] === frame && ui.get('terminal-panel').style.height === height, 'untrusted event affected the panel');
+    assert(panel.children[0] === frame && paneSize(panel) === height, 'untrusted event affected the panel');
     terminalEvent(ui, { type: 'softline-terminal-closed' });
     assert(ui.get('terminal-panel').hidden && !ui.get('terminal-panel').children.length && ui.document.activeElement === ui.prompt, 'shell exit did not remove the panel and return focus');
     assert(frame.contentWindow.messages.some(message => message.data.type === 'softline-terminal-stop'), 'closing did not request transport teardown');

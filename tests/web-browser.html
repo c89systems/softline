@@ -90,6 +90,42 @@ window.WebSocket=class extends EventTarget {
 frame.srcdoc=(await (await fetch('/')).text()).replace('<head>','<head>'+bootstrap);
 await uiCheck('actual frontend starts with mock host',async()=>{await waitFor(()=>frame.contentWindow.softlineTestSocket&&frame.contentDocument.querySelector('#connection')?.textContent==='Connected')});
 function event(value){const w=frame.contentWindow;w.softlineTestSocket.dispatchEvent(new w.MessageEvent('message',{data:JSON.stringify(value)}))}
+function checkSplit(panel, neighbor, size, edge, contents) {
+  const animation = panel.getAnimations().find(item => item.animationName === 'split-open');
+  assert(animation, 'split has no opening animation');
+  const duration = animation.effect.getTiming().duration;
+  const measure = time => {
+    animation.currentTime = time;
+    return [panel.getBoundingClientRect()[size], neighbor.getBoundingClientRect()[size],
+      panel.getBoundingClientRect()[edge], contents.getBoundingClientRect()[size]];
+  };
+  try {
+    animation.pause();
+    const start = measure(0), middle = measure(duration / 2), end = measure(duration);
+    assert(start[0] < 1 && middle[0] > start[0] && middle[0] < end[0], 'pane bounds did not expand during the animation');
+    assert(start[1] > middle[1] && middle[1] > end[1], 'neighbor reserved the final split immediately');
+    assert(Math.abs(start[2] - end[2]) < 1 && Math.abs(middle[2] - end[2]) < 1, 'pane left its entry edge');
+    assert(Math.abs(start[3] - end[3]) < 1 && Math.abs(middle[3] - end[3]) < 1, 'pane contents resized during opening');
+  } finally { animation.finish(); }
+}
+const animatedSplits = frame.contentDocument.querySelector('link[href="./motion.css"]') &&
+  frame.contentWindow.matchMedia('(prefers-reduced-motion: no-preference)').matches;
+if (animatedSplits) await uiCheck('transcript split moves the conversation as it opens', async () => {
+  const doc = frame.contentDocument, panel = doc.querySelector('#transcripts');
+  const conversation = doc.querySelector('#conversation-pane'), toggle = doc.querySelector('#transcript-toggle');
+  const previousWidth = frame.style.width;
+  try {
+    for (const [width, size, edge] of [[760, 'width', 'right'], [360, 'height', 'top']]) {
+      frame.style.width = `${width}px`;
+      await waitFor(() => frame.contentWindow.matchMedia('(max-width: 640px)').matches === (width <= 640));
+      event({type:'transcript_open',id:'split',title:'Split fixture',rows:'25',columns:'80'});
+      toggle.click();
+      checkSplit(panel, conversation, size, edge, panel.querySelector('.transcript-content'));
+      event({type:'transcript_remove',id:'split'});
+      panel.getBoundingClientRect();
+    }
+  } finally { event({type:'transcript_remove',id:'split'}); frame.style.width = previousWidth; }
+});
 await uiCheck('terminal docks below the composer and fits short and tall viewports',async()=>{
   const doc=frame.contentDocument,w=frame.contentWindow,p=doc.querySelector('#prompt');
   let metrics;
@@ -99,6 +135,7 @@ await uiCheck('terminal docks below the composer and fits short and tall viewpor
   event({type:'capabilities',terminal:'/terminal'});
   p.dispatchEvent(new w.KeyboardEvent('keydown',{key:'`',code:'Backquote',ctrlKey:true,bubbles:true,cancelable:true}));
   const panel=doc.querySelector('#terminal-panel');
+  if (animatedSplits) checkSplit(panel, doc.querySelector('#chat'), 'height', 'bottom', panel.querySelector('iframe'));
   await waitFor(()=>!panel.hidden&&panel.querySelector('iframe')?.contentDocument?.querySelector('.xterm-screen'));
   const terminalFrame=panel.querySelector('iframe');
   const terminalDocument=terminalFrame.contentDocument,grid=terminalDocument.querySelector('#terminal'),footer=terminalDocument.querySelector('.terminal-footer');

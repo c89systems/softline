@@ -73,11 +73,12 @@ web = sl_www_create(&config);
 
 Use `sl_www_create_with_flags(&config, SL_WWW_ANIMATIONS)` to serve the animated
 chat page. The handler adds the separate motion stylesheet and module to the
-page it serves at `/`. The composer flies down on its first successful send
-from the welcome screen, user bubbles glide and fade into place, and the shell
-and transcript slide in from the bottom and right. The motion respects the
-browser’s reduced-motion preference. Sending and paced typing keep their usual
-timing.
+page it serves at `/`. The composer moves into place on the first successful
+send or when opening a shell from the welcome screen, and user bubbles glide
+and fade into place. The shell split opens from the bottom and the transcript
+split opens from the right, or from the top when stacked on narrow screens.
+The motion respects the browser’s reduced-motion preference. Sending and paced
+typing keep their usual timing.
 
 For Kore, use `http_response_header`/`http_response` for immutable assets and
 `kore_websocket_handshake` with connect/message/disconnect callbacks for events.
@@ -380,7 +381,9 @@ inventory and key sequences also run through real native PTY readline in
 already available; no JavaScript packages or runtime are installed. These tests
 do not prove browser layout or real browser event integration.
 `make run-web-checks` serves a browser Markdown/chart and client-interaction
-check page using the mock listener. Run that page and the following UX checks
+check page using the mock listener. Use
+`SOFTLINE_WEB_ANIMATIONS=1 make run-web-checks` to include animated split geometry
+checks. Run that page and the following UX checks
 after moving to a browser-capable host; no Chrome or browser libraries are
 installed by this project:
 

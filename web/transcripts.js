@@ -76,7 +76,9 @@ export class Transcripts {
     const preferred = this.sizes[axis] ?? (stacked
       ? workspace.height * .38 : Math.min(720, Math.max(220, workspace.width * .42)));
     const size = Math.floor(Math.min(maximum, Math.max(minimum, preferred)));
-    if (this.panel.style.flexBasis !== `${size}px`) this.panel.style.flexBasis = `${size}px`;
+    const value = `${size}px`;
+    if (this.panel.style.getPropertyValue('--pane-size') !== value)
+      this.panel.style.setProperty('--pane-size', value);
     this.divider.update(axis, stacked ? 1 : -1, size, minimum, maximum);
   }
 

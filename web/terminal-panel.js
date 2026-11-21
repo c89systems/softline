@@ -37,9 +37,11 @@ export class TerminalPanel {
     frame.title = 'Server terminal'; frame.className = 'terminal-frame';
     frame.addEventListener('load', () => this.theme());
     frame.src = url.href;
+    const chat = this.document.getElementById('chat');
+    chat.dispatchEvent(new Event('softline:composer-dock'));
     this.frame = frame; this.panel.replaceChildren(frame); this.panel.hidden = false;
     this.handle.hidden = false;
-    this.document.getElementById('chat').classList.remove('welcome-state');
+    chat.classList.remove('welcome-state');
     this.resize();
     frame.focus({ preventScroll: true });
   }
@@ -55,7 +57,8 @@ export class TerminalPanel {
     const preferred = this.height ?? Math.max(25 * this.rowHeight + this.chromeHeight, viewport / 3);
     const height = Math.floor(Math.min(maximum, Math.max(minimum, preferred)));
     const value = `${height}px`;
-    if (this.panel.style.height !== value) this.panel.style.height = value;
+    if (this.panel.style.getPropertyValue('--pane-size') !== value)
+      this.panel.style.setProperty('--pane-size', value);
     this.divider.update('y', -1, height, minimum, maximum);
   }
   theme() {
