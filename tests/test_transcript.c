@@ -15,6 +15,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <termios.h>
+#include <time.h>
 #include <unistd.h>
 
 #define CHECK(expression)                                                      \
@@ -31,7 +32,8 @@
 
 typedef struct fixture {
   sl_transcript_id_t log, worker;
-  int master, phase, handoff;
+  int master, phase, handoff, viewer_idle_ticks;
+  double queue_started;
   size_t length;
   char output[16384];
 } fixture_t;
@@ -62,6 +64,12 @@ static void advance(fixture_t *f, const char *input) {
   keys(f, input);
 }
 
+static double milliseconds(void) {
+  struct timespec now;
+  CHECK(clock_gettime(CLOCK_MONOTONIC, &now) == 0);
+  return now.tv_sec * 1000.0 + now.tv_nsec / 1000000.0;
+}
+
 static int shell_key(sl_t *sl, sl_key_t key, void *context,
                      sl_key_action_t *action) {
   fixture_t *f = context;
@@ -89,12 +97,17 @@ static void drive(sl_t *sl, void *context) {
   switch (f->phase) {
   case 0:
     CHECK(!sl_transcript_visible(sl));
+    CHECK(sl_prompt_queue_append(sl, "queued-marker", 0, NULL) == SL_OK);
+    f->queue_started = milliseconds();
     advance(f, "draft\024");
     break;
   case 1:
     CHECK(sl_transcript_visible(sl));
     CHECK(strstr(f->output, "\033[?1049h") && strstr(f->output, "1/2 Log"));
     CHECK(strstr(f->output, "plain   text") && !strstr(f->output, "\033[31m"));
+    CHECK(!strstr(f->output, "queued-marker") && ++f->viewer_idle_ticks <= 24);
+    if (milliseconds() - f->queue_started < 850)
+      break;
     CHECK(sl_output_stream_write(sl, "hidden", 6) == SL_ERROR_NOT_READY);
     CHECK(sl_print_above(sl, unexpected_print, NULL) == SL_ERROR_NOT_READY);
     CHECK(TEXT(sl, f->log, "live chunk\n") == SL_OK);
@@ -126,6 +139,8 @@ static void drive(sl_t *sl, void *context) {
     break;
   case 6:
     CHECK(!sl_transcript_visible(sl) && strstr(f->output, "\033[?1049l"));
+    CHECK(strstr(f->output, "queued-marker"));
+    CHECK(sl_prompt_queue_clear(sl) == SL_OK);
     CHECK(sl_output_stream_write(sl, "after viewer\n", 13) == SL_OK);
     advance(f, "\024");
     break;
@@ -165,8 +180,12 @@ int main(void) {
   sl_config_init(&config);
   config.input_fd = config.output_fd = slave;
   config.prompt_theme = SL_PROMPT_THEME_PLAIN;
+  config.prompt_queue = 1;
+  config.prompt_queue_display_delay_ms = 500;
   sl = sl_create_with_config(&config);
   CHECK(sl);
+  CHECK(sl_set_prompt_queue_delivery(sl, SL_PROMPT_QUEUE_DELIVERY_MANUAL) ==
+        SL_OK);
   CHECK(sl_transcript_add(sl, "invalid", 0, 32, &rejected) == SL_ERROR_INVALID);
   CHECK(sl_transcript_add(sl, "Log", 6, 42, &f.log) == SL_OK);
   CHECK(sl_transcript_add(sl, "Worker", 6, 42, &f.worker) == SL_OK);

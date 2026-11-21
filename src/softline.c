@@ -4430,9 +4430,13 @@ static int sl_render_apply(sl_t *self, const char *prompt) {
   impl = sl_impl(self);
   if (!impl)
     return -1;
-  if (sl_transcript_visible(self))
+  if (sl_transcript_visible(self)) {
+    /* The alternate screen has no queue preview to repaint at this deadline. */
+    impl->prompt_queue.display_deadline = 0;
+    impl->prompt_queue.display_visible = 0;
     return sl_transcript_paint(self, sl_terminal_rows(impl),
                                sl_terminal_columns(impl));
+  }
   if (!impl->retained_prompt || strcmp(impl->retained_prompt, prompt) != 0) {
     char *copy = sl_strdup(prompt);
     if (!copy) {
