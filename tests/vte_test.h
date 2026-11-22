@@ -159,13 +159,12 @@ static struct screen create(void) {
   }
   return s;
 }
-static void resize_geometry(struct screen *s, int columns, int rows) {
+static void resize(struct screen *s, int columns, int rows) {
   int pixels = v.width(s->terminal) + (columns - (int)v.columns(s->terminal)) *
                                           (int)v.char_width(s->terminal);
   double deadline = now() + 2;
   int height = v.height(s->terminal) + (rows - (int)v.rows(s->terminal)) *
                                            (int)v.char_height(s->terminal);
-  v.size(s->terminal, columns, rows);
   v.resize(s->window, pixels, height);
   do {
     pump_once();
@@ -175,10 +174,6 @@ static void resize_geometry(struct screen *s, int columns, int rows) {
     fprintf(stderr, "VTE resize did not settle\n");
     ++errors;
   }
-}
-static void resize(struct screen *s, int columns, int rows) {
-  resize_geometry(s, columns, rows);
-  pump();
 }
 static struct snapshot snapshot(struct screen *s, int handoff) {
   struct snapshot result;

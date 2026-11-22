@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #define _POSIX_C_SOURCE 200809L
 
+#include "silent_cursor_probe.h"
 #include "softline/softline.h"
 
 #include <assert.h>
@@ -11367,11 +11368,13 @@ int main(int argc, char **argv) {
   test_live_output_end_restores_unbounded_cursor();
   test_unbounded_finite_output_preserves_active_prompt();
   test_idle_callback_prints_above_active_prompt();
+  CURSOR_REPLIES_REAL(1);
   test_normal_prompt_pins_at_bottom_for_live_output();
 #if SL_TEST_PTY
   test_pinned_stream_failure_restores_prompt_cursor();
 #endif
   test_cursor_probe_preserves_concurrent_queue_input();
+  CURSOR_REPLIES_REAL(0);
   test_utf8_input_and_backspace();
   test_utf8_swedish_input_is_rendered_as_full_sequences();
   test_unicode_width_wraps_japanese_and_emoji();

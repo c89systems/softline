@@ -1,5 +1,7 @@
 #define _DEFAULT_SOURCE
+#include "poll_clock.h"
 #include <errno.h>
+#include <fcntl.h>
 #include <poll.h>
 #include <pty.h>
 #include <signal.h>
@@ -41,6 +43,13 @@ static double milliseconds(void) {
   struct timespec now;
   clock_gettime(CLOCK_MONOTONIC, &now);
   return now.tv_sec * 1000.0 + now.tv_nsec / 1000000.0;
+}
+static int announce_ready(int fd) {
+  struct clock_event event = {'R', 0};
+  event.now = (long)milliseconds();
+  return write(fd, &event, sizeof(event)) == (ssize_t)sizeof(event)
+             ? SL_OK
+             : SL_ERROR_IO;
 }
 static int request(void *context, const sl_queue_request_t *value) {
   struct host *host = context;
@@ -121,8 +130,8 @@ static int command(sl_t *sl, const sl_watch_event_t *event, void *context) {
                 (unsigned long)sl_prompt_queue_count(sl), status);
         return SL_ERROR;
       }
-    if (status == SL_OK && write(host->events, "R", 1) != 1)
-      status = SL_ERROR_IO;
+    if (status == SL_OK)
+      status = announce_ready(host->events);
   } else if (key == 'C') {
     if (host->scenario == SNAPSHOT_FAST)
       status = snapshot(sl, host, 0);
@@ -238,6 +247,7 @@ static void child(int slave, int commands, int events, int scenario,
   } while (0)
 static int run(int scenario, int native) {
   int master = -1, slave = -1, commands[2] = {-1, -1}, events[2] = {-1, -1};
+  int clock_pipe[2] = {-1, -1}, pending_input = 0;
   int failed = 1, status, sent = 0, changed = 0, finished = 0, updates = 0;
   pid_t pid = -1;
   char *output = calloc(1, 65536);
@@ -255,13 +265,22 @@ static int run(int scenario, int native) {
           ? "S 1. second-marker"
           : "S 2. second-marker";
   REQUIRE(output && openpty(&master, &slave, NULL, NULL, &size) == 0);
+  REQUIRE(fcntl(master, F_SETFL, O_NONBLOCK) == 0);
   REQUIRE(pipe(commands) == 0 && pipe(events) == 0);
+#ifdef SOFTLINE_TEST_POLL_CLOCK
+  REQUIRE(pipe(clock_pipe) == 0);
+#endif
   pid = fork();
   REQUIRE(pid >= 0);
   if (!pid) {
     close(master);
     close(commands[1]);
     close(events[0]);
+#ifdef SOFTLINE_TEST_POLL_CLOCK
+    close(clock_pipe[1]);
+    clock_events = events[1];
+    clock_control = clock_pipe[0];
+#endif
     child(slave, commands[0], events[1], scenario, native);
   }
   close(slave);
@@ -270,10 +289,15 @@ static int run(int scenario, int native) {
   commands[0] = -1;
   close(events[1]);
   events[1] = -1;
+  if (clock_pipe[0] >= 0) {
+    close(clock_pipe[0]);
+    clock_pipe[0] = -1;
+  }
   while (milliseconds() < deadline) {
     struct pollfd fds[2];
     double elapsed;
     pid_t exited;
+    struct clock_event event = {0, 0};
     fds[0].fd = master;
     fds[0].events = POLLIN;
     fds[0].revents = 0;
@@ -281,12 +305,15 @@ static int run(int scenario, int native) {
     fds[1].events = POLLIN;
     fds[1].revents = 0;
     REQUIRE(poll(fds, 2, 10) >= 0);
-    if (fds[0].revents & POLLIN) {
+    if (fds[1].revents & POLLIN)
+      REQUIRE(read(events[0], &event, sizeof(event)) == (ssize_t)sizeof(event));
+    if ((fds[0].revents & POLLIN) || event.kind == 'P') {
       const char *query;
-      ssize_t count = read(master, output + used, 65535 - used);
-      if (count > 0)
+      ssize_t count;
+      while ((count = read(master, output + used, 65535 - used)) > 0) {
         used += (size_t)count;
-      REQUIRE(used < 65535);
+        REQUIRE(used < 65535);
+      }
       output[used] = 0;
       while ((query = strstr(output + scanned, "\033[6n")) != NULL) {
         REQUIRE(write(master, "\033[1;1R", 6) == 6);
@@ -296,13 +323,14 @@ static int run(int scenario, int native) {
     if (!sent && strstr(output, "delay> ")) {
       REQUIRE(write(commands[1], "S", 1) == 1);
       sent = 1;
+      pending_input = 1;
     }
-    if (fds[1].revents & POLLIN) {
-      char event;
-      REQUIRE(read(events[0], &event, 1) == 1 && event == 'R');
-      started = milliseconds();
-    }
-    elapsed = milliseconds() - started;
+    if (event.kind == 'R')
+      started = event.now;
+    elapsed =
+        (clock_pipe[1] >= 0 ? (double)event.now : milliseconds()) - started;
+    if (clock_pipe[1] >= 0 && event.kind != 'P')
+      goto check_exit;
     if (started && first < 0 && strstr(output, marker))
       first = elapsed;
     if (started && second < 0 && strstr(output, second_marker))
@@ -321,12 +349,14 @@ static int run(int scenario, int native) {
         if (first >= 0 && !changed) {
           REQUIRE(write(commands[1], scenario == VISIBLE_RESET ? "C" : "L",
                         1) == 1);
+          pending_input = 1;
           changed = 1;
           if (scenario != VISIBLE_RESET)
             appended = elapsed;
         } else if (scenario == VISIBLE_RESET && changed == 1 &&
                    elapsed - first >= 100) {
           REQUIRE(write(commands[1], "L", 1) == 1);
+          pending_input = 1;
           changed = 2;
           appended = elapsed;
         }
@@ -368,22 +398,27 @@ static int run(int scenario, int native) {
                     : write(commands[1], scenario == RECONFIGURE ? "Z" : "C",
                             1) == 1);
         changed = 1;
+        pending_input = 1;
       }
       if (!changed && scenario == INDEPENDENT && elapsed >= 250) {
         REQUIRE(write(commands[1], "L", 1) == 1);
         changed = 1;
+        pending_input = 1;
       }
       if (scenario == SPLIT_ESCAPE) {
         if (!changed && elapsed >= 450) {
           REQUIRE(write(master, "\033", 1) == 1);
           changed = 1;
+          pending_input = 1;
         } else if (changed == 1 && elapsed >= 520) {
           REQUIRE(write(master, "e", 1) == 1);
           changed = 2;
+          pending_input = 1;
         }
       }
       if (scenario == SNAPSHOT && first < 0 && elapsed >= (updates + 1) * 100) {
         REQUIRE(write(commands[1], "U", 1) == 1);
+        pending_input = 1;
         ++updates;
       }
       if (finished) {
@@ -394,8 +429,19 @@ static int run(int scenario, int native) {
         if (scenario == SPLIT_ESCAPE)
           REQUIRE(elapsed >= 500 && elapsed < 900);
         REQUIRE(write(commands[1], "X", 1) == 1);
+        pending_input = 1;
       }
     }
+    if (clock_pipe[1] >= 0) {
+      struct clock_step step;
+      REQUIRE(!started || elapsed < 3000);
+      step.advance = pending_input ? 0 : 10;
+      step.ready = pending_input;
+      REQUIRE(write(clock_pipe[1], &step, sizeof(step)) ==
+              (ssize_t)sizeof(step));
+      pending_input = 0;
+    }
+  check_exit:
     exited = waitpid(pid, &status, WNOHANG);
     if (exited == pid) {
       pid = -1;
@@ -424,6 +470,10 @@ cleanup:
     close(events[0]);
   if (events[1] >= 0)
     close(events[1]);
+  if (clock_pipe[0] >= 0)
+    close(clock_pipe[0]);
+  if (clock_pipe[1] >= 0)
+    close(clock_pipe[1]);
   free(output);
   return failed;
 }

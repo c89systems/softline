@@ -56,9 +56,16 @@ grep -Fq "\"abi_version\": \"$abi\"" "$work/install/share/softline/package-metad
 "$cmake" "${args[@]}"
 "$cmake" --build "$build" --parallel 4
 [[ ! -s "$COMPILER_CALLS" ]]
-rm "$build/private-cares/softline_cares_namespace.h"
-"$cmake" --build "$build" --parallel 4
-[[ -f "$build/private-cares/softline_cares_namespace.h" ]]
+namespace="$build/private-cares/softline_cares_namespace.h"
+cp -p "$namespace" "$work/namespace"
+rm "$namespace"
+"$cmake" --build "$build" -- -t query private-cares/softline_cares_namespace.h > "$work/recovery-plan"
+grep -q 'input: CUSTOM_COMMAND' "$work/recovery-plan"
+"$cmake" --build "$build" --target sl_cares_namespace
+cmp "$work/namespace" "$namespace"
+# The regenerated header is identical. Avoid compiling the resolver again
+# when checking that changing the export map relinks the library.
+touch -r "$work/namespace" "$namespace"
 sed -i "/^$symbol\$/d" "$work/source/cmake/softline.exports"
 "$cmake" --build "$build" --parallel 1
 if grep -q "$symbol" "$map"; then echo 'ERROR: map did not regenerate' >&2; exit 1; fi

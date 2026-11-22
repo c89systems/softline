@@ -24,12 +24,19 @@ fi
 # Verify all required library names and imported libc versions. Resolve inspection
 # tooling only for ELF inputs; synthetic text fixtures need no compiler collection.
 declare -A providers=() provided_versions=()
+elf_files=()
+while IFS= read -r -d '' file; do
+  providers[${file##*/}]=1
+  magic=
+  LC_ALL=C IFS= read -r -n 4 -d '' magic < "$file" || :
+  if [[ "$magic" == $'\x7fELF' ]]; then elf_files+=("$file"); fi
+done < <(find "$root" -type f -print0)
 while IFS= read -r -d '' file; do
   [[ -f "$file" ]] || continue
   resolved=$(readlink -f "$file")
   [[ "$resolved" == "$root/"* ]] || continue
   providers[${file##*/}]=1
-done < <(find "$root" \( -type f -o -type l \) -print0)
+done < <(find "$root" -type l -print0)
 readelf=${SOFTLINE_READELF:-}
 resolve_readelf() {
   [[ -z "$readelf" ]] || return 0
@@ -45,9 +52,7 @@ if [[ -f "$libc" ]]; then
     [[ -z "$version" ]] || provided_versions[$version]=1
   done < <(awk '/Version definition section/ { definitions=1; next } /Version needs section/ { definitions=0 } definitions { for(i=1;i<NF;i++) if($i=="Name:" && $(i+1) ~ /^GLIBC_/) print $(i+1) }' <<< "$versions")
 fi
-while IFS= read -r -d '' file; do
-  magic=$(od -An -tx1 -N4 "$file" | tr -d ' \n')
-  [[ "$magic" == 7f454c46 ]] || continue
+for file in "${elf_files[@]}"; do
   resolve_readelf
   dynamic=$("$readelf" -d "$file")
   versions=$("$readelf" --version-info "$file")
@@ -61,4 +66,4 @@ while IFS= read -r -d '' file; do
       echo "ERROR: ${file#$root/}: required library $library is not staged" >&2; exit 1;
     }
   done < <(sed -n 's/.*(NEEDED).*\[\([^]]*\)\].*/\1/p' <<< "$dynamic")
-done < <(find "$root" -type f -print0)
+done

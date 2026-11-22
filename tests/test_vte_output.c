@@ -1,7 +1,11 @@
 #include "vte_output_sync.h"
+struct frames {
+  struct snapshot normal, grown;
+};
+
 static int render(const char *fixture, const char *source, int chunk,
                   int handoff, int grow, int tabs, const char *initial,
-                  struct snapshot *result) {
+                  struct frames *result) {
   struct screen s = create();
   int master = -1, slave = -1, status = 0, failed = 0;
   pid_t child = -1;
@@ -104,9 +108,11 @@ static int render(const char *fixture, const char *source, int chunk,
       }
     }
   }
-  if (grow)
+  result->normal = snapshot(&s, handoff);
+  if (grow) {
     resize(&s, 80, 8);
-  *result = snapshot(&s, handoff);
+    result->grown = snapshot(&s, handoff);
+  }
 cleanup:
   if (child > 0) {
     kill(child, SIGTERM);
@@ -118,11 +124,17 @@ cleanup:
   v.destroy(s.window);
   return failed;
 }
+static int frames_equal(const struct snapshot *expected,
+                        const struct snapshot *actual) {
+  return expected->row == actual->row && expected->column == actual->column &&
+         !strcmp(expected->text, actual->text);
+}
+
 static int compare_expected(const char *fixture, const char *source,
                             int handoff, int grow, int tabs,
                             const char *initial,
-                            const struct snapshot *expected) {
-  struct snapshot actual;
+                            const struct frames *expected) {
+  struct frames actual;
   int chunks[4], index, previous;
   chunks[0] = 1;
   chunks[1] = 4;
@@ -139,14 +151,12 @@ static int compare_expected(const char *fixture, const char *source,
     if (render(fixture, source, chunks[index], handoff, grow, tabs, initial,
                &actual))
       return 1;
-    if (expected->row != actual.row || expected->column != actual.column ||
-        strcmp(expected->text, actual.text)) {
+    if (!frames_equal(&expected->normal, &actual.normal) ||
+        (grow && !frames_equal(&expected->grown, &actual.grown))) {
       fprintf(stderr,
               "Native/direct VTE mismatch: chunk=%d handoff=%d grow=%d tabs=%d "
-              "source=%s\nexpected=(%ld,%ld) %s\nactual=(%ld,%ld) %s\n",
-              chunks[index], handoff, grow, tabs, source, expected->row,
-              expected->column, expected->text, actual.row, actual.column,
-              actual.text);
+              "source=%s\n",
+              chunks[index], handoff, grow, tabs, source);
       return 1;
     }
   }
@@ -154,7 +164,7 @@ static int compare_expected(const char *fixture, const char *source,
 }
 static int compare(const char *fixture, const char *source, int handoff,
                    int grow, int tabs, const char *initial) {
-  struct snapshot expected;
+  struct frames expected;
   if (render(fixture, source, 0, handoff, grow, tabs, initial, &expected))
     return 1;
   return compare_expected(fixture, source, handoff, grow, tabs, initial,
@@ -260,24 +270,23 @@ cleanup:
 }
 static int unicode_case(const char *fixture, const char *trace,
                         const char *mode, const char *producer,
-                        const char *source, int chunk, int filled) {
-  struct unicode_result expected, actual;
-  if (unicode_render(fixture, trace, "direct", producer, source, chunk, filled,
-                     &expected) ||
-      unicode_render(fixture, trace, mode, producer, source, chunk, filled,
+                        const char *source, int chunk, int filled,
+                        const struct unicode_result *expected) {
+  struct unicode_result actual;
+  if (unicode_render(fixture, trace, mode, producer, source, chunk, filled,
                      &actual))
     return 1;
-  if (strcmp(actual.before.text, expected.before.text) ||
-      strcmp(actual.after.text, expected.after.text) ||
-      actual.length != expected.length ||
-      memcmp(actual.bytes, expected.bytes, actual.length)) {
+  if (strcmp(actual.before.text, expected->before.text) ||
+      strcmp(actual.after.text, expected->after.text) ||
+      actual.length != expected->length ||
+      memcmp(actual.bytes, expected->bytes, actual.length)) {
     fprintf(
         stderr,
         "Unicode mismatch: mode=%s producer=%s chunk=%d filled=%d source=%s\n"
         "Before expected: %s\nBefore actual: %s\nAfter expected: %s\nAfter "
         "actual: %s\n",
-        mode, producer, chunk, filled, source, expected.before.text,
-        actual.before.text, expected.after.text, actual.after.text);
+        mode, producer, chunk, filled, source, expected->before.text,
+        actual.before.text, expected->after.text, actual.after.text);
     return 1;
   }
   return 0;
@@ -324,21 +333,30 @@ static int unicode_cases(const char *fixture, const char *build) {
   }
   strcpy(trace, work);
   strcat(trace, "/trace.bytes");
+  /* Raw writes emit the same bytes at either chunk size. libmdf gets
+   * a separate direct comparison for each of its input chunk sizes. */
   for (producer = 0; producer < 2 && !failed; ++producer) {
     const char **sources = producer ? markdown : raw;
+    const char *kind = producer ? "mdf" : "raw";
     count = producer ? sizeof(markdown) / sizeof(markdown[0])
                      : sizeof(raw) / sizeof(raw[0]);
     for (index = 0; index < count && !failed; ++index)
-      for (chunk = 0; chunk < 2 && !failed; ++chunk)
-        for (filled = 0; filled < 2 && !failed; ++filled)
-          failed = unicode_case(
-              fixture, trace, "active", producer ? "mdf" : "raw",
-              sources[index], chunk ? (int)strlen(sources[index]) : 1, filled);
+      for (filled = 0; filled < 2 && !failed; ++filled) {
+        struct unicode_result expected;
+        const char *source = sources[index];
+        for (chunk = 0; chunk < 2 && !failed; ++chunk) {
+          int bytes = chunk ? (int)strlen(source) : 1;
+          failed = ((!chunk || producer) &&
+                    unicode_render(fixture, trace, "direct", kind, source,
+                                   bytes, filled, &expected)) ||
+                   unicode_case(fixture, trace, "active", kind, source, bytes,
+                                filled, &expected);
+        }
+        if (!failed && !producer && index < 4)
+          failed = unicode_case(fixture, trace, "interrupted", kind, source, 1,
+                                filled, &expected);
+      }
   }
-  for (index = 0; index < 4 && !failed; ++index)
-    for (filled = 0; filled < 2 && !failed; ++filled)
-      failed = unicode_case(fixture, trace, "interrupted", "raw", raw[index], 1,
-                            filled);
   unlink(trace);
   rmdir(work);
   return failed || errors;
@@ -514,10 +532,18 @@ cleanup:
   pump();
   return failed || errors;
 }
+static int matches_content(const struct snapshot *frame, const char *content) {
+  const char *p;
+  for (p = frame->text; *p; ++p)
+    if (*p != '\n' && *p != *content++)
+      return 0;
+  return *content == 0;
+}
+
 static int boundaries(const char *fixture) {
   char text[2048], initial[41];
   const char *glyphs[] = {"🇸🇪", "👩‍💻", "❤️", "1️⃣"};
-  int sample, index, handoff, grow;
+  int sample, index, handoff;
   for (sample = 0; sample < 8; ++sample) {
     text[0] = 0;
     if (sample < 4) {
@@ -534,32 +560,26 @@ static int boundaries(const char *fixture) {
         strcat(text, glyphs[sample - 4]);
       strcat(text, "X");
     }
-    for (handoff = 0; handoff < 2; ++handoff)
-      for (grow = 0; grow <= !handoff; ++grow) {
-        struct snapshot expected;
-        char flat[32768], content[2050];
-        size_t used = 0, byte;
-        if (render(fixture, text, 0, handoff, grow, 0, NULL, &expected))
-          return 1;
-        for (byte = 0; expected.text[byte]; ++byte)
-          if (expected.text[byte] != '\n')
-            flat[used++] = expected.text[byte];
-        flat[used] = 0;
-        strcpy(content, text);
-        if (handoff)
-          strcat(content, "Y");
-        if (strcmp(flat, content) ||
-            compare_expected(fixture, text, handoff, grow, 0, NULL, &expected))
-          return 1;
-      }
+    for (handoff = 0; handoff < 2; ++handoff) {
+      struct frames expected;
+      char content[2050];
+      strcpy(content, text);
+      if (handoff)
+        strcat(content, "Y");
+      if (render(fixture, text, 0, handoff, !handoff, 0, NULL, &expected) ||
+          !matches_content(&expected.normal, content) ||
+          (!handoff && !matches_content(&expected.grown, content)) ||
+          compare_expected(fixture, text, handoff, !handoff, 0, NULL,
+                           &expected))
+        return 1;
+    }
   }
   for (sample = 39; sample <= 40; ++sample) {
     memset(initial, 'a', (size_t)sample);
     initial[sample] = 0;
     for (handoff = 0; handoff < 2; ++handoff)
-      for (grow = 0; grow <= !handoff; ++grow)
-        if (compare(fixture, "X", handoff, grow, 0, initial))
-          return 1;
+      if (compare(fixture, "X", handoff, !handoff, 0, initial))
+        return 1;
   }
   return errors != 0;
 }
@@ -576,7 +596,7 @@ int main(int argc, char **argv) {
                          "中🏳X"};
   char wrapped[128];
   size_t index;
-  int handoff, grow;
+  int handoff;
   if ((argc != 3 && argc != 4) || load())
     return 2;
   if (argc == 4)
@@ -597,28 +617,26 @@ int main(int argc, char **argv) {
                             "aaaaaaaaaaaaaaaaaaaaaaaaaaa中中\r"
                             "bbbbbbbbbbbbbbbbbbbbbbbbbbbb",
                             "\t\t\tX", "é👩‍💻🇸🇪中"};
-    for (grow = 0; grow <= 1; ++grow)
-      for (index = 0; index < sizeof(opaque) / sizeof(opaque[0]); ++index)
-        if (compare(argv[2], opaque[index], 0, grow, 0, NULL))
-          return 1;
+    for (index = 0; index < sizeof(opaque) / sizeof(opaque[0]); ++index)
+      if (compare(argv[2], opaque[index], 0, 1, 0, NULL))
+        return 1;
   } else if (!strcmp(argv[1], "native")) {
     memset(wrapped, 'a', 40);
     wrapped[40] = 0;
-    for (handoff = 0; handoff <= 1; ++handoff)
-      for (grow = 0; grow <= !handoff; ++grow) {
-        for (index = 0; index < sizeof(cases) / sizeof(cases[0]); ++index)
-          if (compare(argv[2], cases[index], handoff, grow, 0, NULL))
-            return 1;
-        if (compare(argv[2], wrapped, handoff, grow, 0, NULL))
+    for (handoff = 0; handoff <= 1; ++handoff) {
+      for (index = 0; index < sizeof(cases) / sizeof(cases[0]); ++index)
+        if (compare(argv[2], cases[index], handoff, !handoff, 0, NULL))
           return 1;
-        wrapped[40] = 'X';
-        wrapped[41] = 0;
-        if (compare(argv[2], wrapped, handoff, grow, 0, NULL))
-          return 1;
-        wrapped[40] = 0;
-        if (compare(argv[2], "X", handoff, grow, 0, wrapped))
-          return 1;
-      }
+      if (compare(argv[2], wrapped, handoff, !handoff, 0, NULL))
+        return 1;
+      wrapped[40] = 'X';
+      wrapped[41] = 0;
+      if (compare(argv[2], wrapped, handoff, !handoff, 0, NULL))
+        return 1;
+      wrapped[40] = 0;
+      if (compare(argv[2], "X", handoff, !handoff, 0, wrapped))
+        return 1;
+    }
   } else
     return 2;
   if (errors)

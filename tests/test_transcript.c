@@ -7,6 +7,7 @@
 #else
 #include <pty.h>
 #endif
+#include "silent_cursor_probe.h"
 #include "softline/transcript.h"
 #include "termios_snapshot.h"
 #include <errno.h>

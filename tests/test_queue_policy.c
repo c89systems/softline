@@ -1,4 +1,5 @@
 #define _DEFAULT_SOURCE
+#include "pty_peer.h"
 #include <pty.h>
 #include <signal.h>
 #include <softline/softline.h>
@@ -17,6 +18,7 @@
 
 struct fixture {
   sl_t *sl;
+  struct pty_peer peer;
   int master, slave, native, history, calls, fail_policy, fail_history;
   int ready_write;
   const char *keys;
@@ -120,12 +122,16 @@ static void setup(struct fixture *f, int native, int capacity) {
   CHECK(sl_bind_key(f->sl, SL_KEY_ESCAPE, action, f) == SL_OK);
   CHECK(sl_history_set_backend(f->sl, "policy", NULL, history, f) == SL_OK);
   CHECK(sl_history_set_auto_add(f->sl, 1) == SL_OK);
-  if (native)
+  if (native) {
+    CHECK(!pty_peer_start(&f->peer, f->master));
     CHECK(sl_output_stream_begin(f->sl) == SL_OK);
+  }
 }
 
 static void teardown(struct fixture *f) {
   sl_destroy(f->sl);
+  if (f->native)
+    CHECK(!pty_peer_stop(&f->peer));
   close(f->master);
   close(f->slave);
 }
