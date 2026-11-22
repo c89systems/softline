@@ -180,7 +180,7 @@ static int run(int signo, int kind, int readline_mode) {
   int master, slave, pipefd[2], status, flags, output, output_master = -1,
                                                        output_flags;
   pid_t pid;
-  struct termios before, after, before_output;
+  struct termios before, after = {0}, before_output;
   struct winsize size;
   memset(&size, 0, sizeof(size));
   size.ws_row = 24;
@@ -324,6 +324,23 @@ static int run(int signo, int kind, int readline_mode) {
     }
   }
   CHECK(!wait_child(pid, &status, 0));
+  if (tcgetattr(slave, &after) || !test_termios_equal(&before, &after) ||
+      fcntl(slave, F_GETFL) != flags) {
+    fprintf(stderr,
+            "signal %d case %d readline %d status %d\n"
+            "before iflag=%lx oflag=%lx cflag=%lx lflag=%lx ispeed=%lu "
+            "ospeed=%lu flags=%x\n"
+            "after  iflag=%lx oflag=%lx cflag=%lx lflag=%lx ispeed=%lu "
+            "ospeed=%lu flags=%x\n",
+            signo, kind, readline_mode, status, (unsigned long)before.c_iflag,
+            (unsigned long)before.c_oflag, (unsigned long)before.c_cflag,
+            (unsigned long)before.c_lflag, (unsigned long)cfgetispeed(&before),
+            (unsigned long)cfgetospeed(&before), flags,
+            (unsigned long)after.c_iflag, (unsigned long)after.c_oflag,
+            (unsigned long)after.c_cflag, (unsigned long)after.c_lflag,
+            (unsigned long)cfgetispeed(&after),
+            (unsigned long)cfgetospeed(&after), fcntl(slave, F_GETFL));
+  }
   CHECK(!tcgetattr(slave, &after) && test_termios_equal(&before, &after) &&
         fcntl(slave, F_GETFL) == flags);
   CHECK(!tcgetattr(output, &after) &&

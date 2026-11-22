@@ -402,24 +402,42 @@ static int launch(fixture_t *f, const char *mode, int split, int missing) {
 }
 static int restored(fixture_t *f) {
   struct termios input, output;
+  int flags;
   CHECK(!tcgetattr(f->slave, &input) && test_termios_equal(&input, &f->input));
   CHECK(
       !tcgetattr(f->output_slave >= 0 ? f->output_slave : f->slave, &output) &&
       test_termios_equal(&output, &f->output));
-  CHECK(fcntl(f->slave, F_GETFL) == f->input_flags);
+  flags = fcntl(f->slave, F_GETFL);
+  if (flags != f->input_flags)
+    fprintf(stderr, "supervisor input flags expected %x, got %x\n",
+            f->input_flags, flags);
+  CHECK(flags == f->input_flags);
   CHECK(fcntl(f->output_slave >= 0 ? f->output_slave : f->slave, F_GETFL) ==
         f->output_flags);
   return 0;
 }
+static void drain_output(int fd) {
+  struct pollfd p;
+  char bytes[1024];
+  p.fd = fd;
+  p.events = POLLIN;
+  while (poll(&p, 1, 0) > 0 && (p.revents & POLLIN) &&
+         read(fd, bytes, sizeof(bytes)) > 0) {
+  }
+}
 static int finish_status(fixture_t *f, int status, int code) {
-  int session_status;
+  int session_status, restore_status;
   active_supervisor = 0;
   CHECK(WIFEXITED(status) && WEXITSTATUS(status) == code);
-  CHECK(!restored(f));
+  restore_status = restored(f);
   if (f->host.pid) {
     CHECK(kill(f->host.pid, 0) < 0 && errno == ESRCH);
   }
   active_host = 0;
+  /* A PTY may wait for outstanding output when its session is revoked. */
+  drain_output(f->master);
+  if (f->output_master >= 0)
+    drain_output(f->output_master);
   close(f->notice);
   close(f->control);
   close(f->states);
@@ -432,7 +450,7 @@ static int finish_status(fixture_t *f, int status, int code) {
     close(f->output_slave);
     close(f->output_master);
   }
-  return 0;
+  return restore_status;
 }
 static int finish(fixture_t *f, int code) {
   int status;
