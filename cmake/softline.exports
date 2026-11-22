@@ -1,5 +1,24 @@
 # Exact dynamic C API exported by libsoftline shared libraries.
 sl_bind_key
+sl_terminal_session_config_init
+sl_terminal_session_create
+sl_terminal_session_dispatch
+sl_terminal_session_status
+sl_terminal_session_destroy
+sl_terminal_session_adapter
+sl_image_paste_start_source
+sl_www_asset
+sl_www_binary
+sl_www_config_init
+sl_www_connect
+sl_www_create
+sl_www_destroy
+sl_www_emit
+sl_www_simulate_prompt
+sl_www_simulate_prompt_tracked
+sl_www_cancel_prompt_simulation
+sl_www_field
+sl_www_message
 sl_buffer
 sl_cancel
 sl_config_init
@@ -18,6 +37,8 @@ sl_history_set_max_len
 sl_insert
 sl_last_error
 sl_queue_backend_request
+sl_queue_backend_pin_request
+sl_queue_backend_unpin_request
 sl_queue_backend_result
 sl_queue_backend_update
 sl_queue_backend_info
@@ -55,6 +76,7 @@ sl_set_idle_callback
 sl_set_image_paste_path_template
 sl_set_live_scroll_region
 sl_set_prompt_queue
+sl_set_prompt_queue_display_delay
 sl_set_prompt_queue_delivery
 sl_set_prompt_queue_keys
 sl_set_prompt_queue_profile
@@ -75,6 +97,8 @@ sl_set_status_message
 sl_set_status_message_prefix
 sl_set_status_message_colors
 sl_submit
+sl_simulate_prompt
+sl_cancel_prompt_simulation
 sl_suspend
 sl_terminal_handoff
 sl_terminal_local
@@ -96,3 +120,16 @@ sl_set_prompt_queue_policy
 sl_prompt_queue_set_executable
 sl_get_prompt_queue_stopped
 sl_prompt_queue_resume
+sl_prompt_queue_stop
+sl_image_paste_start
+sl_image_paste_prepare
+sl_image_paste_pump
+sl_image_paste_resume
+sl_image_paste_complete
+sl_image_paste_cancel
+sl_transcript_add
+sl_transcript_write
+sl_transcript_resize
+sl_transcript_reset
+sl_transcript_remove
+sl_transcript_visible

@@ -1,0 +1,62 @@
+# This same inventory and these key sequences run against native readline and
+# the shipped browser editor. Tabs separate fields; key tags are literal.
+provider	@	word	1	1
+provider	/	start	0	1
+provider	h	start	0	0
+provider	v	word	0	0
+provider	n	word	0	0
+candidate	@	@lua/
+candidate	@	@lib/
+candidate	@	@space dir/
+candidate	@	@@literal.txt
+candidate	@	@café.c
+candidate	@	@icon@2x.png
+candidate	@	@README.md
+candidate	@lua/	@lua/source.c
+candidate	@lua/	@lua/sub/
+candidate	@lua/sub/	@lua/sub/deep.c
+candidate	/	/approve
+candidate	/	/about
+candidate	/approve	/approve on
+candidate	/approve	/approve off
+candidate	h	hello world
+candidate	h	hello there
+candidate	v	verification
+candidate	n	next steps
+case	typed partial sends actual draft	@REA<Enter>	REA
+case	Enter does not accept a slash ghost	/app<Enter>	/app
+case	Tab accepts first filename	@l<Tab><Enter>	lua/
+case	Tab cycles original subset	@l<Tab><Tab><Enter>	lib/
+case	Tab wraps original subset	@l<Tab><Tab><Tab><Enter>	lua/
+case	Right commits without inserting a child	@l<Tab><Right><Enter>	lua/
+case	Right previews child then Tab accepts	@l<Right><Tab><Enter>	lua/source.c
+case	Ctrl-F commits without inserting child	@l<Tab><CtrlF><Enter>	lua/
+case	Ctrl-F accepts ghost at endpoint	@l<CtrlF><Tab><Enter>	lua/source.c
+case	exact directory expands on Tab	@lua/<Tab><Enter>	lua/source.c
+case	partial child resolves lazily on Tab	@lua/so<Tab><Enter>	lua/source.c
+case	nested child resolves known ancestors	@lua/sub/de<Tab><Enter>	lua/sub/deep.c
+case	Tab keeps rotating a child subset	@lua/<Tab><Tab><Enter>	lua/sub/
+case	slash continuation cycles	/app<Tab><CtrlF><Tab><Tab><Enter>	/approve off
+case	slash phrase requires committing its parent	/approve o<Tab><Enter>	/approve o
+case	slash scope is buffer start only	x /app<Tab><Enter>	x /app
+case	start-only phrase does not activate in middle	x h<Tab><Enter>	x h
+case	word provider activates in middle	x v<Tab><Enter>	x verification
+case	word phrase cycles	hello <Tab><Tab><Enter>	hello there
+case	word phrase accepts matching whitespace	next<Space>st<Tab><Enter>	next steps
+case	unmatched separator commits trigger	@README.md<Space>next<Enter>	README.md next
+case	multiple references strip independently	@README.md<Space>@icon@2<Tab><Enter>	README.md icon@2x.png
+case	typed filename retains internal at-sign	@icon@2x.png<Enter>	icon@2x.png
+case	selected filename retains leading at-sign	@@li<Tab><Enter>	@literal.txt
+case	completion retains Unicode	@caf<Tab><Enter>	café.c
+case	selected directory retains internal spaces	@spa<Tab><Enter>	space dir/
+case	matching space continues directory	@space<Space>dir/<Enter>	space dir/
+case	deleting after activation exit edits canonical text	@REA<Home><Delete>X<Enter>	XEA
+case	leaving activation strips trigger	@REA<Home>X<Enter>	XREA
+case	edit inside token replaces suffix	@lbogus<Left><Left><Left><Left><Left><Tab><Enter>	lua/
+case	normal Right within token does not accept ghost	@lua/<Left><Left><Right><Enter>	lua/
+case	backspace rematches cached root	@l<Tab><Backspace><Backspace><Backspace><Tab><Tab><Enter>	lib/
+case	ordinary email remains literal	user@example.com<Enter>	user@example.com
+case	nonbreaking space is not a word boundary	x @REA<Enter>	x @REA
+case	new word trigger takes over unmatched phrase	hello<Space>@l<Tab><Enter>	hello lua/
+case	moving after committed leaf preserves draft	@l<Right><Tab><Right><Right><Enter>	lua/source.c
+case	reused phrase suffix is restored when cycling	hello world<Home><Right><Tab><Tab><Enter>	hello there world

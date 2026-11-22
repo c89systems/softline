@@ -8,6 +8,7 @@ fixture="$work/source"
 mkdir -p "$fixture"
 # An extracted-source context supplies its own manifest, even below a checkout.
 files=(LICENSE README.md softline.rockspec.in lua/README.md lua/softline_lua.c
+  lua/softline_image_source_lua.h
   lua/softline_queue_backend_lua.h
   lua/softline_terminal_lua.h
   cmake/softline_workspace.cmake scripts/require-workspace.sh
@@ -16,6 +17,9 @@ files=(LICENSE README.md softline.rockspec.in lua/README.md lua/softline_lua.c
   scripts/render_release_rockspec.sh scripts/render_lua_rockspec.sh
   include/softline/softline.h tests/lua_smoke.lua tests/lua_readline.lua
   tests/lua_watch_file_gc.lua examples/simple.lua examples/chat.lua examples/completion.lua)
+for guide in "$root"/docs/*.md; do
+  files+=("docs/${guide##*/}")
+done
 for file in "${files[@]}"; do
   mkdir -p "$fixture/$(dirname "$file")"
   cp -p "$root/$file" "$fixture/$file"
@@ -49,6 +53,10 @@ grep -Fxq '   url = "https://github.com/c89systems/softline/releases/download/v9
 mkdir "$work/extracted" "$work/lua"
 tar -xzf "$fixture/dist/softline-9.8.7.tar.gz" -C "$work/extracted"
 tar -xzf "$fixture/dist/softline-lua-9.8.7.tar.gz" -C "$work/lua"
+# Resolve the actual C includes in the extracted source. Lua itself is an
+# external SDK, so this packaging check only needs placeholders for its headers.
+mkdir "$work/lua-headers"
+touch "$work/lua-headers/"{lua,lauxlib,lualib}.h
 for payload in "$work/extracted/softline-9.8.7" "$work/lua/softline-lua-9.8.7"; do
   (cd "$payload"; find . -type f | sed 's|^./||' | LC_ALL=C sort) > "$work/actual"
   LC_ALL=C sort "$payload/RELEASE_MANIFEST" > "$work/expected"
@@ -56,6 +64,11 @@ for payload in "$work/extracted/softline-9.8.7" "$work/lua/softline-lua-9.8.7"; 
   [[ $(cat "$payload/VERSION") == 9.8.7 ]]
   [[ $(stat -c %a "$payload/scripts/require-host-bash.sh") == 755 ]]
   [[ $(stat -c %a "$payload/include/softline/softline.h") == 644 ]]
+  for guide in "$root"/docs/*.md; do
+    cmp "$guide" "$payload/docs/${guide##*/}"
+  done
+  "${CC:-cc}" -E -I"$work/lua-headers" -I"$payload/include" \
+    "$payload/lua/softline_lua.c" > /dev/null
   "$payload/scripts/render_lua_rockspec.sh" "$work/rendered.rockspec" >/dev/null
   grep -Fxq 'version = "9.8.7-1"' "$work/rendered.rockspec"
 done
@@ -91,4 +104,4 @@ rm -r "$work/unsafe/softline-9.8.7/build"
 ln -s /etc/passwd "$work/unsafe/softline-9.8.7/link"
 tar -czf "$work/unsafe.tar.gz" -C "$work/unsafe" softline-9.8.7
 reject 'non-file/directory entry' "$work/unsafe.tar.gz" "$fixture/build/links"
-echo 'Actual source/Lua entrypoints produce deterministic bytes and exact manifests, modes and source-rock closure.'
+echo 'Source and Lua archives have deterministic bytes, exact manifests and a complete Lua facade include tree.'

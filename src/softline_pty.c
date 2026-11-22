@@ -82,8 +82,6 @@ static int pty_open(sl_pty_t *p, sl_terminal_event_t *e) {
   memset(&size, 0, sizeof(size));
   size.ws_row = (unsigned short)e->rows;
   size.ws_col = (unsigned short)e->columns;
-  if (ioctl(p->fd, TIOCSWINSZ, &size))
-    return SL_ERROR_IO;
   if (pipe(started))
     return SL_ERROR_IO;
   p->exec_fd = private_fd(started[0]);
@@ -94,8 +92,18 @@ static int pty_open(sl_pty_t *p, sl_terminal_event_t *e) {
       close(started[1]);
     return SL_ERROR_IO;
   }
+  /* Darwin requires an open replica before the master accepts window
+   * ioctls. Keep the replica open across fork so an early resize works. */
+  slave = private_fd(open(path, O_RDWR | O_NOCTTY));
+  if (slave < 0 || ioctl(slave, TIOCSWINSZ, &size)) {
+    if (slave >= 0)
+      close(slave);
+    close(started[1]);
+    return SL_ERROR_IO;
+  }
   p->pid = fork();
   if (p->pid < 0) {
+    close(slave);
     close(started[1]);
     p->pid = 0;
     return SL_ERROR_IO;
@@ -105,8 +113,7 @@ static int pty_open(sl_pty_t *p, sl_terminal_event_t *e) {
     sigset_t mask;
     if (setsid() < 0)
       child_fail(started[1], 126);
-    slave = open(path, O_RDWR);
-    if (slave < 0 || ioctl(slave, TIOCSCTTY, 0) || dup2(slave, 0) < 0 ||
+    if (ioctl(slave, TIOCSCTTY, 0) || dup2(slave, 0) < 0 ||
         dup2(slave, 1) < 0 || dup2(slave, 2) < 0)
       child_fail(started[1], 126);
     for (fd = 3; fd < (limit > 0 ? limit : 1024); ++fd)
@@ -124,9 +131,15 @@ static int pty_open(sl_pty_t *p, sl_terminal_event_t *e) {
     (void)signal(SIGWINCH, SIG_DFL);
     sigemptyset(&mask);
     (void)sigprocmask(SIG_SETMASK, &mask, NULL);
-    execl(p->shell, p->shell, "-i", (char *)NULL);
+    if (p->directory && chdir(p->directory))
+      child_fail(started[1], 126);
+    if (p->arguments)
+      execve(p->shell, p->arguments, p->environment);
+    else
+      execl(p->shell, p->shell, "-i", (char *)NULL);
     child_fail(started[1], 127);
   }
+  close(slave);
   close(started[1]);
   return SL_OK;
 }

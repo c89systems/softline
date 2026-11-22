@@ -10,7 +10,7 @@ Only the chat examples and integration tests depend on libmdf. A released
 libsoftline, its Lua facade, headers, CMake exports, and package metadata have
 no libmdf dependency.
 
-libmdf 0.23.0 has incremental feed, a bound sink, and in-document width and
+libmdf 0.23.1 has incremental feed, a bound sink, and in-document width and
 margin changes through `set_geometry()`. The chat composer updates both
 renderer geometries on the Softline owner thread before feeding later
 Markdown; Softline reads the terminal dimensions for its native prompt.
@@ -20,7 +20,7 @@ Softline nor the examples recreate or replay an unfinished Markdown document.
 Softline never infers libmdf margins. The example supplies its borrowed stdout
 fd to libmdf's destination-aware ANSI AUTO policy: terminal output is themed,
 and redirected output is escape-free. Renderer handles are rebuilt against
-libmdf 0.23.0's options layout; this private example dependency does not change
+libmdf 0.23.1's options layout; this private example dependency does not change
 Softline's ABI.
 
 ## Generic Softline output session
@@ -35,9 +35,11 @@ the application through a pipe or another bounded transport. The application
 registers its descriptor with `sl_watch_add()` (Lua: `watch_add()`), drains it
 on the editor thread, feeds its renderer, and forwards each sink emission
 directly into the Softline session. Softline does not buffer whole messages,
-interpret Markdown, own the transport, or run a worker. A sink write is visible
-before the corresponding Softline write returns; no finish/EOF or next prompt
-is needed to make an already-decided fragment appear.
+interpret Markdown, own the transport, or run a worker. An already-decided
+fragment is visible when the write returns. While the read-only transcript
+viewer occupies the terminal, chat writes enter its bounded display backlog.
+The backlog replays when the user returns to chat. See
+[transcript behavior](transcripts.md#native-editor).
 
 Softline adds no content bytes, response separator, or space at chunk
 boundaries. With an active prompt, a write that ends exactly at the terminal's
@@ -80,8 +82,8 @@ after height growth. A retained frame between editor calls follows native
 reflow until editing resumes. Changed prompt cells or placement are updated.
 The VT scroll region ends immediately above the current prompt
 frame. Native producer bytes are written unchanged. Softline retains bounded
-partial ANSI/UTF-8 parser state and an output cursor. It never rewraps, pads,
-clears, or replays native transcript text. Positions are distances from the terminal bottom.
+partial ANSI/UTF-8 parser state and an output cursor. The terminal owns
+wrapping and scrollback. Positions are distances from the terminal bottom.
 Resize reconciliation queries the live input cursor and combines its observed
 movement with the known layout of the old prompt. Unchanged prompt rows that
 fit the new width keep their cached cells. The logical prompt frame survives
@@ -236,7 +238,8 @@ The reconciliation method advanced released v0.10.0's ABI 0 to ABI 1 in v0.11.0.
 Queue approval extends that released receiver layout and changes insertion
 signatures in ABI 2. Native queue policies extend the receiver and entry layouts,
 advancing released v0.13.0's ABI 2 to ABI 3. Constructor-selected backends advance
-released v0.15.1's ABI 3 to the current ABI 4. Both C and Lua consumers must
+released v0.15.1's ABI 3 to ABI 4. Image handover and later receiver extensions
+use ABI 5, one increment from released v0.17.0. Both C and Lua consumers must
 rebuild against the matching header and library. Local release rehearsal tags
 are not the released baseline for this decision.
 

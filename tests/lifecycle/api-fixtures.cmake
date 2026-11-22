@@ -1,7 +1,8 @@
 cmake_minimum_required(VERSION 3.24)
 set(work "${ROOT}/build/host-tests/api-fixture")
 file(REMOVE_RECURSE "${work}")
-set(inputs include/softline/softline.h cmake/softline_version.h.in
+set(inputs include/softline/softline.h include/softline/www.h include/softline/terminal.h include/softline/transcript.h
+  include/softline/cbor.h cmake/softline_version.h.in
   cmake/softline.exports lua/softline_lua.c lua/README.md README.md CMakeLists.txt)
 foreach(relative IN LISTS inputs)
   get_filename_component(directory "${work}/${relative}" DIRECTORY)
@@ -32,6 +33,14 @@ function(mutate name relative before after expected)
   file(WRITE "${work}/${relative}" "${original}")
 endfunction()
 check(original "")
+mutate(transcript_declaration include/softline/transcript.h "int sl_transcript_write("
+  "int sl_transcript_fixture_only(" "C public declarations and dynamic export allowlist differ")
+mutate(terminal_declaration include/softline/terminal.h "int sl_terminal_session_dispatch("
+  "int sl_terminal_fixture_only(" "C public declarations and dynamic export allowlist differ")
+mutate(terminal_receiver include/softline/terminal.h "(*dispatch)"
+  "(*fixture_only)" "Terminal receiver lacks public C counterpart: fixture_only")
+mutate(www_declaration include/softline/www.h "int sl_www_asset("
+  "int sl_www_fixture_only(" "C public declarations and dynamic export allowlist differ")
 mutate(c_declaration include/softline/softline.h "int sl_output_stream_begin("
   "int sl_fixture_only(" "C public declarations and dynamic export allowlist differ")
 mutate(receiver include/softline/softline.h "(*output_stream_begin)"
@@ -50,7 +59,7 @@ mutate(c_constant lua/softline_lua.c "lua_pushinteger(L, SL_KEY_NONE)"
   "lua_pushinteger(L, SL_FIXTURE_ONLY)" "Missing public Lua constant declaration/doc: SL_FIXTURE_ONLY")
 mutate(lua_constant lua/softline_lua.c "lua_setfield(L, -2, \"KEY_NONE\")"
   "lua_setfield(L, -2, \"FIXTURE_ONLY\")" "Missing public Lua constant declaration/doc: SL_KEY_NONE")
-mutate(abi CMakeLists.txt "set(SOFTLINE_ABI_VERSION \"4\""
+mutate(abi CMakeLists.txt "set(SOFTLINE_ABI_VERSION \"5\""
   "set(SOFTLINE_ABI_VERSION \"999\"" "ABI documentation and implementation differ")
 mutate(config_docs lua/README.md "`history_max_len`" "history_max_len"
   "Lua config documentation missing: history_max_len")

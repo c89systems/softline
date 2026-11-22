@@ -6,6 +6,7 @@
 #define _DARWIN_C_SOURCE 1
 #endif
 
+#include "softline/transcript.h"
 #include "softline_clipboard.h"
 #include "softline_internal.h"
 #include "softline_unicode.h"
@@ -18,6 +19,7 @@
 #include <poll.h>
 #include <sys/select.h>
 #include <sys/stat.h>
+#include <time.h>
 
 typedef struct sl_row {
   char *text;
@@ -43,7 +45,19 @@ typedef struct sl_render {
   const char *input;
   size_t input_len, input_cursor, ghost_start, ghost_end;
   char *projected;
+  int64_t queue_deadline;
+  int queue_visible;
 } sl_render_t;
+
+enum { SL_BACKLOG_LINES = 1000, SL_BACKLOG_BYTES = 256 * 1024 };
+
+struct sl_output_backlog {
+  size_t head, used, lines;
+  int dropping_line, truncated, initial_newlines, osc8;
+  sl_surface_t *validator;
+  char bytes[SL_BACKLOG_BYTES];
+  char partial[SL_OSC8_MAX_BYTES];
+};
 
 typedef struct sl_rgb {
   unsigned char red;
@@ -224,11 +238,14 @@ static int sl_cursor_report_end(sl_t *self, const struct termios *original,
                                 int temporary);
 static int sl_enable_raw(sl_t *self);
 static void sl_disable_raw(sl_t *self);
+static void sl_output_discard_backlog(sl_impl_t *impl);
 static int sl_output_write_validated(sl_t *self, const char *bytes,
                                      size_t length);
+static int sl_print_above_backlog(sl_t *self, sl_stream_callback_t callback,
+                                  void *userdata);
 
 static sl_impl_t *sl_impl(sl_t *self) {
-  if (!self)
+  if (!self || (self->impl && ((sl_impl_t *)self->impl)->image_callback_active))
     return NULL;
   return (sl_impl_t *)self->impl;
 }
@@ -308,6 +325,35 @@ static int sl_prompt_queue_reserve(sl_prompt_queue_t *queue, int entries) {
   return 0;
 }
 
+int64_t sl_queue_display_now(void) {
+  struct timespec now;
+  if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+    return -1;
+  return (int64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000;
+}
+
+/* New arrivals do not wait behind an already drawn queue. Retain this choice
+ * on the entry even if older entries disappear before its next frame. */
+int64_t sl_queue_display_start(const sl_impl_t *impl) {
+  return impl->prompt_queue.display_visible ? -1 : sl_queue_display_now();
+}
+
+/* Record the earliest hidden-row deadline in the frame being built. The
+ * input wait uses this frame deadline, including a deadline that just expired,
+ * so an otherwise idle editor always gets a render turn. */
+int sl_queue_display_ready(const sl_impl_t *impl, int64_t started, int64_t now,
+                           int64_t *deadline) {
+  const sl_prompt_queue_t *queue = &impl->prompt_queue;
+  int64_t due;
+  if (!queue->display_delay_ms || started < 0 || now < 0 ||
+      now - started >= queue->display_delay_ms)
+    return 1;
+  due = started + queue->display_delay_ms;
+  if (!*deadline || due < *deadline)
+    *deadline = due;
+  return 0;
+}
+
 static int sl_prompt_queue_insert_raw(sl_impl_t *impl, int index,
                                       const char *text,
                                       sl_prompt_queue_mode_t mode, int held,
@@ -343,10 +389,12 @@ static int sl_prompt_queue_insert_raw(sl_impl_t *impl, int index,
   queue->items[index].info.policy.executable = 1;
   queue->items[index].info.stopped = queue->stopped;
   queue->items[index].history_recorded = 0;
+  queue->items[index].display_started = sl_queue_display_start(impl);
   if (id) {
     queue->items[index].info = queue->editing.info;
     queue->items[index].info.mode = mode;
     queue->items[index].history_recorded = queue->editing.history_recorded;
+    queue->items[index].display_started = queue->editing.display_started;
   }
   if (queue->editing.info.id && index < queue->editing_index)
     queue->editing_index++;
@@ -700,7 +748,11 @@ static int sl_statusline_text_valid(const char *text) {
   return 1;
 }
 
-static int sl_quoted_prompt_text_valid(const char *text) {
+int sl_image_valid_path(const char *path) {
+  return sl_statusline_text_valid(path);
+}
+
+int sl_quoted_prompt_text_valid(const char *text) {
   size_t len;
   size_t pos;
   if (!text)
@@ -1126,13 +1178,19 @@ static int sl_enable_raw(sl_t *self) {
   raw.c_lflag &= ~(ECHO | ICANON | IEXTEN | ISIG);
   raw.c_cc[VMIN] = 0;
   raw.c_cc[VTIME] = 1;
-  if (tcsetattr(impl->input_fd, impl->terminal_active ? TCSANOW : TCSAFLUSH,
-                &raw) != 0) {
-    sl_set_error(self, "failed to enable terminal raw mode");
+  impl->raw_guard =
+      sl_tty_guard_begin(impl->input_fd, impl->output_fd, impl->terminal_guard);
+  if (!impl->raw_guard) {
+    sl_set_error(self, "failed to protect terminal raw mode");
     return -1;
   }
   impl->raw_active = 1;
-  impl->output_oflag_changed = 0;
+  if (sl_tty_setattr(impl->input_fd,
+                     impl->terminal_active ? TCSANOW : TCSAFLUSH, &raw) != 0) {
+    sl_disable_raw(self);
+    sl_set_error(self, "failed to enable terminal raw mode");
+    return -1;
+  }
   /* stdin and stdout often share a TTY through different descriptors. Query
    * after setting input raw mode, so that shared TTY needs no second change.
    * A separate output TTY only lends us its output flags, not its input mode.
@@ -1143,11 +1201,9 @@ static int sl_enable_raw(sl_t *self) {
       sl_disable_raw(self);
       return -1;
     }
-    impl->original_output_oflag = output.c_oflag;
-    output.c_oflag = sl_native_output_flags(output.c_oflag);
-    if (output.c_oflag != impl->original_output_oflag) {
-      impl->output_oflag_changed = 1;
-      if (tcsetattr(impl->output_fd, TCSANOW, &output) != 0) {
+    if (output.c_oflag != sl_native_output_flags(output.c_oflag)) {
+      output.c_oflag = sl_native_output_flags(output.c_oflag);
+      if (sl_tty_setattr(impl->output_fd, TCSANOW, &output) != 0) {
         sl_set_error(self, "failed to disable output kernel tab expansion");
         sl_disable_raw(self);
         return -1;
@@ -1159,18 +1215,15 @@ static int sl_enable_raw(sl_t *self) {
 
 static void sl_disable_raw(sl_t *self) {
   sl_impl_t *impl;
-  struct termios output;
   impl = sl_impl(self);
   if (!impl || !impl->raw_active)
     return;
-  (void)tcsetattr(impl->input_fd, impl->terminal_active ? TCSANOW : TCSAFLUSH,
-                  &impl->original_termios);
-  if (impl->output_oflag_changed && tcgetattr(impl->output_fd, &output) == 0) {
-    output.c_oflag = impl->original_output_oflag;
-    (void)tcsetattr(impl->output_fd, TCSANOW, &output);
-  }
-  impl->output_oflag_changed = 0;
+  sl_output_discard_backlog(impl);
+  if (sl_tty_guard_end(impl->raw_guard, 1, !impl->terminal_guard))
+    sl_set_error(self, "failed to restore terminal attributes");
+  impl->raw_guard = NULL;
   impl->raw_active = 0;
+  (void)sl_transcript_leave(self);
 }
 
 static int sl_buf_reserve(sl_t *self, size_t need) {
@@ -1304,6 +1357,9 @@ static int sl_buf_replace(sl_t *self, size_t at, size_t removed,
     memmove(impl->buf + at, text, inserted);
   impl->len = len;
   impl->buf[len] = '\0';
+  ++impl->draft_revision;
+  impl->image_literal = 0;
+  sl_image_changed(self, at, removed, inserted);
   sl_completion_changed(impl, at, removed, inserted, 0);
   impl->edit.changed = 1;
   impl->preferred_column_valid = 0;
@@ -1316,6 +1372,8 @@ static int sl_buf_set(sl_t *self, const char *s) {
   impl = sl_impl(self);
   if (!impl)
     return -1;
+  sl_image_invalidate(self, "image upload cancelled: draft replaced");
+  impl->image_literal = 0;
   n = s ? strlen(s) : 0;
   if (sl_buf_reserve(self, n + 1) != 0)
     return -1;
@@ -1327,12 +1385,34 @@ static int sl_buf_set(sl_t *self, const char *s) {
     sl_edit_clear_undo(&impl->edit);
   if (n > 0)
     memcpy(impl->buf, s, n);
+  if (n || impl->len)
+    ++impl->draft_revision;
   impl->buf[n] = '\0';
   impl->len = n;
   impl->cursor = n;
   impl->edit.changed = 1;
   impl->preferred_column_valid = 0;
   return 0;
+}
+
+int sl_image_insert_result(sl_t *self, size_t anchor, const char *path) {
+  sl_impl_t *impl = sl_impl(self);
+  size_t cursor, length = strlen(path);
+  if (!impl || anchor > impl->len || length > impl->line_max_len - impl->len)
+    return SL_ERROR_INVALID;
+  cursor = impl->cursor;
+  sl_edit_end(&impl->edit);
+  impl->edit.last_command = SL_EDIT_OTHER;
+  sl_edit_begin(&impl->edit, SL_EDIT_OTHER);
+  sl_completion_reset(&impl->completion);
+  if (sl_buf_replace(self, anchor, 0, path, length) != 0) {
+    sl_edit_end(&impl->edit);
+    return SL_ERROR;
+  }
+  impl->cursor = cursor >= anchor ? cursor + length : cursor;
+  impl->image_literal = 1;
+  sl_edit_end(&impl->edit);
+  return SL_OK;
 }
 
 static int sl_buf_insert(sl_t *self, size_t at, const char *s, size_t n) {
@@ -1374,6 +1454,12 @@ static int sl_buf_set_public(sl_t *self, const char *text) {
   sl_impl_t *impl = sl_impl(self);
   if (!impl || !text)
     return SL_ERROR_INVALID;
+  if (strlen(text) > impl->line_max_len) {
+    sl_set_error(self, "edit exceeds the line limit");
+    return SL_ERROR;
+  }
+  sl_image_invalidate(self, "image upload cancelled: draft replaced");
+  impl->image_literal = 0;
   if (sl_buf_replace(self, 0, impl->len, text, strlen(text)) != 0)
     return SL_ERROR;
   /* Replacing the draft is a new context even when the bytes are identical. */
@@ -1398,6 +1484,9 @@ static int sl_completion_finish(sl_t *self) {
       state->start < impl->len &&
       impl->buf[state->start] == state->provider.trigger) {
     size_t cursor = impl->cursor;
+    int simulating = impl->prompt_simulation.text &&
+                     impl->prompt_simulation.revision == impl->draft_revision &&
+                     cursor == impl->len;
     sl_edit_begin(&impl->edit, SL_EDIT_OTHER);
     state->finishing = 1;
     if (sl_buf_replace(self, state->start, 1, NULL, 0) != 0) {
@@ -1406,6 +1495,11 @@ static int sl_completion_finish(sl_t *self) {
     }
     state->finishing = 0;
     impl->cursor = cursor > state->start ? cursor - 1 : cursor;
+    /* Treat trigger stripping as part of typing. An earlier draft edit must
+     * still cancel the simulation, even if completion also changes the draft.
+     */
+    if (simulating)
+      impl->prompt_simulation.revision = impl->draft_revision;
     impl->preferred_column_valid = 0;
     impl->edit.yank_valid = 0;
   }
@@ -1446,7 +1540,7 @@ static void sl_completion_prepare(sl_t *self) {
   size_t start, end, i;
   int status;
   sl_completion_sink_t sink;
-  if (!state->provider_count || !impl->active_readline ||
+  if (!state->provider_count || !impl->active_readline || impl->image_literal ||
       impl->output_write_active || state->resolving ||
       impl->history_search_active || impl->bracketed_paste)
     return;
@@ -1555,8 +1649,128 @@ static int sl_submit_method(sl_t *self) {
   impl = sl_impl(self);
   if (!impl || !impl->active_readline)
     return SL_ERROR_INVALID;
+  if (sl_image_pending(impl)) {
+    sl_set_error(self, "image upload is pending");
+    return SL_ERROR_NOT_READY;
+  }
   impl->request_submit = 1;
   return SL_OK;
+}
+
+int sl_prompt_simulation_options_valid(
+    const sl_prompt_simulation_options_t *options) {
+  return options->start_delay_ms <= SL_PROMPT_SIMULATION_DELAY_MAX_MS &&
+         options->character_delay_ms <= SL_PROMPT_SIMULATION_DELAY_MAX_MS &&
+         options->submit_delay_ms <= SL_PROMPT_SIMULATION_DELAY_MAX_MS &&
+         (options->mode == SL_PROMPT_QUEUE_MODE_QUEUED ||
+          options->mode == SL_PROMPT_QUEUE_MODE_STEER);
+}
+
+static int sl_cancel_prompt_simulation_method(sl_t *self) {
+  sl_impl_t *impl = sl_impl(self);
+  if (!impl)
+    return SL_ERROR_INVALID;
+  free(impl->prompt_simulation.text);
+  impl->prompt_simulation.text = NULL;
+  return SL_OK;
+}
+
+static int
+sl_simulate_prompt_method(sl_t *self, const char *text,
+                          const sl_prompt_simulation_options_t *options) {
+  static const sl_prompt_simulation_options_t defaults = {0};
+  sl_impl_t *impl = sl_impl(self);
+  size_t length;
+  int64_t now;
+  if (!options)
+    options = &defaults;
+  if (!impl || !text || !text[strspn(text, " \t\n")] ||
+      !sl_prompt_simulation_options_valid(options))
+    return SL_ERROR_INVALID;
+  length = strlen(text);
+  if (length > impl->line_max_len)
+    return SL_ERROR_FULL;
+  if (!sl_quoted_prompt_text_valid(text))
+    return SL_ERROR_INVALID;
+  if (!isatty(impl->input_fd) || !isatty(impl->output_fd) ||
+      (options->mode == SL_PROMPT_QUEUE_MODE_STEER &&
+       (!sl_prompt_queue_enabled(impl) ||
+        impl->prompt_queue.keys.submit_or_promote_newest == SL_KEY_NONE)))
+    return SL_ERROR_UNSUPPORTED;
+  if (impl->len || impl->prompt_simulation.text ||
+      impl->history_search_active || impl->prompt_queue.editing.info.id ||
+      sl_image_pending(impl) || impl->terminal_active ||
+      impl->readline_suspended || impl->bracketed_paste ||
+      sl_transcript_visible(self))
+    return SL_ERROR_NOT_READY;
+  now = sl_queue_display_now();
+  if (now < 0)
+    return SL_ERROR_IO;
+  impl->prompt_simulation.text = malloc(length + 1);
+  if (!impl->prompt_simulation.text)
+    return SL_ERROR_NOMEM;
+  memcpy(impl->prompt_simulation.text, text, length + 1);
+  impl->prompt_simulation.length = length;
+  impl->prompt_simulation.offset = 0;
+  impl->prompt_simulation.deadline = now + options->start_delay_ms;
+  impl->prompt_simulation.revision = impl->draft_revision;
+  impl->prompt_simulation.options = *options;
+  return SL_OK;
+}
+
+static int sl_prompt_simulation_key(sl_t *self, int key) {
+  sl_impl_t *impl = sl_impl(self);
+  sl_prompt_simulation_options_t *options = &impl->prompt_simulation.options;
+  size_t offset = impl->prompt_simulation.offset;
+  size_t length = impl->prompt_simulation.length;
+  size_t amount;
+  int64_t now;
+  if (!impl->prompt_simulation.text)
+    return key;
+  if (impl->prompt_simulation.revision != impl->draft_revision ||
+      impl->cursor != impl->len || impl->history_search_active ||
+      impl->prompt_queue.editing.info.id || sl_image_pending(impl) ||
+      impl->bracketed_paste || sl_transcript_visible(self)) {
+    (void)sl_cancel_prompt_simulation_method(self);
+    return key;
+  }
+  if (key != SL_KEY_NONE) {
+    (void)sl_cancel_prompt_simulation_method(self);
+    if (key == SL_KEY_ESCAPE && sl_buf_set_public(self, "") == SL_OK)
+      return SL_KEY_UNKNOWN;
+    return key;
+  }
+  if (errno || impl->request_submit || impl->request_cancel ||
+      impl->request_suspend)
+    return key;
+  now = sl_queue_display_now();
+  if (now < 0 || now < impl->prompt_simulation.deadline)
+    return key;
+  if (offset < length) {
+    amount = options->character_delay_ms
+                 ? sl_utf8_next_cluster_len(impl->prompt_simulation.text,
+                                            length, offset)
+                 : length - offset;
+    if (sl_buf_insert(self, impl->cursor, impl->prompt_simulation.text + offset,
+                      amount) != 0) {
+      (void)sl_cancel_prompt_simulation_method(self);
+      return key;
+    }
+    impl->prompt_simulation.revision = impl->draft_revision;
+    impl->cursor += amount;
+    impl->prompt_simulation.offset = offset + amount;
+    impl->prompt_simulation.deadline =
+        now + (impl->prompt_simulation.offset == length
+                   ? options->submit_delay_ms
+                   : options->character_delay_ms);
+    if (impl->prompt_simulation.offset != length || options->submit_delay_ms)
+      return key;
+  }
+  key = options->mode == SL_PROMPT_QUEUE_MODE_STEER
+            ? impl->prompt_queue.keys.submit_or_promote_newest
+            : SL_KEY_ENTER;
+  (void)sl_cancel_prompt_simulation_method(self);
+  return key;
 }
 
 static int sl_cancel_method(sl_t *self) {
@@ -2332,6 +2546,7 @@ static void sl_render_store_clear(sl_impl_t *impl) {
   impl->rendered_cols = NULL;
   impl->rendered_cap = 0;
   impl->rendered_rows = 0;
+  impl->prompt_queue.display_visible = 0;
   impl->rendered_editor_first = 0;
   impl->rendered_cursor_row = 0;
   impl->rendered_cursor_col = 0;
@@ -3320,10 +3535,14 @@ static int sl_render_append_queue_panel(sl_t *self, sl_render_t *render,
   int focused;
   char summary[64];
   char backend_notice[192];
+  int64_t now;
   impl = sl_impl(self);
-  if (!sl_prompt_queue_enabled(impl) || !render)
+  if (!impl || !render)
+    return 0;
+  if (!sl_prompt_queue_enabled(impl))
     return 0;
   queue = &impl->prompt_queue;
+  now = sl_queue_display_now();
   style = "";
   if (impl->prompt_theme != SL_PROMPT_THEME_PLAIN) {
     if (sl_theme_color_style(impl->prompt_theme, SL_THEME_COLOR_QUEUE, 0,
@@ -3331,7 +3550,9 @@ static int sl_render_append_queue_panel(sl_t *self, sl_render_t *render,
       return -1;
     style = queue_style;
   }
-  if (sl_backend_notice(impl, backend_notice, sizeof(backend_notice))) {
+  if (sl_backend_notice(impl, now, &render->queue_deadline,
+                        &render->queue_visible, backend_notice,
+                        sizeof(backend_notice))) {
     if (sl_render_new_row_at(render, 0, 0) != 0 ||
         sl_queue_row_append_preview(&render->rows[render->count - 1],
                                     backend_notice, width, style) != 0)
@@ -3359,10 +3580,12 @@ static int sl_render_append_queue_panel(sl_t *self, sl_render_t *render,
         sl_queue_row_append_preview(&render->rows[render->count - 1], editing,
                                     width, style) != 0)
       return -1;
+    render->queue_visible = 1;
   }
   if (held && approval < 0) {
     if (sl_render_queue_text(render, summary, width, "  ", style, 0) != 0)
       return -1;
+    render->queue_visible = 1;
   }
   shown = 0;
   remaining = 0;
@@ -3374,6 +3597,10 @@ static int sl_render_append_queue_panel(sl_t *self, sl_render_t *render,
     sl_row_t *row;
     if (queue->items[i].info.held)
       continue;
+    if (!sl_queue_display_ready(impl, queue->items[i].display_started, now,
+                                &render->queue_deadline))
+      continue;
+    render->queue_visible = 1;
     if (shown >= queue->preview_entries) {
       remaining++;
       continue;
@@ -3415,6 +3642,7 @@ static int sl_render_append_queue_panel(sl_t *self, sl_render_t *render,
     if (sl_render_queue_text(render, queue->items[approval].text, width, "  ",
                              style, 3) != 0)
       return -1;
+    render->queue_visible = 1;
   }
   return 0;
 }
@@ -4226,6 +4454,13 @@ static int sl_render_apply(sl_t *self, const char *prompt) {
   impl = sl_impl(self);
   if (!impl)
     return -1;
+  if (sl_transcript_visible(self)) {
+    /* The alternate screen has no queue preview to repaint at this deadline. */
+    impl->prompt_queue.display_deadline = 0;
+    impl->prompt_queue.display_visible = 0;
+    return sl_transcript_paint(self, sl_terminal_rows(impl),
+                               sl_terminal_columns(impl));
+  }
   if (!impl->retained_prompt || strcmp(impl->retained_prompt, prompt) != 0) {
     char *copy = sl_strdup(prompt);
     if (!copy) {
@@ -4252,6 +4487,10 @@ retry:
   }
   if (sl_prompt_uses_absolute_rows(impl)) {
     rc = sl_render_apply_absolute(self, &render);
+    if (rc == 0) {
+      impl->prompt_queue.display_deadline = render.queue_deadline;
+      impl->prompt_queue.display_visible = render.queue_visible;
+    }
     sl_render_free(&render);
     if (rc == 1)
       goto retry;
@@ -4291,6 +4530,8 @@ retry:
                               render.cursor_col, -1)) {
     impl->rendered_width = width;
     impl->rendered_height = sl_terminal_height(impl);
+    impl->prompt_queue.display_deadline = render.queue_deadline;
+    impl->prompt_queue.display_visible = render.queue_visible;
     sl_render_free(&render);
     return 0;
   }
@@ -4338,6 +4579,8 @@ retry:
   if (rc == 0) {
     impl->rendered_width = width;
     impl->rendered_height = sl_terminal_height(impl);
+    impl->prompt_queue.display_deadline = render.queue_deadline;
+    impl->prompt_queue.display_visible = render.queue_visible;
   }
   sl_render_free(&render);
   if (rc != 0)
@@ -4411,6 +4654,7 @@ void sl_terminal_abandon(sl_t *self) {
   sl_impl_t *impl = sl_impl(self);
   if (!impl)
     return;
+  sl_output_discard_backlog(impl);
   sl_disable_raw(self);
   sl_surface_destroy(impl->output_surface);
   impl->output_surface = NULL;
@@ -4927,12 +5171,45 @@ static int sl_print_above_method(sl_t *self, sl_stream_callback_t callback,
     return SL_ERROR_INVALID;
   previous = impl->output_write_active;
   impl->output_write_active = 1;
-  result = sl_print_above_method_impl(self, callback, userdata);
+  result = sl_transcript_visible(self)
+               ? sl_print_above_backlog(self, callback, userdata)
+               : sl_print_above_method_impl(self, callback, userdata);
   impl->output_write_active = previous;
   if (result == SL_OK && impl->active_prompt && impl->live_scroll_region &&
       !sl_prompt_uses_absolute_rows(impl))
     impl->scroll_region_probe_pending = 1;
   return result;
+}
+
+static struct sl_output_backlog *sl_output_get_backlog(sl_t *self) {
+  sl_impl_t *impl = sl_impl(self);
+  if (!impl->output_backlog) {
+    impl->output_backlog = calloc(1, sizeof(*impl->output_backlog));
+    if (!impl->output_backlog) {
+      sl_set_error(self, "failed to allocate deferred chat output");
+      return NULL;
+    }
+    impl->output_backlog->initial_newlines = impl->output_trailing_newlines;
+  }
+  return impl->output_backlog;
+}
+
+static sl_surface_t *sl_output_validator(sl_impl_t *impl) {
+  if (!impl->output_surface && impl->output_backlog)
+    return impl->output_backlog->validator;
+  return impl->output_surface;
+}
+
+static void sl_output_discard_backlog(sl_impl_t *impl) {
+  struct sl_output_backlog *backlog = impl->output_backlog;
+  if (!backlog)
+    return;
+  impl->output_trailing_newlines = backlog->initial_newlines;
+  impl->output_pending_len = 0;
+  sl_surface_reset_native_validation(impl->output_surface);
+  sl_surface_destroy(backlog->validator);
+  free(backlog);
+  impl->output_backlog = NULL;
 }
 
 static int sl_output_stream_begin_method(sl_t *self) {
@@ -4942,6 +5219,14 @@ static int sl_output_stream_begin_method(sl_t *self) {
   if (!impl || impl->output_stream_active) {
     sl_set_error(self, "live output stream is already open");
     return SL_ERROR_INVALID;
+  }
+  if (sl_transcript_visible(self)) {
+    if (!sl_output_get_backlog(self))
+      return SL_ERROR_NOMEM;
+    impl->output_stream_active = 1;
+    impl->output_ansi_state = 0;
+    impl->output_pending_len = 0;
+    return SL_OK;
   }
   previous_surface = impl->output_surface;
   if (!sl_surface_is_native(impl->output_surface) && impl->active_prompt &&
@@ -5002,7 +5287,8 @@ static int sl_output_stream_reconcile_method(sl_t *self) {
     sl_set_error(self, "reconciliation requires an open stream outside a feed");
     return SL_ERROR_INVALID;
   }
-  if (!isatty(impl->input_fd) || !isatty(impl->output_fd))
+  if (sl_transcript_visible(self) || !isatty(impl->input_fd) ||
+      !isatty(impl->output_fd))
     return SL_OK;
   /* This explicit owner operation may observe input. Never enter it from a
    * producer feed, and leave its incremental UTF-8/SGR validator untouched. */
@@ -5085,13 +5371,70 @@ static int sl_output_write_native(sl_t *self, const char *bytes, size_t length,
   return result;
 }
 
+static void sl_backlog_drop_line(struct sl_output_backlog *backlog) {
+  size_t first = SL_BACKLOG_BYTES - backlog->head, length;
+  const char *end;
+  if (first > backlog->used)
+    first = backlog->used;
+  end = memchr(backlog->bytes + backlog->head, '\n', first);
+  if (end)
+    length = (size_t)(end - (backlog->bytes + backlog->head)) + 1;
+  else {
+    end = memchr(backlog->bytes, '\n', backlog->used - first);
+    length = first + (size_t)(end - backlog->bytes) + 1;
+  }
+  backlog->head = (backlog->head + length) % SL_BACKLOG_BYTES;
+  backlog->used -= length;
+  --backlog->lines;
+}
+
+/* The validator hands us complete units. LF cannot occur inside a supported
+ * control, so evicting at LF also preserves ANSI and UTF-8 boundaries. */
+static void sl_backlog_append(struct sl_output_backlog *backlog,
+                              const char *bytes, size_t length) {
+  while (length) {
+    const char *end = memchr(bytes, '\n', length);
+    size_t count = end ? (size_t)(end - bytes) + 1 : length;
+    if (!backlog->dropping_line) {
+      size_t tail, first;
+      while (backlog->lines == SL_BACKLOG_LINES ||
+             count > SL_BACKLOG_BYTES - backlog->used) {
+        backlog->truncated = 1;
+        if (!backlog->lines) {
+          backlog->used = 0;
+          backlog->dropping_line = 1;
+          break;
+        }
+        sl_backlog_drop_line(backlog);
+      }
+      if (!backlog->dropping_line) {
+        tail = (backlog->head + backlog->used) % SL_BACKLOG_BYTES;
+        first = SL_BACKLOG_BYTES - tail;
+        if (first > count)
+          first = count;
+        memcpy(backlog->bytes + tail, bytes, first);
+        memcpy(backlog->bytes, bytes + first, count - first);
+        backlog->used += count;
+        if (end)
+          ++backlog->lines;
+      }
+    }
+    if (end)
+      backlog->dropping_line = 0;
+    length -= count;
+    bytes += count;
+  }
+}
+
 static int sl_output_flush_redirected(sl_t *self, const char *bytes,
                                       size_t length) {
   sl_impl_t *impl;
   impl = sl_impl(self);
   if (length == 0)
     return SL_OK;
-  if (sl_surface_is_native(impl->output_surface)) {
+  if (sl_transcript_visible(self)) {
+    sl_backlog_append(impl->output_backlog, bytes, length);
+  } else if (sl_surface_is_native(impl->output_surface)) {
     int row;
     int written;
     /* Validation may span a resize after the session was prepared. Use the
@@ -5121,36 +5464,53 @@ static int sl_output_flush_redirected(sl_t *self, const char *bytes,
 static int sl_output_write_validated(sl_t *self, const char *bytes,
                                      size_t length) {
   sl_impl_t *impl;
+  sl_surface_t *validator;
   int result;
   char ready[4096];
   size_t ready_len;
   size_t i;
   impl = sl_impl(self);
+  validator = sl_output_validator(impl);
+  if (sl_transcript_visible(self)) {
+    struct sl_output_backlog *backlog = sl_output_get_backlog(self);
+    if (!backlog)
+      return SL_ERROR_NOMEM;
+    if (!validator) {
+      if (!backlog->validator)
+        backlog->validator = sl_surface_create_validator(-1);
+      validator = backlog->validator;
+      if (!validator) {
+        sl_set_error(self, "failed to allocate deferred output validator");
+        return SL_ERROR_NOMEM;
+      }
+    }
+    sl_surface_set_osc8(validator, impl->osc8.enabled);
+    backlog->osc8 |= impl->osc8.enabled;
+  }
   ready_len = 0;
   for (i = 0; i < length; i++) {
     size_t accepted;
-    result = sl_surface_validate(impl->output_surface, bytes + i, 1, &accepted);
+    result = sl_surface_validate(validator, bytes + i, 1, &accepted);
     if (result != 0) {
       impl->output_pending_len = 0;
-      sl_surface_reset_partial(impl->output_surface);
+      sl_surface_reset_partial(validator);
       if (sl_output_flush_redirected(self, ready, ready_len) != SL_OK)
         return SL_ERROR_IO;
       sl_set_error(
           self, "live output contains an unsupported or invalid byte sequence");
       return SL_ERROR_INVALID;
     }
-    if (impl->output_pending_len > 0 ||
-        !sl_surface_complete(impl->output_surface)) {
+    if (impl->output_pending_len > 0 || !sl_surface_complete(validator)) {
       if (impl->output_pending_len >= sizeof(impl->output_pending)) {
         impl->output_pending_len = 0;
-        sl_surface_reset_partial(impl->output_surface);
+        sl_surface_reset_partial(validator);
         if (sl_output_flush_redirected(self, ready, ready_len) != SL_OK)
           return SL_ERROR_IO;
         sl_set_error(self, "live output escape sequence is too long");
         return SL_ERROR_INVALID;
       }
       impl->output_pending[impl->output_pending_len++] = bytes[i];
-      if (!sl_surface_complete(impl->output_surface))
+      if (!sl_surface_complete(validator))
         continue;
       if (impl->output_pending_len > sizeof(ready) - ready_len) {
         if (sl_output_flush_redirected(self, ready, ready_len) != SL_OK)
@@ -5193,7 +5553,8 @@ static int sl_output_stream_write_method(sl_t *self, const char *bytes,
     return SL_OK;
   previous = impl->output_write_active;
   impl->output_write_active = 1;
-  result = isatty(impl->input_fd) && isatty(impl->output_fd)
+  result = !sl_transcript_visible(self) && isatty(impl->input_fd) &&
+                   isatty(impl->output_fd)
                ? sl_prepare_native_output(self)
                : SL_OK;
   if (result == SL_OK)
@@ -5349,7 +5710,8 @@ static int sl_output_stream_write_quoted_prompt_impl(sl_t *self,
         self, "quoted prompt requires an open stream and printable UTF-8 text");
     return SL_ERROR_INVALID;
   }
-  if (impl->output_surface && !sl_surface_complete(impl->output_surface)) {
+  if (impl->output_pending_len ||
+      (impl->output_surface && !sl_surface_complete(impl->output_surface))) {
     sl_set_error(self,
                  "quoted prompt requires complete preceding output bytes");
     return SL_ERROR_INVALID;
@@ -5382,7 +5744,9 @@ static int sl_output_stream_write_quoted_prompt_impl(sl_t *self,
     return SL_ERROR;
   }
   /* A quoted user prompt is a distinct output record, never a producer link. */
-  if (sl_surface_hyperlink_active(impl->output_surface)) {
+  if (sl_transcript_visible(self)
+          ? sl_surface_validated_hyperlink_active(sl_output_validator(impl))
+          : sl_surface_hyperlink_active(impl->output_surface)) {
     result = sl_output_stream_write_method(self, "\033]8;;\033\\", 7);
     if (result != SL_OK)
       return result;
@@ -5515,10 +5879,15 @@ static int sl_output_stream_end_method(sl_t *self) {
     sl_set_error(self, "no live output stream is open");
     return SL_ERROR_INVALID;
   }
-  if (impl->output_surface && !sl_surface_complete(impl->output_surface)) {
+  if (impl->output_pending_len ||
+      (impl->output_surface && !sl_surface_complete(impl->output_surface))) {
     sl_set_error(self,
                  "live output ends in an incomplete ANSI or UTF-8 sequence");
     return SL_ERROR_INVALID;
+  }
+  if (sl_transcript_visible(self)) {
+    impl->output_stream_active = 0;
+    return SL_OK;
   }
   prompt_origin = impl->active_prompt && impl->rendered_rows > 0
                       ? impl->rendered_top_row
@@ -5570,6 +5939,96 @@ static int sl_output_stream_end_method(sl_t *self) {
     return SL_ERROR_IO;
   }
   return SL_OK;
+}
+
+static int sl_print_above_backlog(sl_t *self, sl_stream_callback_t callback,
+                                  void *userdata) {
+  sl_impl_t *impl = sl_impl(self);
+  int result, ended;
+  if (!callback)
+    return SL_ERROR_INVALID;
+  result = sl_output_stream_begin_method(self);
+  if (result != SL_OK)
+    return result;
+  for (;;) {
+    const char *bytes = NULL;
+    size_t length = 0;
+    result = callback(self, userdata, &bytes, &length);
+    if (result != SL_OK || !length)
+      break;
+    result = sl_output_stream_write_method(self, bytes, length);
+    if (result != SL_OK)
+      break;
+  }
+  if (impl->output_pending_len) {
+    if (result == SL_OK) {
+      sl_set_error(self, "output ends in an incomplete ANSI or UTF-8 sequence");
+      result = SL_ERROR_INVALID;
+    }
+    impl->output_pending_len = 0;
+    sl_surface_reset_partial(sl_output_validator(impl));
+  }
+  ended = sl_output_stream_end_method(self);
+  return result == SL_OK ? ended : result;
+}
+
+int sl_output_replay_transcript(sl_t *self) {
+  sl_impl_t *impl = sl_impl(self);
+  struct sl_output_backlog *backlog = impl->output_backlog;
+  int active, previous, display, result = SL_OK;
+  size_t partial, first;
+  if (!backlog)
+    return SL_OK;
+  impl->output_backlog = NULL;
+  active = impl->output_stream_active;
+  previous = impl->output_write_active;
+  display = backlog->used || backlog->truncated;
+  /* Restart validation for replay across the ring's wrap, then restore the
+   * producer's trailing partial unit for the next live feed. */
+  partial = impl->output_pending_len;
+  memcpy(backlog->partial, impl->output_pending, partial);
+  impl->output_pending_len = 0;
+  impl->output_ansi_state = 0;
+  impl->output_trailing_newlines = backlog->initial_newlines;
+  sl_surface_reset_native_validation(impl->output_surface);
+  if (!sl_surface_is_native(impl->output_surface) && (display || active)) {
+    impl->output_stream_active = 0;
+    result = sl_output_stream_begin_method(self);
+  }
+  if (result == SL_OK && display)
+    result = sl_prepare_native_output(self);
+  impl->output_write_active = 1;
+  sl_surface_set_osc8(impl->output_surface,
+                      backlog->osc8 || impl->osc8.enabled);
+  if (result == SL_OK && backlog->truncated) {
+    if (sl_surface_hyperlink_active(impl->output_surface))
+      result = sl_output_write_validated(self, "\033]8;;\033\\", 7);
+    if (result == SL_OK) {
+      const char *boundary =
+          impl->output_trailing_newlines ? "\033[0m\r" : "\033[0m\r\n";
+      result = sl_output_write_validated(self, boundary, strlen(boundary));
+    }
+  }
+  if (result == SL_OK && backlog->used) {
+    first = SL_BACKLOG_BYTES - backlog->head;
+    if (first > backlog->used)
+      first = backlog->used;
+    result =
+        sl_output_write_validated(self, backlog->bytes + backlog->head, first);
+    if (result == SL_OK && first < backlog->used)
+      result = sl_output_write_validated(self, backlog->bytes,
+                                         backlog->used - first);
+  }
+  sl_surface_set_osc8(impl->output_surface, impl->osc8.enabled);
+  if (result == SL_OK && partial)
+    result = sl_output_write_validated(self, backlog->partial, partial);
+  if (result == SL_OK && !active && impl->output_stream_active)
+    result = sl_output_stream_end_method(self);
+  impl->output_stream_active = active;
+  impl->output_write_active = previous;
+  sl_surface_destroy(backlog->validator);
+  free(backlog);
+  return result;
 }
 
 static ssize_t sl_read_terminal_byte(sl_impl_t *impl, char *ch,
@@ -5641,9 +6100,10 @@ static ssize_t sl_pending_input_take(sl_impl_t *impl, char *ch) {
  * are always dispatched on this readline owner's thread. */
 static ssize_t sl_read_input_byte(sl_t *self, char *ch, int timeout_ms) {
   enum { SL_WATCH_DISPATCH_BUDGET = 8, SL_UI_TICK_CADENCE_MS = 100 };
-  struct pollfd fds[SL_MAX_WATCHES + 1];
-  sl_watch_id_t ids[SL_MAX_WATCHES + 1];
-  unsigned int slots[SL_MAX_WATCHES + 1];
+  struct pollfd fds[SL_MAX_WATCHES + SL_IMAGE_PASTE_MAX_FDS + 1];
+  sl_watch_id_t ids[SL_MAX_WATCHES + SL_IMAGE_PASTE_MAX_FDS + 1];
+  unsigned int slots[SL_MAX_WATCHES + SL_IMAGE_PASTE_MAX_FDS + 1];
+  sl_image_paste_wait_t image_wait;
   sl_impl_t *impl;
   int count;
   int i;
@@ -5652,12 +6112,28 @@ static ssize_t sl_read_input_byte(sl_t *self, char *ch, int timeout_ms) {
   int dispatched;
   int poll_timeout_ms;
   int deadline_valid;
-  struct timeval deadline_started;
+  int image_was_pending;
+  struct timespec deadline_started;
   if (!self || !ch)
     return -1;
   impl = sl_impl(self);
   if (!impl)
     return -1;
+  deadline_valid =
+      timeout_ms > 0 && clock_gettime(CLOCK_MONOTONIC, &deadline_started) == 0;
+retry:
+  image_was_pending = sl_image_pending(impl);
+  (void)sl_image_pump(self);
+  /* Completion can retire the last deadline. Paint its edit before a
+   * watch-only owner enters the next unbounded input wait. */
+  if (image_was_pending && !sl_image_pending(impl) && impl->active_prompt &&
+      sl_render_apply(self, impl->active_prompt) != 0) {
+    errno = EIO;
+    return -1;
+  }
+  if (sl_image_prepare(self, &image_wait) != SL_OK)
+    return -1;
+  errno = 0;
   if (sl_pending_input_take(impl, ch) == 1)
     return 1;
   sl_terminal_reap(impl);
@@ -5681,7 +6157,32 @@ static ssize_t sl_read_input_byte(sl_t *self, char *ch, int timeout_ms) {
     slots[count] = (unsigned int)slot;
     count++;
   }
+  for (i = 0; i < (int)image_wait.count; ++i) {
+    fds[count].fd = image_wait.fds[i].fd;
+    fds[count].events =
+        sl_watch_requested_poll_events(image_wait.fds[i].events);
+    fds[count].revents = 0;
+    ids[count] = 0;
+    slots[count++] = 0;
+  }
   poll_timeout_ms = timeout_ms;
+  if (deadline_valid) {
+    struct timespec now;
+    int64_t elapsed_ms;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) == 0) {
+      elapsed_ms = (int64_t)(now.tv_sec - deadline_started.tv_sec) * 1000 +
+                   (now.tv_nsec - deadline_started.tv_nsec) / 1000000;
+      if (elapsed_ms >= timeout_ms)
+        return sl_read_terminal_byte(impl, ch, 0);
+      poll_timeout_ms = timeout_ms - (int)elapsed_ms;
+    } else
+      deadline_valid = 0;
+  }
+  /* Acquisition deadlines wake internal work, not the input continuation's
+   * caller. If the clock is unavailable, retain a bounded terminal wait. */
+  if ((timeout_ms <= 0 || deadline_valid) && image_wait.timeout_ms >= 0 &&
+      (poll_timeout_ms < 0 || image_wait.timeout_ms < poll_timeout_ms))
+    poll_timeout_ms = image_wait.timeout_ms;
   if (poll_timeout_ms < 0 &&
       ((impl->request_queue_dispatch && !impl->len &&
         !impl->prompt_queue.editing.info.id && !impl->history_search_active &&
@@ -5690,16 +6191,44 @@ static ssize_t sl_read_input_byte(sl_t *self, char *ch, int timeout_ms) {
        (!impl->prompt_queue.approval_id &&
         sl_prompt_approval_index(impl, 0) >= 0)))
     poll_timeout_ms = 0;
-  if (poll_timeout_ms < 0 &&
+  if ((poll_timeout_ms < 0 || poll_timeout_ms > SL_UI_TICK_CADENCE_MS) &&
       (impl->terminal_children || impl->idle_callback ||
+       sl_transcript_visible(self) ||
        sl_surface_is_native(impl->output_surface) ||
        (impl->statusline.enabled && impl->statusline.spinner &&
         impl->statusline.busy)))
     poll_timeout_ms = SL_UI_TICK_CADENCE_MS;
-  if (count == 1)
-    return sl_read_terminal_byte(impl, ch, poll_timeout_ms);
-  deadline_valid = timeout_ms > 0 && gettimeofday(&deadline_started, NULL) == 0;
+  /* UI deadlines may wake the main read, but must not shorten an escape/UTF-8
+   * sequence's own bounded read. */
+  if (timeout_ms < 0 && impl->prompt_queue.display_deadline) {
+    int64_t now = sl_queue_display_now();
+    int64_t remaining = impl->prompt_queue.display_deadline - now;
+    int delay = now < 0 || remaining <= 0 ? 0
+                : remaining > INT_MAX     ? INT_MAX
+                                          : (int)remaining;
+    if (poll_timeout_ms < 0 || delay < poll_timeout_ms)
+      poll_timeout_ms = delay;
+  }
+  if (timeout_ms < 0 && impl->prompt_simulation.text) {
+    int64_t now = sl_queue_display_now();
+    int64_t remaining = impl->prompt_simulation.deadline - now;
+    int delay = now < 0               ? 100
+                : remaining <= 0      ? 0
+                : remaining > INT_MAX ? INT_MAX
+                                      : (int)remaining;
+    if (poll_timeout_ms < 0 || delay < poll_timeout_ms)
+      poll_timeout_ms = delay;
+  }
+  if (count == 1) {
+    ssize_t input_ready;
+    input_ready = sl_read_terminal_byte(impl, ch, poll_timeout_ms);
+    if (input_ready == 0 && deadline_valid)
+      goto retry;
+    return input_ready;
+  }
   ready = poll(fds, (nfds_t)count, poll_timeout_ms);
+  if (ready == 0 && deadline_valid)
+    goto retry;
   if (ready <= 0)
     return ready;
   /* Reconcile an input-owned resize before handing ready data to producers.
@@ -5763,30 +6292,13 @@ static ssize_t sl_read_input_byte(sl_t *self, char *ch, int timeout_ms) {
   }
   if (fds[0].revents != 0)
     return read(impl->input_fd, ch, 1);
-  /* A watch may arrive in the middle of an escape/UTF-8/paste sequence. Keep
-   * its original bounded continuation wait instead of treating the watch wake
-   * itself as a missing terminal byte. */
+  /* Continue servicing watches and acquisition during a bounded sequence,
+   * retaining the original deadline across every internal wakeup. */
   if (timeout_ms > 0) {
-    int remaining_ms;
     ssize_t input_ready;
-    if (deadline_valid) {
-      struct timeval now;
-      long elapsed_ms;
-      if (gettimeofday(&now, NULL) == 0) {
-        elapsed_ms = (long)(now.tv_sec - deadline_started.tv_sec) * 1000L +
-                     (long)(now.tv_usec - deadline_started.tv_usec) / 1000L;
-        if (elapsed_ms >= (long)timeout_ms) {
-          errno = 0;
-          return 0;
-        }
-        remaining_ms = timeout_ms - (int)elapsed_ms;
-      } else {
-        remaining_ms = timeout_ms;
-      }
-    } else {
-      remaining_ms = timeout_ms;
-    }
-    input_ready = sl_read_terminal_byte(impl, ch, remaining_ms);
+    if (deadline_valid)
+      goto retry;
+    input_ready = sl_read_terminal_byte(impl, ch, timeout_ms);
     if (input_ready == 0)
       errno = 0;
     return input_ready;
@@ -6056,7 +6568,8 @@ static int sl_try_pin_scroll_region(sl_t *self) {
  * never within a feed call. Multiple writes in one callback stay immediate. */
 static void sl_refresh_scroll_region(sl_t *self) {
   sl_impl_t *impl = sl_impl(self);
-  if (!impl || impl->output_write_active || !impl->scroll_region_probe_pending)
+  if (!impl || impl->output_write_active ||
+      !impl->scroll_region_probe_pending || sl_transcript_visible(self))
     return;
   impl->scroll_region_probe_pending = 0;
   if (impl->live_scroll_region && !sl_prompt_uses_absolute_rows(impl))
@@ -6344,7 +6857,7 @@ static void sl_history_nav_start(sl_t *self) {
   }
 }
 
-static void sl_history_nav_reset(sl_impl_t *impl) {
+void sl_history_nav_reset(sl_impl_t *impl) {
   if (!impl)
     return;
   free(impl->history_edit);
@@ -6364,11 +6877,11 @@ static void sl_history_nav(sl_t *self, int dir) {
     next = 0;
   if (next > impl->history.len)
     next = impl->history.len;
-  impl->history_index = next;
-  if (next == impl->history.len)
-    (void)sl_buf_set(self, impl->history_edit ? impl->history_edit : "");
-  else
-    (void)sl_buf_set(self, impl->history.items[next]);
+  if (next == impl->history.len) {
+    if (sl_buf_set(self, impl->history_edit ? impl->history_edit : "") == 0)
+      sl_history_nav_reset(impl);
+  } else if (sl_buf_set(self, impl->history.items[next]) == 0)
+    impl->history_index = next;
 }
 
 static void sl_history_search_cleanup(sl_t *self, sl_history_search_t *search) {
@@ -6583,6 +7096,8 @@ static int sl_prompt_queue_admit(sl_t *self, sl_prompt_queue_mode_t mode,
   int promote = mode == SL_PROMPT_QUEUE_MODE_STEER;
   int index = editing ? queue->editing_index : queue->len;
   *admitted = 0;
+  if (sl_image_pending(impl))
+    return SL_ERROR_NOT_READY;
   if (!queue->enabled || !impl->len)
     return SL_OK;
   if (editing) {
@@ -6670,6 +7185,17 @@ static int sl_handle_prompt_queue_key(sl_t *self, int key, int *handled,
   if (!sl_prompt_queue_enabled(impl))
     return SL_OK;
   keys = &impl->prompt_queue.keys;
+  if (sl_image_pending(impl) &&
+      (key == SL_KEY_ENTER ||
+       (keys->enqueue_draft != SL_KEY_NONE &&
+        key == (int)keys->enqueue_draft) ||
+       (keys->submit_or_promote_newest != SL_KEY_NONE &&
+        key == (int)keys->submit_or_promote_newest))) {
+    *handled = 1;
+    sl_set_error(self, "image upload is pending");
+    sl_prompt_queue_bell(impl);
+    return SL_OK;
+  }
   if ((keys->enqueue_draft != SL_KEY_NONE && key == (int)keys->enqueue_draft) ||
       (keys->submit_or_promote_newest != SL_KEY_NONE &&
        key == (int)keys->submit_or_promote_newest) ||
@@ -6914,7 +7440,11 @@ static int sl_clear_draft(sl_t *self) {
 static int sl_stash_draft(sl_t *self) {
   sl_impl_t *impl = sl_impl(self);
   char *saved;
-  if (!impl->len)
+  size_t i;
+  for (i = 0; i < impl->len; ++i)
+    if (!isspace((unsigned char)impl->buf[i]))
+      break;
+  if (i == impl->len)
     return 0;
   saved = sl_strdup(impl->buf);
   if (!saved || sl_buf_delete(self, 0, impl->len) != 0) {
@@ -7305,6 +7835,44 @@ static char *sl_readline_impl(sl_t *self, const char *prompt,
       key = sl_read_paste_input(self, paste_bytes, &paste_len);
     else
       key = sl_read_key(self);
+    if (waiting_edit && impl->prompt_simulation.text)
+      (void)sl_cancel_prompt_simulation_method(self);
+    else
+      key = sl_prompt_simulation_key(self, key);
+    if ((key != SL_KEY_NONE && sl_transcript_visible(self)) ||
+        (key == SL_KEY_CTRL_T && !impl->bracketed_paste && !waiting_edit &&
+         !impl->control_x_pending &&
+         !sl_find_key_binding(impl, SL_KEY_CTRL_T))) {
+      int view_key = 0;
+      if (impl->bracketed_paste) {
+        if (key == SL_KEY_PASTE_END)
+          impl->bracketed_paste = 0;
+        view_key = 1;
+      } else if (key == SL_KEY_PASTE_BEGIN) {
+        impl->bracketed_paste = 1;
+        view_key = 1;
+      } else {
+        view_key = sl_transcript_key(self, key);
+      }
+      if (view_key < 0 ||
+          (view_key && sl_render_apply(self, render_prompt) != 0)) {
+        sl_set_error(self, "failed to render terminal transcript");
+        failed = 1;
+        break;
+      }
+      if (view_key)
+        continue;
+    }
+    if (!impl->bracketed_paste && sl_image_pending(impl)) {
+      if (key == SL_KEY_CTRL_C) {
+        sl_image_invalidate(self, "image upload cancelled");
+        key = SL_KEY_UNKNOWN;
+      } else if (key == SL_KEY_ENTER || key == SL_KEY_ALT_ENTER) {
+        sl_set_error(self, "image upload is pending");
+        sl_prompt_queue_bell(impl);
+        key = SL_KEY_UNKNOWN;
+      }
+    }
     /* Tab may complete held text and earlier typing not yet available in the
      * draft. Classify it only after the edit outcome and deferred input. */
     if ((waiting_edit || sl_backend_wait_key(impl, key)) &&
@@ -7351,8 +7919,10 @@ static char *sl_readline_impl(sl_t *self, const char *prompt,
         key = SL_KEY_UNKNOWN;
       }
     }
-    if (key == SL_KEY_TAB)
+    if (key == SL_KEY_TAB) {
+      impl->image_literal = 0;
       sl_completion_prepare(self);
+    }
     if (key != SL_KEY_NONE &&
         (key != SL_KEY_CTRL_L || sl_find_key_binding(impl, (sl_key_t)key))) {
       int command = SL_EDIT_OTHER;
@@ -7385,9 +7955,9 @@ static char *sl_readline_impl(sl_t *self, const char *prompt,
      * decoded. Preserve a real key; release FIFO work only on an otherwise
      * idle iteration. */
     if (key == SL_KEY_NONE && queue_dispatch && impl->request_queue_dispatch &&
-        impl->len == 0 && !impl->prompt_queue.editing.info.id &&
-        !impl->history_search_active && !impl->bracketed_paste &&
-        !impl->control_x_pending &&
+        !sl_image_pending(impl) && impl->len == 0 &&
+        !impl->prompt_queue.editing.info.id && !impl->history_search_active &&
+        !impl->bracketed_paste && !impl->control_x_pending &&
         sl_prompt_queue_first_queued(&impl->prompt_queue) >= 0) {
       queued = sl_prompt_queue_deliver_raw(
           &impl->prompt_queue,
@@ -7531,6 +8101,11 @@ static char *sl_readline_impl(sl_t *self, const char *prompt,
         break;
       }
       if (action == SL_KEY_ACTION_SUBMIT) {
+        if (sl_image_pending(impl)) {
+          impl->request_submit = 0;
+          sl_set_error(self, "image upload is pending");
+          break;
+        }
         sl_history_search_accept(self, &search);
         done = 1;
         break;
@@ -7750,9 +8325,11 @@ static char *sl_readline_impl(sl_t *self, const char *prompt,
           sl_set_error(self, "invalid draft undo state");
           failed = 1;
           done = 1;
-        } else if (undone)
+        } else if (undone) {
+          sl_image_changed(self, change.at, change.removed, change.inserted);
           sl_completion_changed(impl, change.at, change.removed,
                                 change.inserted, 1);
+        }
         break;
       }
       case SL_KEY_CTRL_Y:
@@ -7778,6 +8355,10 @@ static char *sl_readline_impl(sl_t *self, const char *prompt,
         char error[SL_ERROR_LEN];
         if (impl->disable_image_paste) {
           sl_set_error(self, "clipboard image paste is disabled");
+        } else if (impl->image_callback) {
+          sl_image_paste_id_t id;
+          if (sl_image_start(self, &id) != SL_OK)
+            sl_prompt_queue_bell(impl);
         } else if (sl_clipboard_save_image(impl->image_paste_path_template,
                                            &path, error, sizeof(error)) != 0) {
           sl_set_error(self, error);
@@ -8029,11 +8610,17 @@ static char *sl_readline_impl(sl_t *self, const char *prompt,
       deferred_since_render = 0;
     }
   }
+  if (failed)
+    sl_output_discard_backlog(impl);
+  if (sl_transcript_leave(self))
+    failed = 1;
   if (!failed && !suspended && sl_completion_finish(self) != SL_OK)
     failed = 1;
   sl_edit_end(&impl->edit);
   impl->edit.enabled = 0;
   impl->active_readline = 0;
+  if (!suspended)
+    sl_image_invalidate(self, "image upload cancelled: editor exited");
   if (suspended) {
     /* Only the editor continuation is retained. The owner closes the output
      * session before a child runs; producer bytes are never saved or replayed.
@@ -8254,6 +8841,8 @@ static char *sl_next_prompt_method(sl_t *self, const char *prompt,
 
 static void sl_destroy_method(sl_t *self) {
   sl_impl_t *impl;
+  if (self && self->impl && ((sl_impl_t *)self->impl)->image_callback_active)
+    return;
   impl = sl_impl(self);
   if (!self)
     return;
@@ -8273,6 +8862,10 @@ static void sl_destroy_method(sl_t *self) {
     return;
   }
   if (impl) {
+    (void)sl_cancel_prompt_simulation_method(self);
+    sl_output_discard_backlog(impl);
+    sl_transcript_destroy(self);
+    sl_image_destroy(self);
     sl_terminal_cleanup(impl);
     sl_backend_destroy(self);
     if (sl_surface_is_native(impl->output_surface))
@@ -8339,6 +8932,8 @@ static int sl_set_osc8_mode_method(sl_t *self, sl_osc8_mode_t mode) {
     return SL_ERROR_INVALID;
   }
   if (impl->output_stream_active ||
+      (impl->output_backlog &&
+       sl_surface_validated_hyperlink_active(sl_output_validator(impl))) ||
       (impl->output_surface &&
        (!sl_surface_complete(impl->output_surface) ||
         sl_surface_hyperlink_active(impl->output_surface)))) {
@@ -8350,7 +8945,7 @@ static int sl_set_osc8_mode_method(sl_t *self, sl_osc8_mode_t mode) {
   impl->osc8.detected = sl_osc8_detect(impl->output_fd);
   impl->osc8.enabled =
       mode == SL_OSC8_ON || (mode == SL_OSC8_AUTO && impl->osc8.detected);
-  sl_surface_set_osc8(impl->output_surface, impl->osc8.enabled);
+  sl_surface_set_osc8(sl_output_validator(impl), impl->osc8.enabled);
   return SL_OK;
 }
 
@@ -8511,6 +9106,18 @@ static int sl_set_prompt_queue_method(sl_t *self, int enabled, int max_entries,
   impl->prompt_queue.max_entries = max_entries;
   impl->prompt_queue.preview_entries = preview_entries;
   sl_prompt_queue_sync_queued_turns_delivery(impl);
+  return SL_OK;
+}
+
+static int sl_set_prompt_queue_display_delay_method(sl_t *self, int delay_ms) {
+  sl_impl_t *impl = sl_impl(self);
+  if (!impl || delay_ms < 0) {
+    sl_set_error(self, "invalid prompt queue display delay");
+    return SL_ERROR_INVALID;
+  }
+  impl->prompt_queue.display_delay_ms = delay_ms;
+  if (impl->active_prompt && sl_render_apply(self, impl->active_prompt) != 0)
+    return SL_ERROR_IO;
   return SL_OK;
 }
 
@@ -8869,6 +9476,10 @@ static int sl_prompt_queue_enqueue_draft_method(sl_t *self) {
   sl_impl_t *impl;
   int rc, managed_edit;
   impl = sl_impl(self);
+  if (sl_image_pending(impl)) {
+    sl_set_error(self, "image upload is pending");
+    return SL_ERROR_NOT_READY;
+  }
   if (impl && sl_completion_finish(self) != SL_OK)
     return SL_ERROR;
   if (impl && impl->backend)
@@ -8962,6 +9573,29 @@ static int sl_get_prompt_queue_stopped_method(const sl_t *self, int *out) {
   if (!impl || !out)
     return SL_ERROR_INVALID;
   *out = impl->prompt_queue.stopped;
+  return SL_OK;
+}
+
+static int sl_prompt_queue_stop_method(sl_t *self) {
+  sl_impl_t *impl = sl_impl(self);
+  if (impl && impl->backend) {
+    sl_queue_request_t request;
+    memset(&request, 0, sizeof(request));
+    request.operation = SL_QUEUE_STOP;
+    return sl_queue_backend_request(self, &request, NULL);
+  }
+  if (sl_prompt_queue_require_enabled(self, impl) != SL_OK)
+    return SL_ERROR_INVALID;
+  impl->prompt_queue.stopped = 1;
+  {
+    int i;
+    for (i = 0; i < impl->prompt_queue.len; ++i)
+      impl->prompt_queue.items[i].info.stopped = 1;
+    impl->prompt_queue.editing.info.stopped = 1;
+  }
+  sl_prompt_queue_sync_queued_turns_delivery(impl);
+  impl->request_queue_dispatch = 0;
+  sl_prompt_queue_schedule(impl);
   return SL_OK;
 }
 
@@ -9457,6 +10091,7 @@ void sl_config_init(sl_config_t *config) {
   config->prompt_queue = 0;
   config->prompt_queue_max_entries = SL_PROMPT_QUEUE_DEFAULT_MAX;
   config->prompt_queue_preview_entries = SL_PROMPT_QUEUE_DEFAULT_PREVIEWS;
+  config->prompt_queue_display_delay_ms = 500;
   config->prompt_theme = SL_PROMPT_THEME_DEFAULT;
   config->statusline = 0;
   config->statusline_start_element = 0;
@@ -9466,6 +10101,12 @@ void sl_config_init(sl_config_t *config) {
   config->clear_prompt_on_exit = 0;
   config->disable_image_paste = 0;
   config->image_paste_path_template = NULL;
+  config->image_paste_callback = NULL;
+  config->image_paste_context = NULL;
+  config->image_paste_max_bytes = 0;
+  config->image_paste_source_timeout_ms = 0;
+  config->image_paste_host_timeout_ms = 0;
+  config->image_paste_total_timeout_ms = 0;
   config->queue_backend = NULL;
   config->queue_backend_context = NULL;
   config->osc8_mode = SL_OSC8_OFF;
@@ -9484,9 +10125,15 @@ static sl_t *sl_create_with_config_impl(const sl_config_t *config) {
       (!config->queue_backend && config->queue_backend_context) ||
       config->live_scroll_region < 0 || config->clear_prompt_on_exit < 0 ||
       config->disable_image_paste < 0 ||
+      (!config->image_paste_callback && config->image_paste_context) ||
+      config->image_paste_max_bytes > (size_t)INT_MAX ||
+      config->image_paste_source_timeout_ms < 0 ||
+      config->image_paste_host_timeout_ms < 0 ||
+      config->image_paste_total_timeout_ms < 0 ||
       !sl_clipboard_valid_path_template(config->image_paste_path_template) ||
       config->prompt_queue < 0 || config->prompt_queue_max_entries < 1 ||
       config->prompt_queue_preview_entries < 1 ||
+      config->prompt_queue_display_delay_ms < 0 ||
       config->prompt_theme < SL_PROMPT_THEME_PLAIN ||
       config->prompt_theme > SL_PROMPT_THEME_DEFAULT ||
       config->statusline < 0 || config->status_spinner < 0 ||
@@ -9504,6 +10151,13 @@ static sl_t *sl_create_with_config_impl(const sl_config_t *config) {
     return NULL;
   }
   self->readline = sl_readline_method;
+  self->image_paste_start = sl_image_start;
+  self->image_paste_start_source = sl_image_start_source;
+  self->image_paste_prepare = sl_image_prepare;
+  self->image_paste_pump = sl_image_pump;
+  self->image_paste_resume = sl_image_resume;
+  self->image_paste_complete = sl_image_complete;
+  self->image_paste_cancel = sl_image_cancel;
   self->set_completion_providers = sl_set_completion_providers_method;
   self->set_osc8_mode = sl_set_osc8_mode_method;
   self->get_osc8_info = sl_get_osc8_info_method;
@@ -9544,6 +10198,8 @@ static sl_t *sl_create_with_config_impl(const sl_config_t *config) {
   self->cursor = sl_cursor_method;
   self->set_cursor = sl_set_cursor_method;
   self->submit = sl_submit_method;
+  self->simulate_prompt = sl_simulate_prompt_method;
+  self->cancel_prompt_simulation = sl_cancel_prompt_simulation_method;
   self->cancel = sl_cancel_method;
   self->suspend = sl_suspend_method;
   self->print_above = sl_print_above_method;
@@ -9552,6 +10208,8 @@ static sl_t *sl_create_with_config_impl(const sl_config_t *config) {
   self->impl = impl;
   self->next_prompt = sl_next_prompt_method;
   self->set_prompt_queue = sl_set_prompt_queue_method;
+  self->set_prompt_queue_display_delay =
+      sl_set_prompt_queue_display_delay_method;
   self->set_prompt_theme = sl_set_prompt_theme_method;
   self->set_statusline = sl_set_statusline_method;
   self->set_status_message = sl_set_status_message_method;
@@ -9592,6 +10250,7 @@ static sl_t *sl_create_with_config_impl(const sl_config_t *config) {
   self->prompt_queue_set_executable = sl_prompt_queue_set_executable_method;
   self->get_prompt_queue_stopped = sl_get_prompt_queue_stopped_method;
   self->prompt_queue_resume = sl_prompt_queue_resume_method;
+  self->prompt_queue_stop = sl_prompt_queue_stop_method;
   self->queue_backend_request = sl_queue_backend_request_impl;
   self->queue_backend_result = sl_queue_backend_result_impl;
   self->queue_backend_update = sl_queue_backend_update_impl;
@@ -9607,6 +10266,19 @@ static sl_t *sl_create_with_config_impl(const sl_config_t *config) {
   impl->live_scroll_region = config->live_scroll_region;
   impl->clear_prompt_on_exit = config->clear_prompt_on_exit;
   impl->disable_image_paste = config->disable_image_paste;
+  impl->image_callback = config->image_paste_callback;
+  impl->image_context = config->image_paste_context;
+  impl->image_limit =
+      config->image_paste_max_bytes ? config->image_paste_max_bytes : 33554432u;
+  impl->image_source_timeout = config->image_paste_source_timeout_ms
+                                   ? config->image_paste_source_timeout_ms
+                                   : 10000;
+  impl->image_host_timeout = config->image_paste_host_timeout_ms
+                                 ? config->image_paste_host_timeout_ms
+                                 : 30000;
+  impl->image_total_timeout = config->image_paste_total_timeout_ms
+                                  ? config->image_paste_total_timeout_ms
+                                  : 120000;
   if (config->image_paste_path_template) {
     impl->image_paste_path_template = strdup(config->image_paste_path_template);
     if (!impl->image_paste_path_template) {
@@ -9617,6 +10289,7 @@ static sl_t *sl_create_with_config_impl(const sl_config_t *config) {
   impl->prompt_queue.enabled = config->prompt_queue;
   impl->prompt_queue.max_entries = config->prompt_queue_max_entries;
   impl->prompt_queue.preview_entries = config->prompt_queue_preview_entries;
+  impl->prompt_queue.display_delay_ms = config->prompt_queue_display_delay_ms;
   impl->prompt_queue.delivery = SL_PROMPT_QUEUE_DELIVERY_AUTO;
   impl->prompt_queue.profile = SL_PROMPT_QUEUE_PROFILE_DEFAULT;
   sl_prompt_queue_profile_keys(impl->prompt_queue.profile,
@@ -9771,6 +10444,12 @@ int sl_set_image_paste_path_template(sl_t *self, const char *path_template) {
   if (!self || !self->set_image_paste_path_template)
     return SL_ERROR_INVALID;
   return self->set_image_paste_path_template(self, path_template);
+}
+
+int sl_set_prompt_queue_display_delay(sl_t *self, int delay_ms) {
+  return self && self->set_prompt_queue_display_delay
+             ? self->set_prompt_queue_display_delay(self, delay_ms)
+             : SL_ERROR_INVALID;
 }
 
 int sl_set_prompt_queue(sl_t *self, int enabled, int max_entries,
@@ -9984,6 +10663,12 @@ int sl_get_prompt_queue_stopped(const sl_t *self, int *out) {
   return self->get_prompt_queue_stopped(self, out);
 }
 
+int sl_prompt_queue_stop(sl_t *self) {
+  if (!self || !self->prompt_queue_stop)
+    return SL_ERROR_INVALID;
+  return self->prompt_queue_stop(self);
+}
+
 int sl_prompt_queue_resume(sl_t *self) {
   if (!self || !self->prompt_queue_resume)
     return SL_ERROR_INVALID;
@@ -10134,6 +10819,19 @@ int sl_submit(sl_t *self) {
   if (!self || !self->submit)
     return SL_ERROR_INVALID;
   return self->submit(self);
+}
+
+int sl_simulate_prompt(sl_t *self, const char *text,
+                       const sl_prompt_simulation_options_t *options) {
+  return self && self->simulate_prompt
+             ? self->simulate_prompt(self, text, options)
+             : SL_ERROR_INVALID;
+}
+
+int sl_cancel_prompt_simulation(sl_t *self) {
+  return self && self->cancel_prompt_simulation
+             ? self->cancel_prompt_simulation(self)
+             : SL_ERROR_INVALID;
 }
 
 int sl_cancel(sl_t *self) {

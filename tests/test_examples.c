@@ -17,7 +17,7 @@
 #include <unistd.h>
 
 enum {
-  MAX_ROWS = 40,
+  MAX_ROWS = 64,
   MAX_COLS = 140,
   RAW_CAP = 262144,
   CHAT_READY_TIMEOUT_MS = 15000
@@ -635,6 +635,40 @@ static void test_chat_live_queue(const char *path) {
   PASS();
 }
 
+static void test_chat_transcript_replay(const char *path) {
+  struct terminal t;
+  pid_t pid;
+  int fd;
+  size_t view;
+  TEST("chat finishes a response while the transcript is visible");
+  ASSERT_TRUE(setenv("SOFTLINE_CHAT_CHAR_MS", "10", 1) == 0,
+              "failed to set stream delay");
+  pid = spawn(path, &fd, 80, 16);
+  ASSERT_TRUE(setenv("SOFTLINE_CHAT_CHAR_MS", "2", 1) == 0,
+              "failed to restore stream delay");
+  ASSERT_TRUE(pid > 0, "spawn failed");
+  term_init(&t, fd, 80, 16);
+  ASSERT_TRUE(wait_raw(&t, "\033[?2004h", CHAT_READY_TIMEOUT_MS) == 0,
+              "editor missing");
+  ASSERT_TRUE(write(fd, "first\r", 6) == 6 &&
+                  wait_screen(&t, "! Thinking...", 3000) == 0,
+              "response did not start");
+  ASSERT_TRUE(write(fd, "draft\024", 6) == 6 &&
+                  wait_raw(&t, "1/2 Run log", 3000) == 0,
+              "transcript did not open");
+  view = t.raw_len;
+  ASSERT_TRUE(wait_raw_since(&t, view, "Responses received: 1", 6000) == 0 &&
+                  !strstr(t.raw + view, "Next step"),
+              "chat did not finish in the background or leaked into the log");
+  ASSERT_TRUE(write(fd, "\033", 1) == 1 &&
+                  wait_raw_after(&t, "\033[?1049l", "Next step", 3000) == 0 &&
+                  wait_screen(&t, "> draft", 3000) == 0,
+              "chat output or the draft was lost on return");
+  ASSERT_TRUE(write(fd, "\033q", 2) == 2 && finish(pid, fd) == 0,
+              "chat did not exit cleanly");
+  PASS();
+}
+
 static void test_chat_long_unbroken_editor_word(const char *path) {
   int fd;
   int first_row;
@@ -825,11 +859,12 @@ static void test_chat_spacing_across_turns(const char *path) {
   TEST("chat keeps one empty row across consecutive response turns");
   ASSERT_TRUE(setenv("SOFTLINE_CHAT_CHAR_MS", "0", 1) == 0,
               "failed to set fast stream delay");
-  pid = spawn(path, &fd, 120, 40);
+  /* Keep all three turns visible even when the third reply draws a chart. */
+  pid = spawn(path, &fd, 120, 64);
   ASSERT_TRUE(setenv("SOFTLINE_CHAT_CHAR_MS", "2", 1) == 0,
               "failed to restore stream delay");
   ASSERT_TRUE(pid > 0, "spawn failed");
-  term_init(&t, fd, 120, 40);
+  term_init(&t, fd, 120, 64);
   ASSERT_TRUE(wait_raw(&t, "\033[?2004h", CHAT_READY_TIMEOUT_MS) == 0,
               "editor missing");
   ASSERT_TRUE(write(fd, "one\r", 4) == 4, "first send failed");
@@ -842,9 +877,13 @@ static void test_chat_spacing_across_turns(const char *path) {
               "second response missing");
   ASSERT_TRUE(wait_screen(&t, "+ streaming demo", 10000) == 0,
               "second response did not finish");
+  ASSERT_TRUE(strstr(t.raw, "                    ") == NULL,
+              "completed prose turns wrote literal blank runs to scrollback");
   ASSERT_TRUE(write(fd, "three\r", 6) == 6, "third send failed");
   ASSERT_TRUE(wait_screen(&t, "A single line can be", 3000) == 0,
               "third response missing");
+  ASSERT_TRUE(wait_screen(&t, "Progress snapshot", 3000) == 0,
+              "third response chart missing");
   ASSERT_TRUE(wait_screen(&t, "+ streaming demo", 10000) == 0,
               "third response did not finish");
   ASSERT_TRUE(term_row_of(&t, "# A short answer") ==
@@ -857,8 +896,6 @@ static void test_chat_spacing_across_turns(const char *path) {
                       term_row_of(&t, "The stream is still live.") + 2 &&
                   term_row_of(&t, "# Notes") == term_row_of(&t, "> three") + 2,
               "consecutive turns have extra blank rows");
-  ASSERT_TRUE(strstr(t.raw, "                    ") == NULL,
-              "completed turns wrote literal blank runs to scrollback");
   ASSERT_TRUE(cancel_and_quit(&t, fd, pid) == 0, "child failed");
   PASS();
 }
@@ -1450,6 +1487,7 @@ static void test_prompt_frames(sl_prompt_theme_t theme, int clear,
     config.prompt_theme = theme;
     config.clear_prompt_on_exit = clear;
     config.prompt_queue = 1;
+    config.prompt_queue_display_delay_ms = 0;
     config.statusline = 1;
     sl = sl_create_with_config(&config);
     producer.input = commands[0];
@@ -1704,6 +1742,7 @@ test_queue_after_output_fills_prompt_region(sl_prompt_theme_t theme) {
     config.input_fd = config.output_fd = slave;
     config.prompt_theme = theme;
     config.prompt_queue = 1;
+    config.prompt_queue_display_delay_ms = 0;
     config.statusline = 1;
     sl = sl_create_with_config(&config);
     producer.input = commands[0];
@@ -1903,6 +1942,7 @@ int main(int argc, char **argv) {
   test_chat_eof_goodbye(argv[2], 1);
   test_simple(argv[1]);
   test_chat_live_queue(argv[2]);
+  test_chat_transcript_replay(argv[2]);
   test_chat_long_unbroken_editor_word(argv[2]);
   test_chat_queued_quit(argv[2]);
   test_chat_promoted_quit(argv[2]);

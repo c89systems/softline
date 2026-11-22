@@ -4,6 +4,263 @@ foreach(terminal_root "${SOFTLINE_TERMINAL_TEST_ROOT}" "$ENV{SOFTLINE_TERMINAL_T
   endif()
 endforeach()
 find_package(Threads REQUIRED)
+function(softline_test_silent_cursor target)
+  if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND TARGET softline_static)
+    target_link_libraries(${target} PRIVATE softline_static ${ARGN})
+    target_compile_definitions(${target} PRIVATE SOFTLINE_TEST_SILENT_CURSOR_PROBE)
+    target_link_options(${target} PRIVATE -Wl,--wrap=write -Wl,--wrap=select)
+  else()
+    target_link_libraries(${target} PRIVATE softline ${ARGN})
+  endif()
+endfunction()
+if(UNIX)
+  add_executable(test_transcript test_transcript.c)
+  softline_test_silent_cursor(test_transcript Threads::Threads)
+  if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_link_libraries(test_transcript PRIVATE util)
+  endif()
+  softline_apply_warnings(test_transcript)
+  softline_local_runtime(test_transcript)
+  add_test(NAME softline_transcript COMMAND test_transcript)
+  set_tests_properties(softline_transcript PROPERTIES LABELS "integration;terminal;memcheck" TIMEOUT 15)
+  add_executable(test_completion_parity test_completion_parity.c)
+  target_link_libraries(test_completion_parity PRIVATE softline)
+  if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_link_libraries(test_completion_parity PRIVATE util)
+  endif()
+  softline_apply_warnings(test_completion_parity)
+  softline_local_runtime(test_completion_parity)
+  add_test(NAME softline_completion_parity COMMAND test_completion_parity
+    "${CMAKE_CURRENT_SOURCE_DIR}/completion-parity.tsv")
+  set_tests_properties(softline_completion_parity PROPERTIES LABELS "unit;editing;completion;web;memcheck" TIMEOUT 15)
+  add_executable(test_terminal_supervisor test_terminal_supervisor.c)
+  if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_link_libraries(test_terminal_supervisor PRIVATE util)
+  endif()
+  softline_apply_warnings(test_terminal_supervisor)
+  softline_local_runtime(test_terminal_supervisor)
+  add_test(NAME softline_terminal_supervisor COMMAND test_terminal_supervisor
+    "$<TARGET_FILE:softline_terminal_supervisor>")
+  set_tests_properties(softline_terminal_supervisor PROPERTIES LABELS "integration;terminal;memcheck" TIMEOUT 30)
+  add_executable(terminal_supervisor_fixture terminal_supervisor_fixture.c)
+  softline_apply_warnings(terminal_supervisor_fixture)
+  softline_local_runtime(terminal_supervisor_fixture)
+  add_test(NAME softline_terminal_supervisor_shutdown COMMAND test_terminal_supervisor
+    "$<TARGET_FILE:terminal_supervisor_fixture>" shutdown)
+  add_test(NAME softline_terminal_supervisor_signals COMMAND test_terminal_supervisor
+    "$<TARGET_FILE:softline_terminal_supervisor>" signals)
+  set_tests_properties(softline_terminal_supervisor_shutdown softline_terminal_supervisor_signals
+    PROPERTIES LABELS "integration;terminal;memcheck" TIMEOUT 30)
+  if(TARGET queue_demo_client)
+    add_executable(test_cbor_tcp_stream test_cbor_tcp_stream.c)
+    target_include_directories(test_cbor_tcp_stream PRIVATE "${PROJECT_SOURCE_DIR}/examples")
+    target_link_libraries(test_cbor_tcp_stream PRIVATE queue_demo_wire)
+    softline_apply_warnings(test_cbor_tcp_stream)
+    softline_local_runtime(test_cbor_tcp_stream)
+    add_test(NAME softline_cbor_tcp_stream COMMAND test_cbor_tcp_stream)
+    set_tests_properties(softline_cbor_tcp_stream PROPERTIES LABELS "integration;queue;memcheck" TIMEOUT 10)
+    add_executable(test_terminal_transport test_terminal_transport.c)
+    target_include_directories(test_terminal_transport PRIVATE "${PROJECT_SOURCE_DIR}/examples")
+    target_link_libraries(test_terminal_transport PRIVATE queue_demo_client)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+      target_link_libraries(test_terminal_transport PRIVATE util)
+    endif()
+    softline_apply_warnings(test_terminal_transport)
+    softline_local_runtime(test_terminal_transport)
+    add_test(NAME softline_terminal_transport COMMAND test_terminal_transport)
+    set_tests_properties(softline_terminal_transport PROPERTIES LABELS "integration;terminal;memcheck" TIMEOUT 15)
+  endif()
+  if(TARGET softline_static)
+    add_executable(test_terminal_signals test_terminal_signals.c)
+    target_link_libraries(test_terminal_signals PRIVATE softline_static)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+      target_link_libraries(test_terminal_signals PRIVATE util)
+      target_compile_definitions(test_terminal_signals PRIVATE SOFTLINE_TEST_WRAP_TERMIOS=1)
+      target_link_options(test_terminal_signals PRIVATE -Wl,--wrap=tcsetattr -Wl,--wrap=fcntl)
+    endif()
+    softline_apply_warnings(test_terminal_signals)
+    softline_local_runtime(test_terminal_signals)
+    add_test(NAME softline_terminal_signals COMMAND test_terminal_signals)
+    set_tests_properties(softline_terminal_signals PROPERTIES LABELS "integration;terminal;memcheck" TIMEOUT 30)
+    # Memcheck does not emulate the default SIGTSTP job-control stop.
+    add_test(NAME softline_terminal_job_control COMMAND test_terminal_signals job-control)
+    set_tests_properties(softline_terminal_job_control PROPERTIES LABELS "integration;terminal" TIMEOUT 15)
+  endif()
+  add_executable(test_terminal_session test_terminal_session.c)
+  if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND TARGET softline_static)
+    target_link_libraries(test_terminal_session PRIVATE softline_static)
+    target_compile_definitions(test_terminal_session PRIVATE SOFTLINE_TEST_WRAP_WAITPID=1)
+    target_link_options(test_terminal_session PRIVATE -Wl,--wrap=waitpid)
+  else()
+    target_link_libraries(test_terminal_session PRIVATE softline)
+  endif()
+  softline_apply_warnings(test_terminal_session)
+  softline_local_runtime(test_terminal_session)
+  add_test(NAME softline_terminal_session COMMAND test_terminal_session)
+  set_tests_properties(softline_terminal_session PROPERTIES LABELS "unit;integration;terminal;memcheck" TIMEOUT 15)
+endif()
+add_executable(test_www test_www.c)
+target_link_libraries(test_www PRIVATE softline)
+softline_apply_warnings(test_www)
+softline_local_runtime(test_www)
+add_test(NAME softline_www COMMAND test_www)
+set_tests_properties(softline_www PROPERTIES LABELS "unit;web;memcheck" TIMEOUT 10)
+if(UNIX)
+  add_executable(test_prompt_simulation test_prompt_simulation.c)
+  target_link_libraries(test_prompt_simulation PRIVATE softline)
+  if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_link_libraries(test_prompt_simulation PRIVATE util)
+  endif()
+  softline_apply_warnings(test_prompt_simulation)
+  softline_local_runtime(test_prompt_simulation)
+  add_test(NAME softline_prompt_simulation COMMAND test_prompt_simulation)
+  set_tests_properties(softline_prompt_simulation PROPERTIES LABELS "integration;queue;memcheck" TIMEOUT 8)
+endif()
+add_executable(test_www_assets test_www_assets.c)
+target_link_libraries(test_www_assets PRIVATE softline)
+softline_apply_warnings(test_www_assets)
+softline_local_runtime(test_www_assets)
+add_test(NAME softline_www_assets COMMAND test_www_assets "${PROJECT_SOURCE_DIR}")
+set_tests_properties(softline_www_assets PROPERTIES LABELS "unit;web;memcheck" TIMEOUT 10)
+# Optional development test runner; neither the library nor native tests depend
+# on Node, a package manager, a browser installation or additional JS packages.
+find_program(SOFTLINE_NODE_EXECUTABLE NAMES node nodejs)
+if(SOFTLINE_NODE_EXECUTABLE)
+  add_test(NAME softline_www_client COMMAND "${SOFTLINE_NODE_EXECUTABLE}"
+    "${PROJECT_SOURCE_DIR}/tests/check-web-completion.mjs")
+  set_tests_properties(softline_www_client PROPERTIES LABELS "unit;web" TIMEOUT 10)
+  add_test(NAME softline_www_terminal_client COMMAND "${SOFTLINE_NODE_EXECUTABLE}"
+    "${PROJECT_SOURCE_DIR}/tests/check-web-terminal.mjs")
+  set_tests_properties(softline_www_terminal_client PROPERTIES LABELS "unit;web;terminal" TIMEOUT 10)
+endif()
+add_executable(test_image_source test_image_source.c)
+target_link_libraries(test_image_source PRIVATE softline)
+softline_apply_warnings(test_image_source)
+softline_local_runtime(test_image_source)
+add_test(NAME softline_image_source COMMAND test_image_source)
+set_tests_properties(softline_image_source PROPERTIES LABELS "unit;clipboard;web;memcheck" TIMEOUT 10)
+if(UNIX)
+  add_executable(test_web_terminal test_web_terminal.c)
+  target_include_directories(test_web_terminal PRIVATE "${PROJECT_SOURCE_DIR}/examples")
+  target_link_libraries(test_web_terminal PRIVATE www_mock)
+  softline_apply_warnings(test_web_terminal)
+  softline_local_runtime(test_web_terminal)
+  add_test(NAME softline_www_terminal_adapter COMMAND test_web_terminal)
+  set_tests_properties(softline_www_terminal_adapter PROPERTIES LABELS "unit;integration;terminal;web;memcheck" TIMEOUT 10)
+  add_executable(www_browser_fixture www_browser_fixture.c)
+  target_include_directories(www_browser_fixture PRIVATE "${PROJECT_SOURCE_DIR}/examples")
+  target_link_libraries(www_browser_fixture PRIVATE www_mock)
+  softline_apply_warnings(www_browser_fixture)
+  softline_local_runtime(www_browser_fixture)
+  add_executable(test_www_restart test_www_restart.c)
+  target_include_directories(test_www_restart PRIVATE "${PROJECT_SOURCE_DIR}/examples")
+  target_link_libraries(test_www_restart PRIVATE www_mock)
+  softline_apply_warnings(test_www_restart)
+  softline_local_runtime(test_www_restart)
+  add_test(NAME softline_www_restart COMMAND test_www_restart)
+  set_tests_properties(softline_www_restart PROPERTIES LABELS "integration;web;memcheck" TIMEOUT 15)
+  add_executable(test_www_mock test_www_mock.c)
+  target_link_libraries(test_www_mock PRIVATE web_chat)
+  if(TARGET queue_demo_wire)
+    target_link_libraries(test_www_mock PRIVATE queue_demo_wire)
+  endif()
+  if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_link_libraries(test_www_mock PRIVATE util)
+  endif()
+  softline_apply_warnings(test_www_mock)
+  softline_local_runtime(test_www_mock)
+  add_test(NAME softline_www_mock COMMAND test_www_mock "${PROJECT_BINARY_DIR}")
+  set_tests_properties(softline_www_mock PROPERTIES LABELS "integration;web;clipboard;memcheck" TIMEOUT 30)
+  if(TARGET example_queue_owner)
+    add_test(NAME softline_www_prompt_simulation COMMAND test_www_mock "${PROJECT_BINARY_DIR}"
+      "$<TARGET_FILE:example_queue_owner>" simulation-owner)
+    set_tests_properties(softline_www_prompt_simulation PROPERTIES LABELS "integration;queue;web;memcheck" TIMEOUT 15)
+    add_test(NAME softline_www_queue_owner COMMAND test_www_mock "${PROJECT_BINARY_DIR}"
+      "$<TARGET_FILE:example_queue_owner>" owner)
+    add_test(NAME softline_www_terminal_owner COMMAND test_www_mock "${PROJECT_BINARY_DIR}"
+      "$<TARGET_FILE:example_queue_owner>" terminal-owner)
+    set_tests_properties(softline_www_terminal_owner PROPERTIES LABELS "integration;web;terminal;memcheck" TIMEOUT 30)
+    add_test(NAME softline_www_terminal_lock COMMAND test_www_mock "${PROJECT_BINARY_DIR}"
+      "$<TARGET_FILE:example_queue_owner>" terminal-lock-owner)
+    set_tests_properties(softline_www_terminal_lock PROPERTIES LABELS "integration;web;terminal;memcheck" TIMEOUT 30)
+    add_test(NAME softline_www_charts_owner COMMAND test_www_mock "${PROJECT_BINARY_DIR}"
+      "$<TARGET_FILE:example_queue_owner>" charts-owner)
+    add_test(NAME softline_www_edits_owner COMMAND test_www_mock "${PROJECT_BINARY_DIR}"
+      "$<TARGET_FILE:example_queue_owner>" edits-owner)
+    add_test(NAME softline_www_approvals_owner COMMAND test_www_mock "${PROJECT_BINARY_DIR}"
+      "$<TARGET_FILE:example_queue_owner>" approvals-owner)
+    set_tests_properties(softline_www_approvals_owner PROPERTIES LABELS "integration;web;editing" TIMEOUT 15)
+    set_tests_properties(softline_www_edits_owner PROPERTIES LABELS "integration;web;editing" TIMEOUT 30)
+    set_tests_properties(softline_www_charts_owner PROPERTIES LABELS "integration;web;libmdf" TIMEOUT 90)
+    set_tests_properties(softline_www_queue_owner PROPERTIES LABELS "integration;web;clipboard;example-smoke;memcheck" TIMEOUT 30)
+  endif()
+  if(TARGET example_chat)
+    add_test(NAME softline_www_terminal_local_handoff COMMAND test_www_mock "${PROJECT_BINARY_DIR}"
+      "$<TARGET_FILE:example_chat>" handoff-dual)
+    add_test(NAME softline_www_terminal_failed_handoff COMMAND test_www_mock "${PROJECT_BINARY_DIR}"
+      "$<TARGET_FILE:example_chat>" handoff-failed-dual)
+    set_tests_properties(softline_www_terminal_local_handoff softline_www_terminal_failed_handoff PROPERTIES LABELS "integration;web;terminal;memcheck" TIMEOUT 15)
+    foreach(mode local dual)
+      add_test(NAME softline_www_approvals_${mode} COMMAND test_www_mock "${PROJECT_BINARY_DIR}"
+        "$<TARGET_FILE:example_chat>" "approvals-${mode}")
+      set_tests_properties(softline_www_approvals_${mode} PROPERTIES LABELS "integration;web;editing" TIMEOUT 15)
+      add_test(NAME softline_www_edits_${mode} COMMAND test_www_mock "${PROJECT_BINARY_DIR}"
+        "$<TARGET_FILE:example_chat>" "edits-${mode}")
+      set_tests_properties(softline_www_edits_${mode} PROPERTIES LABELS "integration;web;editing" TIMEOUT 30)
+      add_test(NAME softline_www_charts_${mode} COMMAND test_www_mock "${PROJECT_BINARY_DIR}"
+        "$<TARGET_FILE:example_chat>" "charts-${mode}")
+      set_tests_properties(softline_www_charts_${mode} PROPERTIES LABELS "integration;web;libmdf" TIMEOUT 30)
+    endforeach()
+    if(TARGET example_chat_remote)
+      add_test(NAME softline_www_approvals_remote COMMAND test_www_mock "${PROJECT_BINARY_DIR}"
+        "$<TARGET_FILE:example_chat_remote>" approvals-remote "$<TARGET_FILE:example_queue_owner>")
+      set_tests_properties(softline_www_approvals_remote PROPERTIES LABELS "integration;web;editing" TIMEOUT 15)
+      add_test(NAME softline_www_edits_remote COMMAND test_www_mock "${PROJECT_BINARY_DIR}"
+        "$<TARGET_FILE:example_chat_remote>" edits-remote "$<TARGET_FILE:example_queue_owner>")
+      set_tests_properties(softline_www_edits_remote PROPERTIES LABELS "integration;web;editing" TIMEOUT 30)
+      add_test(NAME softline_www_charts_remote COMMAND test_www_mock "${PROJECT_BINARY_DIR}"
+        "$<TARGET_FILE:example_chat_remote>" charts-remote "$<TARGET_FILE:example_queue_owner>")
+      set_tests_properties(softline_www_charts_remote PROPERTIES LABELS "integration;web;libmdf" TIMEOUT 30)
+    endif()
+    add_test(NAME softline_www_local COMMAND test_www_mock "${PROJECT_BINARY_DIR}"
+      "$<TARGET_FILE:example_chat>" local)
+    set_tests_properties(softline_www_local PROPERTIES LABELS "integration;web;clipboard;example-smoke;memcheck" TIMEOUT 30)
+    add_test(NAME softline_www_dual COMMAND test_www_mock "${PROJECT_BINARY_DIR}"
+      "$<TARGET_FILE:example_chat>" dual)
+    set_tests_properties(softline_www_dual PROPERTIES LABELS "integration;web;clipboard;example-smoke;memcheck" TIMEOUT 30)
+    if(TARGET example_chat_remote)
+      add_test(NAME softline_www_remote COMMAND test_www_mock "${PROJECT_BINARY_DIR}"
+        "$<TARGET_FILE:example_chat_remote>" remote "$<TARGET_FILE:example_queue_owner>")
+      add_test(NAME softline_www_terminal_remote_handoff COMMAND test_www_mock "${PROJECT_BINARY_DIR}"
+        "$<TARGET_FILE:example_chat_remote>" handoff-remote "$<TARGET_FILE:example_queue_owner>")
+      set_tests_properties(softline_www_terminal_remote_handoff PROPERTIES LABELS "integration;web;terminal;memcheck" TIMEOUT 20)
+      set_tests_properties(softline_www_remote PROPERTIES LABELS "integration;web;clipboard;example-smoke;memcheck" TIMEOUT 30)
+    endif()
+  endif()
+endif()
+if(TARGET softline_static AND TARGET example_queue_owner)
+  # Link the real example adapter against the deterministic clipboard source.
+  # This exercises native receiver calls over TCP without a display dependency.
+  add_executable(test_chat_image test_chat_image.c image_source_fixture.c
+    "${PROJECT_SOURCE_DIR}/examples/queue_demo_client.c"
+    "${PROJECT_SOURCE_DIR}/examples/queue_demo_wire.c"
+    "${PROJECT_SOURCE_DIR}/examples/queue_demo_image.c"
+    "${PROJECT_SOURCE_DIR}/examples/queue_demo_image_wire.c"
+    "${PROJECT_SOURCE_DIR}/examples/queue_demo_terminal.c")
+  target_include_directories(test_chat_image PRIVATE "${PROJECT_SOURCE_DIR}/examples")
+  target_compile_definitions(test_chat_image PRIVATE SOFTLINE_CBOR_TCP)
+  target_link_libraries(test_chat_image PRIVATE softline_static C89Cbor::static Threads::Threads)
+  if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_link_libraries(test_chat_image PRIVATE util)
+  endif()
+  softline_apply_warnings(test_chat_image)
+  softline_local_runtime(test_chat_image)
+  add_test(NAME softline_chat_image_store COMMAND test_chat_image store "${PROJECT_BINARY_DIR}")
+  add_test(NAME softline_chat_image_transport COMMAND test_chat_image
+    "$<TARGET_FILE:example_queue_owner>" "${PROJECT_BINARY_DIR}")
+  set_tests_properties(softline_chat_image_store softline_chat_image_transport
+    PROPERTIES LABELS "integration;clipboard;example-smoke;memcheck" TIMEOUT 30)
+endif()
 add_executable(test_history test_history.c)
 target_link_libraries(test_history PRIVATE softline Threads::Threads)
 softline_apply_warnings(test_history)
@@ -12,10 +269,35 @@ add_test(NAME softline_history COMMAND test_history "${PROJECT_BINARY_DIR}")
 set_tests_properties(softline_history PROPERTIES LABELS "unit;history" TIMEOUT 30)
 
 add_executable(test_softline test_softline.c)
-target_link_libraries(test_softline PRIVATE softline)
+softline_test_silent_cursor(test_softline)
 softline_apply_warnings(test_softline)
 softline_local_runtime(test_softline)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  add_executable(test_queue_display_delay test_queue_display_delay.c)
+  if(TARGET softline_static)
+    target_link_libraries(test_queue_display_delay PRIVATE softline_static util)
+    target_compile_definitions(test_queue_display_delay PRIVATE SOFTLINE_TEST_POLL_CLOCK)
+    target_link_options(test_queue_display_delay PRIVATE -Wl,--wrap=clock_gettime -Wl,--wrap=poll)
+  else()
+    target_link_libraries(test_queue_display_delay PRIVATE softline util)
+  endif()
+  softline_apply_warnings(test_queue_display_delay)
+  softline_local_runtime(test_queue_display_delay)
+  add_test(NAME softline_queue_display_delay COMMAND test_queue_display_delay)
+  set_tests_properties(softline_queue_display_delay PROPERTIES LABELS "unit;queue;editing;memcheck" TIMEOUT 45)
+  if(TARGET softline_static)
+    add_executable(test_image_paste test_image_paste.c image_source_fixture.c)
+    target_link_libraries(test_image_paste PRIVATE softline_static util Threads::Threads)
+    softline_apply_warnings(test_image_paste)
+    softline_local_runtime(test_image_paste)
+    add_test(NAME softline_image_paste COMMAND test_image_paste)
+    add_test(NAME softline_image_paste_redraw COMMAND test_image_paste redraw)
+    add_test(NAME softline_image_paste_input COMMAND test_image_paste input)
+    set_tests_properties(softline_image_paste_input PROPERTIES LABELS "unit;clipboard;editing;memcheck" TIMEOUT 15)
+    set_tests_properties(softline_image_paste_redraw PROPERTIES LABELS "unit;clipboard;editing;memcheck" TIMEOUT 15)
+    set_tests_properties(softline_image_paste PROPERTIES LABELS "unit;clipboard;editing;memcheck" TIMEOUT 15)
+    set_property(TEST softline_image_paste APPEND PROPERTY ENVIRONMENT "GLIBC_TUNABLES=glibc.pthread.stack_cache_size=0")
+  endif()
   add_executable(test_osc8 test_osc8.c)
   target_link_libraries(test_osc8 PRIVATE softline util)
   softline_apply_warnings(test_osc8)
@@ -23,7 +305,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   add_test(NAME softline_osc8 COMMAND test_osc8)
   set_tests_properties(softline_osc8 PROPERTIES LABELS "unit;terminal;streaming;memcheck" TIMEOUT 10)
   add_executable(test_completion test_completion.c)
-  target_link_libraries(test_completion PRIVATE softline util)
+  target_link_libraries(test_completion PRIVATE softline util Threads::Threads)
   softline_apply_warnings(test_completion)
   softline_local_runtime(test_completion)
   add_test(NAME softline_completion COMMAND test_completion)
@@ -66,7 +348,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   add_test(NAME softline_pty_cancel COMMAND test_pty_cancel)
   set_tests_properties(softline_pty_cancel PROPERTIES LABELS "unit;terminal;memcheck" TIMEOUT 5)
   if(TARGET example_queue_owner)
-    add_executable(test_pty_exit test_pty_exit.c)
+    add_executable(test_pty_exit test_pty_exit.c "${PROJECT_SOURCE_DIR}/src/softline_pty.c")
     target_include_directories(test_pty_exit PRIVATE "${PROJECT_SOURCE_DIR}/examples")
     target_link_libraries(test_pty_exit PRIVATE queue_demo_client util)
     softline_apply_warnings(test_pty_exit)
@@ -82,6 +364,8 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     softline_apply_warnings(test_queue_tcp)
     softline_local_runtime(test_queue_tcp)
     add_test(NAME softline_queue_tcp COMMAND test_queue_tcp "$<TARGET_FILE:example_queue_owner>")
+    add_test(NAME softline_queue_stream_mode COMMAND test_queue_tcp stream "$<TARGET_FILE:example_queue_owner>")
+    set_tests_properties(softline_queue_stream_mode PROPERTIES LABELS "integration;queue;memcheck" TIMEOUT 12)
     add_test(NAME softline_queue_readiness COMMAND test_queue_tcp readiness "$<TARGET_FILE:example_queue_owner>")
     set_tests_properties(softline_queue_readiness PROPERTIES LABELS "integration;queue;memcheck" TIMEOUT 5)
     add_test(NAME softline_queue_terminal_disconnect COMMAND test_queue_tcp disconnect "$<TARGET_FILE:example_queue_owner>")
@@ -92,10 +376,13 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     set_tests_properties(softline_queue_tcp PROPERTIES LABELS "integration;queue;editing;memcheck" TIMEOUT 15)
   endif()
   add_executable(test_queue_backend test_queue_backend.c)
-  target_link_libraries(test_queue_backend PRIVATE softline util)
+  softline_test_silent_cursor(test_queue_backend util)
   softline_apply_warnings(test_queue_backend)
   softline_local_runtime(test_queue_backend)
   add_test(NAME softline_queue_backend COMMAND test_queue_backend)
+  add_test(NAME softline_queue_backend_history COMMAND test_queue_backend history)
+  set_tests_properties(softline_queue_backend_history PROPERTIES
+    LABELS "integration;queue;history;memcheck" TIMEOUT 5)
   set_tests_properties(softline_queue_backend PROPERTIES
     LABELS "unit;queue;editing;memcheck" TIMEOUT 15)
   add_test(NAME softline_queue_backend_large_edit COMMAND test_queue_backend large-edit)
@@ -131,7 +418,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   add_test(NAME softline_undo_bounds COMMAND test_edit)
   set_tests_properties(softline_undo_bounds PROPERTIES LABELS "unit;editing;memcheck" TIMEOUT 5)
   add_executable(test_suspend test_suspend.c)
-  target_link_libraries(test_suspend PRIVATE softline util)
+  softline_test_silent_cursor(test_suspend util)
   softline_apply_warnings(test_suspend)
   softline_local_runtime(test_suspend)
   add_test(NAME softline_suspend COMMAND test_suspend)
@@ -161,7 +448,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   set_tests_properties(softline_reconcile PROPERTIES LABELS "unit;streaming" TIMEOUT 10)
   add_executable(test_queue_approval test_queue_approval.c)
   add_executable(test_queue_policy test_queue_policy.c)
-  target_link_libraries(test_queue_policy PRIVATE softline util)
+  target_link_libraries(test_queue_policy PRIVATE softline util Threads::Threads)
   softline_apply_warnings(test_queue_policy)
   softline_local_runtime(test_queue_policy)
   add_test(NAME softline_queue_policy COMMAND test_queue_policy)
@@ -170,14 +457,14 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     LABELS "unit;queue;editing;memcheck" TIMEOUT 15)
   set_tests_properties(softline_queue_policy PROPERTIES
     LABELS "unit;queue;editing;memcheck" TIMEOUT 30)
-  target_link_libraries(test_queue_approval PRIVATE softline util)
+  softline_test_silent_cursor(test_queue_approval util)
   softline_apply_warnings(test_queue_approval)
   softline_local_runtime(test_queue_approval)
   add_test(NAME softline_queue_approval COMMAND test_queue_approval)
   set_tests_properties(softline_queue_approval PROPERTIES
     LABELS "unit;queue" TIMEOUT 10)
   add_executable(test_approval_ui test_approval_ui.c)
-  target_link_libraries(test_approval_ui PRIVATE softline util)
+  softline_test_silent_cursor(test_approval_ui util)
   softline_apply_warnings(test_approval_ui)
   softline_local_runtime(test_approval_ui)
   add_test(NAME softline_approval_ui COMMAND test_approval_ui)
@@ -214,8 +501,12 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     softline_apply_warnings(chat_no_sleep_guard)
     add_test(NAME softline_chat_no_sleep COMMAND test_stream_transport no_sleep
       "$<TARGET_FILE:example_chat>" "$<TARGET_FILE:chat_no_sleep_guard>")
+    add_test(NAME softline_chat_prompt_demo COMMAND test_stream_transport prompt_demo
+      "$<TARGET_FILE:example_chat>" "$<TARGET_FILE:chat_no_sleep_guard>")
     set_tests_properties(softline_chat_no_sleep PROPERTIES
       LABELS "integration;streaming;example-smoke" TIMEOUT 12)
+    set_tests_properties(softline_chat_prompt_demo PROPERTIES
+      LABELS "integration;queue;example-smoke" TIMEOUT 15)
   endif()
   add_executable(feed_latency_fixture feed_latency_fixture.c)
   target_link_libraries(feed_latency_fixture PRIVATE softline)
@@ -238,10 +529,14 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     "${PROJECT_SOURCE_DIR}/src/softline_resolver.c"
     $<TARGET_OBJECTS:sl_cares_obj>)
   add_dependencies(clipboard_protocol_fixture sl_cares_namespace)
+  target_link_options(clipboard_protocol_fixture PRIVATE "-Wl,--wrap=socket")
+  target_include_directories(clipboard_protocol_fixture PRIVATE "${PROJECT_SOURCE_DIR}/include")
   target_include_directories(clipboard_protocol_fixture SYSTEM PRIVATE
     "${PROJECT_SOURCE_DIR}/vendor/c-ares/include" "${PROJECT_BINARY_DIR}/private-cares")
   softline_apply_warnings(clipboard_protocol_fixture)
   softline_local_runtime(clipboard_protocol_fixture)
+  add_test(NAME softline_clipboard_connect_fallback COMMAND clipboard_protocol_fixture connect-fallback)
+  set_tests_properties(softline_clipboard_connect_fallback PROPERTIES LABELS "unit;clipboard;memcheck" TIMEOUT 5)
   set(clipboard_inputs "${CMAKE_CURRENT_BINARY_DIR}/clipboard-inputs")
   add_custom_command(OUTPUT "${clipboard_inputs}/small.png" "${clipboard_inputs}/large.png"
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/clipboard_images.py" "${clipboard_inputs}"
@@ -329,6 +624,12 @@ endif()
 softline_test_libmdf_supported(_softline_test_libmdf_supported)
 if(_softline_test_libmdf_supported)
   find_package(Threads REQUIRED)
+  add_executable(test_chat_charts test_chat_charts.c)
+  softline_enable_dev_libmdf(test_chat_charts)
+  softline_apply_warnings(test_chat_charts)
+  softline_local_runtime(test_chat_charts)
+  add_test(NAME softline_chat_charts COMMAND test_chat_charts)
+  set_tests_properties(softline_chat_charts PROPERTIES LABELS "unit;libmdf;web;memcheck" TIMEOUT 15)
   add_executable(test_libmdf_stream test_libmdf_stream.c)
   target_link_libraries(test_libmdf_stream PRIVATE softline Threads::Threads)
   softline_enable_dev_libmdf(test_libmdf_stream)
@@ -404,6 +705,11 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND TARGET example_simple AND TARGET examp
     $<TARGET_FILE:example_chat>
   )
   set_tests_properties(softline_examples PROPERTIES LABELS "integration" TIMEOUT 60)
+  add_test(NAME softline_chat_queue_display_option COMMAND bash
+    "${PROJECT_SOURCE_DIR}/tests/check_queue_display_option.sh"
+    "${PROJECT_SOURCE_DIR}" "$<TARGET_FILE:example_chat>")
+  set_tests_properties(softline_chat_queue_display_option PROPERTIES
+    LABELS "integration;queue;example-smoke" TIMEOUT 10)
   add_test(NAME softline_example_history_isolation COMMAND bash
     "${CMAKE_CURRENT_SOURCE_DIR}/lifecycle/example-history-isolation.sh"
     "$<TARGET_FILE:test_examples>" "$<TARGET_FILE:example_simple>"
@@ -427,17 +733,33 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND TARGET example_chat)
     "$<TARGET_FILE:example_chat>" "${PROJECT_SOURCE_DIR}" "${PROJECT_BINARY_DIR}"
     "${chat_history_key}.history" "$<TARGET_FILE:test_chat_shell>")
   set_tests_properties(softline_chat_shell PROPERTIES LABELS "integration" TIMEOUT 60)
-  add_test(NAME softline_chat_remote_shell COMMAND test_chat_shell remote
-    "$<TARGET_FILE:example_chat_remote>" "${PROJECT_SOURCE_DIR}" "${PROJECT_BINARY_DIR}"
-    "${chat_history_key}.history" "$<TARGET_FILE:test_chat_shell>" "$<TARGET_FILE:example_queue_owner>")
-  set_tests_properties(softline_chat_remote_shell PROPERTIES LABELS "integration;queue;remote" TIMEOUT 60)
-  foreach(control quiet controls)
-    add_test(NAME softline_chat_remote_${control} COMMAND test_chat_shell ${control}
+  if(TARGET example_chat_remote)
+    add_test(NAME softline_chat_remote_shell COMMAND test_chat_shell remote
       "$<TARGET_FILE:example_chat_remote>" "${PROJECT_SOURCE_DIR}" "${PROJECT_BINARY_DIR}"
       "${chat_history_key}.history" "$<TARGET_FILE:test_chat_shell>" "$<TARGET_FILE:example_queue_owner>")
-    set_tests_properties(softline_chat_remote_${control} PROPERTIES
-      LABELS "integration;queue;remote" TIMEOUT 20)
-  endforeach()
+    set_tests_properties(softline_chat_remote_shell PROPERTIES LABELS "integration;queue;remote" TIMEOUT 60)
+  endif()
+  add_test(NAME softline_chat_supervised_shell COMMAND test_chat_shell c
+    "$<TARGET_FILE:example_chat>" "${PROJECT_SOURCE_DIR}" "${PROJECT_BINARY_DIR}"
+    "${chat_history_key}.history" "$<TARGET_FILE:test_chat_shell>")
+  set_tests_properties(softline_chat_supervised_shell PROPERTIES
+    LABELS "integration;terminal;example-smoke;memcheck" TIMEOUT 60
+    ENVIRONMENT "SOFTLINE_TEST_TERMINAL_SUPERVISOR=$<TARGET_FILE:softline_terminal_supervisor>")
+  if(TARGET example_chat_remote)
+    add_test(NAME softline_chat_supervised_remote_shell COMMAND test_chat_shell remote
+      "$<TARGET_FILE:example_chat_remote>" "${PROJECT_SOURCE_DIR}" "${PROJECT_BINARY_DIR}"
+      "${chat_history_key}.history" "$<TARGET_FILE:test_chat_shell>" "$<TARGET_FILE:example_queue_owner>")
+    set_tests_properties(softline_chat_supervised_remote_shell PROPERTIES
+      LABELS "integration;terminal;example-smoke;memcheck" TIMEOUT 60
+      ENVIRONMENT "SOFTLINE_TEST_TERMINAL_SUPERVISOR=$<TARGET_FILE:softline_terminal_supervisor>")
+    foreach(control quiet controls)
+      add_test(NAME softline_chat_remote_${control} COMMAND test_chat_shell ${control}
+        "$<TARGET_FILE:example_chat_remote>" "${PROJECT_SOURCE_DIR}" "${PROJECT_BINARY_DIR}"
+        "${chat_history_key}.history" "$<TARGET_FILE:test_chat_shell>" "$<TARGET_FILE:example_queue_owner>")
+      set_tests_properties(softline_chat_remote_${control} PROPERTIES
+        LABELS "integration;queue;remote" TIMEOUT 20)
+    endforeach()
+  endif()
   add_executable(test_chat_policies test_chat_policies.c)
   target_link_libraries(test_chat_policies PRIVATE util)
   softline_apply_warnings(test_chat_policies)
@@ -447,10 +769,12 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND TARGET example_chat)
     "$<TARGET_FILE:test_chat_shell>" "${chat_history_key}.history")
   set_tests_properties(softline_chat_policies PROPERTIES
     LABELS "integration;queue;example-smoke" TIMEOUT 15)
-  add_test(NAME softline_chat_remote_policies COMMAND test_chat_policies remote
-    "$<TARGET_FILE:example_chat_remote>" "${PROJECT_SOURCE_DIR}" "${PROJECT_BINARY_DIR}"
-    "$<TARGET_FILE:test_chat_shell>" "${chat_history_key}.history" "$<TARGET_FILE:example_queue_owner>")
-  set_tests_properties(softline_chat_remote_policies PROPERTIES LABELS "integration;queue;remote" TIMEOUT 30)
+  if(TARGET example_chat_remote)
+    add_test(NAME softline_chat_remote_policies COMMAND test_chat_policies remote
+      "$<TARGET_FILE:example_chat_remote>" "${PROJECT_SOURCE_DIR}" "${PROJECT_BINARY_DIR}"
+      "$<TARGET_FILE:test_chat_shell>" "${chat_history_key}.history" "$<TARGET_FILE:example_queue_owner>")
+    set_tests_properties(softline_chat_remote_policies PROPERTIES LABELS "integration;queue;remote" TIMEOUT 30)
+  endif()
   add_executable(test_chat_approval test_chat_approval.c)
   target_link_libraries(test_chat_approval PRIVATE util)
   softline_apply_warnings(test_chat_approval)
@@ -460,10 +784,12 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND TARGET example_chat)
     "${chat_history_key}.history")
   set_tests_properties(softline_chat_approval PROPERTIES
     LABELS "integration;queue;example-smoke" TIMEOUT 20)
-  add_test(NAME softline_chat_remote_approval COMMAND test_chat_approval
-    "$<TARGET_FILE:example_chat_remote>" "${PROJECT_SOURCE_DIR}" "${PROJECT_BINARY_DIR}"
-    "${chat_history_key}.history" "$<TARGET_FILE:example_queue_owner>")
-  set_tests_properties(softline_chat_remote_approval PROPERTIES LABELS "integration;queue;remote" TIMEOUT 30)
+  if(TARGET example_chat_remote)
+    add_test(NAME softline_chat_remote_approval COMMAND test_chat_approval
+      "$<TARGET_FILE:example_chat_remote>" "${PROJECT_SOURCE_DIR}" "${PROJECT_BINARY_DIR}"
+      "${chat_history_key}.history" "$<TARGET_FILE:example_queue_owner>")
+    set_tests_properties(softline_chat_remote_approval PROPERTIES LABELS "integration;queue;remote" TIMEOUT 30)
+  endif()
   # A second real terminal engine catches erased blank-cell extent that tmux's
   # grid drops. Keep these host-only test dependencies out of the library.
   find_program(SOFTLINE_TEST_XVFB_RUN xvfb-run)
@@ -524,6 +850,13 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND TARGET example_chat)
       "$<TARGET_FILE:test_clipboard_image>" "$<TARGET_FILE:clipboard_fixture>" "${PROJECT_BINARY_DIR}" "${paste_inputs}" transport)
     set_tests_properties(softline_clipboard_image_transport PROPERTIES
       ENVIRONMENT "${terminal_test_environment}" LABELS "integration;clipboard" TIMEOUT 60)
+    if(TARGET example_chat_remote)
+      add_test(NAME softline_chat_clipboard COMMAND "${SOFTLINE_TEST_XVFB_RUN}" -a
+        "$<TARGET_FILE:test_clipboard_image>" "$<TARGET_FILE:example_chat_remote>"
+        "${PROJECT_BINARY_DIR}" "${paste_inputs}" chat "$<TARGET_FILE:example_queue_owner>")
+      set_tests_properties(softline_chat_clipboard PROPERTIES
+        ENVIRONMENT "${terminal_test_environment}" LABELS "integration;clipboard;example-smoke" TIMEOUT 60)
+    endif()
     add_test(NAME softline_terminal_native_output COMMAND "${SOFTLINE_TEST_XVFB_RUN}" -a
       "$<TARGET_FILE:test_vte_output>" native "$<TARGET_FILE:native_output_fixture>")
     set_tests_properties(softline_terminal_native_output PROPERTIES ENVIRONMENT "${terminal_test_environment}")
@@ -611,42 +944,50 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND TARGET example_chat)
     set_tests_properties(softline_chat_completion PROPERTIES
       ENVIRONMENT "${terminal_test_environment}"
       LABELS "integration;completion;example-smoke" TIMEOUT 15)
-    add_test(NAME softline_chat_remote_completion COMMAND bash "${PROJECT_SOURCE_DIR}/tests/check_completion_files.sh"
-      "${PROJECT_SOURCE_DIR}" interactive "${SOFTLINE_TEST_XVFB_RUN}" -a
-      "$<TARGET_FILE:test_vte_chat>" completion "$<TARGET_FILE:example_chat_remote>")
-    set_tests_properties(softline_chat_remote_completion PROPERTIES
-      ENVIRONMENT "${terminal_test_environment};SOFTLINE_CHAT_TEST_OWNER=$<TARGET_FILE:example_queue_owner>"
-      LABELS "integration;completion;remote" TIMEOUT 15)
+    if(TARGET example_chat_remote)
+      add_test(NAME softline_chat_remote_completion COMMAND bash "${PROJECT_SOURCE_DIR}/tests/check_completion_files.sh"
+        "${PROJECT_SOURCE_DIR}" interactive "${SOFTLINE_TEST_XVFB_RUN}" -a
+        "$<TARGET_FILE:test_vte_chat>" completion "$<TARGET_FILE:example_chat_remote>")
+      set_tests_properties(softline_chat_remote_completion PROPERTIES
+        ENVIRONMENT "${terminal_test_environment};SOFTLINE_CHAT_TEST_OWNER=$<TARGET_FILE:example_queue_owner>"
+        LABELS "integration;completion;remote" TIMEOUT 15)
+    endif()
     foreach(approval_case typing queue edit empty discard idle multiline resize)
       add_test(NAME softline_chat_approval_${approval_case} COMMAND "${SOFTLINE_TEST_XVFB_RUN}" -a
         "$<TARGET_FILE:test_vte_chat>" approval "$<TARGET_FILE:example_chat>" "${approval_case}")
       set_tests_properties(softline_chat_approval_${approval_case} PROPERTIES
         ENVIRONMENT "${terminal_test_environment}"
         LABELS "integration;queue;example-smoke" TIMEOUT 15)
-      add_test(NAME softline_chat_remote_approval_${approval_case} COMMAND "${SOFTLINE_TEST_XVFB_RUN}" -a
-        "$<TARGET_FILE:test_vte_chat>" approval "$<TARGET_FILE:example_chat_remote>" "${approval_case}")
-      set_tests_properties(softline_chat_remote_approval_${approval_case} PROPERTIES
-        ENVIRONMENT "${terminal_test_environment};SOFTLINE_CHAT_TEST_OWNER=$<TARGET_FILE:example_queue_owner>"
-        LABELS "integration;queue;remote" TIMEOUT 15)
+      if(TARGET example_chat_remote)
+        add_test(NAME softline_chat_remote_approval_${approval_case} COMMAND "${SOFTLINE_TEST_XVFB_RUN}" -a
+          "$<TARGET_FILE:test_vte_chat>" approval "$<TARGET_FILE:example_chat_remote>" "${approval_case}")
+        set_tests_properties(softline_chat_remote_approval_${approval_case} PROPERTIES
+          ENVIRONMENT "${terminal_test_environment};SOFTLINE_CHAT_TEST_OWNER=$<TARGET_FILE:example_queue_owner>"
+          LABELS "integration;queue;remote" TIMEOUT 15)
+      endif()
     endforeach()
-    foreach(mode blank line-keys tiny streaming reconnect offline stalled)
-      add_test(NAME softline_chat_remote_${mode} COMMAND "${SOFTLINE_TEST_XVFB_RUN}" -a
-        "$<TARGET_FILE:test_vte_chat>" "${mode}" "$<TARGET_FILE:example_chat_remote>")
-      set_tests_properties(softline_chat_remote_${mode} PROPERTIES
-        ENVIRONMENT "${terminal_test_environment};SOFTLINE_CHAT_TEST_OWNER=$<TARGET_FILE:example_queue_owner>"
-        LABELS "integration;streaming;remote" TIMEOUT 60)
-    endforeach()
+    if(TARGET example_chat_remote)
+      foreach(mode blank line-keys tiny streaming reconnect offline stalled)
+        add_test(NAME softline_chat_remote_${mode} COMMAND "${SOFTLINE_TEST_XVFB_RUN}" -a
+          "$<TARGET_FILE:test_vte_chat>" "${mode}" "$<TARGET_FILE:example_chat_remote>")
+        set_tests_properties(softline_chat_remote_${mode} PROPERTIES
+          ENVIRONMENT "${terminal_test_environment};SOFTLINE_CHAT_TEST_OWNER=$<TARGET_FILE:example_queue_owner>"
+          LABELS "integration;streaming;remote" TIMEOUT 60)
+      endforeach()
+    endif()
     foreach(_softline_chat_theme plain riced)
       add_test(NAME softline_chat_width_${_softline_chat_theme} COMMAND "${SOFTLINE_TEST_XVFB_RUN}" -a
         "$<TARGET_FILE:test_vte_chat>" width "$<TARGET_FILE:example_chat>" "${_softline_chat_theme}")
       set_tests_properties(softline_chat_width_${_softline_chat_theme} PROPERTIES ENVIRONMENT "${terminal_test_environment}")
       set_tests_properties(softline_chat_width_${_softline_chat_theme} PROPERTIES
         LABELS "integration;streaming;libmdf" TIMEOUT 40)
-      add_test(NAME softline_chat_remote_width_${_softline_chat_theme} COMMAND "${SOFTLINE_TEST_XVFB_RUN}" -a
-        "$<TARGET_FILE:test_vte_chat>" width "$<TARGET_FILE:example_chat_remote>" "${_softline_chat_theme}")
-      set_tests_properties(softline_chat_remote_width_${_softline_chat_theme} PROPERTIES
-        ENVIRONMENT "${terminal_test_environment};SOFTLINE_CHAT_TEST_OWNER=$<TARGET_FILE:example_queue_owner>"
-        LABELS "integration;streaming;libmdf;remote" TIMEOUT 40)
+      if(TARGET example_chat_remote)
+        add_test(NAME softline_chat_remote_width_${_softline_chat_theme} COMMAND "${SOFTLINE_TEST_XVFB_RUN}" -a
+          "$<TARGET_FILE:test_vte_chat>" width "$<TARGET_FILE:example_chat_remote>" "${_softline_chat_theme}")
+        set_tests_properties(softline_chat_remote_width_${_softline_chat_theme} PROPERTIES
+          ENVIRONMENT "${terminal_test_environment};SOFTLINE_CHAT_TEST_OWNER=$<TARGET_FILE:example_queue_owner>"
+          LABELS "integration;streaming;libmdf;remote" TIMEOUT 40)
+      endif()
     endforeach()
     add_test(NAME softline_terminal_vte_tiny COMMAND "${SOFTLINE_TEST_XVFB_RUN}" -a
       "$<TARGET_FILE:test_vte_chat>" tiny "$<TARGET_FILE:example_chat>")
@@ -754,6 +1095,12 @@ endif()
 # The RLIMIT_AS budget check measures native memory use, without analysis overhead.
 set(_softline_memcheck_tests softline_history softline_unit softline_readline_edit softline_queue_approval softline_approval_ui
   softline_libmdf_stream softline_examples softline_prompt_frames softline_native_resize)
+# Legacy geometry/interaction fixtures explicitly select immediate previews.
+# Default delayed visibility is covered by the timer test and Lua chat watch.
+set(_softline_immediate_queue_tests softline_examples softline_chat_remote_shell
+  softline_chat_completion softline_chat_remote_completion
+  softline_chat_approval_queue softline_chat_remote_approval_queue
+  softline_chat_approval_resize softline_chat_remote_approval_resize)
 get_property(_softline_tests DIRECTORY PROPERTY TESTS)
 foreach(_softline_test IN LISTS _softline_tests)
   get_test_property(${_softline_test} TIMEOUT _softline_timeout)
@@ -763,6 +1110,10 @@ foreach(_softline_test IN LISTS _softline_tests)
   endif()
   if(_softline_test IN_LIST _softline_memcheck_tests)
     set_property(TEST ${_softline_test} APPEND PROPERTY LABELS memcheck)
+  endif()
+  if(_softline_test IN_LIST _softline_immediate_queue_tests)
+    set_property(TEST ${_softline_test} APPEND PROPERTY ENVIRONMENT
+      "SOFTLINE_QUEUE_DISPLAY_DELAY_MS=0")
   endif()
   set_property(TEST "${_softline_test}" APPEND PROPERTY ENVIRONMENT
     "SOFTLINE_HISTORY_DIR=${PROJECT_BINARY_DIR}/test-history/${_softline_test}")

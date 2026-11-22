@@ -1,0 +1,920 @@
+#define _GNU_SOURCE 1
+#include <errno.h>
+#include <fcntl.h>
+#include <limits.h>
+#include <poll.h>
+#include <pthread.h>
+#include <pty.h>
+#include <signal.h>
+#include <softline/softline.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/ioctl.h>
+#include <sys/wait.h>
+#include <time.h>
+#include <unistd.h>
+
+#define CHECK(c)                                                               \
+  do {                                                                         \
+    if (!(c)) {                                                                \
+      fprintf(stderr, "image line %d: %s\n", __LINE__, #c);                    \
+      return 1;                                                                \
+    }                                                                          \
+  } while (0)
+extern size_t image_fixture_size, image_fixture_reads;
+extern int image_fixture_gate, image_fixture_fail;
+extern int image_fixture_idle, image_fixture_fd;
+extern const char *image_fixture_mime;
+unsigned char image_fixture_byte(size_t);
+struct image_api {
+  int (*start)(sl_t *, sl_image_paste_id_t *);
+  int (*prepare)(sl_t *, sl_image_paste_wait_t *);
+  int (*pump)(sl_t *);
+  int (*resume)(sl_t *, sl_image_paste_id_t);
+  int (*complete)(sl_t *, sl_image_paste_id_t, const char *, const char *);
+  int (*cancel)(sl_t *, sl_image_paste_id_t);
+};
+static const struct image_api free_api = {
+    sl_image_paste_start,  sl_image_paste_prepare,  sl_image_paste_pump,
+    sl_image_paste_resume, sl_image_paste_complete, sl_image_paste_cancel};
+struct host {
+  sl_t *sl;
+  sl_image_paste_id_t id;
+  size_t received;
+  const struct image_api *api;
+  int begin, end, aborts, done, pause, paused, reject, failed;
+};
+static int receive_image(void *context, const sl_image_paste_event_t *e) {
+  struct host *h = context;
+  size_t i;
+  if (!h->id)
+    h->id = e->id;
+  if (e->id != h->id)
+    h->failed = 1;
+  if (e->operation == SL_IMAGE_PASTE_BEGIN) {
+    ++h->begin;
+    if (!e->media_type || strcmp(e->media_type, image_fixture_mime) ||
+        h->received)
+      h->failed = 1;
+    if (h->reject == 1)
+      return SL_ERROR;
+    /* Reentrancy is rejected, including destruction. */
+    if (sl_insert(h->sl, "bad") != SL_ERROR_INVALID)
+      h->failed = 1;
+    sl_destroy(h->sl);
+  } else if (e->operation == SL_IMAGE_PASTE_DATA) {
+    if (h->reject == 2)
+      return SL_ERROR;
+    if (e->offset != h->received || !e->length || e->length > 16384)
+      h->failed = 1;
+    for (i = 0; i < e->length; ++i)
+      if (e->data[i] != image_fixture_byte(e->offset + i))
+        h->failed = 1;
+    if (h->pause) {
+      h->paused = 1;
+      return SL_ERROR_NOT_READY;
+    }
+    h->received += e->length;
+  } else if (e->operation == SL_IMAGE_PASTE_END) {
+    if (e->offset != h->received)
+      h->failed = 1;
+    ++h->end;
+  } else if (e->operation == SL_IMAGE_PASTE_ABORT) {
+    if (!e->reason || e->offset != h->received)
+      h->failed = 1;
+    ++h->aborts;
+  } else if (e->operation == SL_IMAGE_PASTE_DONE) {
+    if (!h->end || h->aborts || e->offset != h->received || h->done)
+      h->failed = 1;
+    ++h->done;
+  } else
+    h->failed = 1;
+  return SL_OK;
+}
+static sl_t *editor(struct host *h, size_t limit, size_t line_limit,
+                    int timeout) {
+  sl_config_t config;
+  memset(h, 0, sizeof(*h));
+  sl_config_init(&config);
+  config.image_paste_callback = receive_image;
+  config.image_paste_context = h;
+  config.image_paste_max_bytes = limit;
+  config.line_max_len = line_limit;
+  config.image_paste_source_timeout_ms = timeout;
+  config.image_paste_host_timeout_ms = timeout;
+  config.image_paste_total_timeout_ms = timeout;
+  h->sl = sl_create_with_config(&config);
+  return h->sl;
+}
+static int drive(struct host *h) {
+  unsigned int i;
+  for (i = 0; i < 10000 && !h->end && !h->aborts && !h->paused; ++i)
+    CHECK((h->api ? h->api->pump(h->sl) : sl_image_paste_pump(h->sl)) == SL_OK);
+  CHECK(i < 10000 && !h->failed);
+  return 0;
+}
+static int basic(int receiver) {
+  struct host h;
+  sl_t *sl;
+  sl_image_paste_id_t id, another;
+  sl_image_paste_wait_t wait;
+  size_t reads;
+  struct image_api api = free_api;
+  image_fixture_size = 32769;
+  image_fixture_gate = 1;
+  sl = editor(&h, 0, 131072, 0);
+  CHECK(sl && sl_set_buffer(sl, "AB") == SL_OK &&
+        sl_set_cursor(sl, 1) == SL_OK);
+  if (receiver) {
+    api.start = sl->image_paste_start;
+    api.prepare = sl->image_paste_prepare;
+    api.pump = sl->image_paste_pump;
+    api.resume = sl->image_paste_resume;
+    api.complete = sl->image_paste_complete;
+    api.cancel = sl->image_paste_cancel;
+  }
+  CHECK(api.start && api.prepare && api.pump && api.resume && api.complete &&
+        api.cancel);
+  h.api = &api;
+  CHECK(api.start(sl, &id) == SL_OK);
+  CHECK(api.start(sl, &another) == SL_ERROR_INVALID);
+  CHECK(api.complete(sl, id, "/backend/image.png", NULL) == SL_ERROR_INVALID);
+  h.pause = 1;
+  CHECK(drive(&h) == 0 && h.begin == 1 && h.paused && h.received == 0);
+  reads = image_fixture_reads;
+  CHECK(api.prepare(sl, &wait) == SL_OK && wait.count == 0 &&
+        wait.timeout_ms > 0);
+  CHECK(sl_insert(sl, "X") == SL_OK && !strcmp(sl_buffer(sl), "AXB"));
+  CHECK(sl_set_cursor(sl, 0) == SL_OK && sl_insert(sl, "Y") == SL_OK);
+  CHECK(sl_set_cursor(sl, 4) == SL_OK && sl_insert(sl, "Z") == SL_OK);
+  CHECK(api.pump(sl) == SL_OK && image_fixture_reads == reads);
+  CHECK(api.resume(sl, id + 1) == SL_ERROR_INVALID);
+  CHECK(api.resume(sl, id) == SL_OK);
+  h.paused = 0;
+  CHECK(drive(&h) == 0 && h.paused && image_fixture_reads == reads);
+  h.pause = h.paused = 0;
+  CHECK(api.resume(sl, id) == SL_OK && api.pump(sl) == SL_OK);
+  CHECK(h.received == 16384 && !h.end);
+  CHECK(api.pump(sl) == SL_OK && image_fixture_reads == reads && !h.end);
+  image_fixture_gate = 0;
+  CHECK(drive(&h) == 0 && h.end == 1 && h.received == image_fixture_size);
+  CHECK(!strcmp(sl_buffer(sl), "YAXBZ"));
+  CHECK(api.prepare(sl, &wait) == SL_OK && wait.count == 0 &&
+        wait.timeout_ms > 0);
+  CHECK(api.complete(sl, id, "relative.png", NULL) == SL_ERROR_INVALID);
+  CHECK(api.complete(sl, id, "/bad\033path", NULL) == SL_ERROR_INVALID);
+  CHECK(api.complete(sl, id, "/backend/image.png", NULL) == SL_OK);
+  CHECK(!strcmp(sl_buffer(sl), "YAXBZ"));
+  CHECK(api.complete(sl, id, "/backend/duplicate", NULL) == SL_ERROR_INVALID);
+  CHECK(api.pump(sl) == SL_OK &&
+        !strcmp(sl_buffer(sl), "YA/backend/image.pngXBZ"));
+  CHECK(api.cancel(sl, id) == SL_ERROR_INVALID && !h.aborts);
+  CHECK(h.done == 1 && !h.failed);
+  memset(&h, 0, sizeof(h));
+  h.sl = sl;
+  h.api = &api;
+  CHECK(api.start(sl, &id) == SL_OK && api.cancel(sl, id) == SL_OK);
+  CHECK(h.aborts == 1 && !h.failed && api.cancel(sl, id) == SL_ERROR_INVALID);
+  sl_destroy(sl);
+  return 0;
+}
+static int limits(void) {
+  size_t sizes[] = {33554432u, 33554433u, 32u, 33u, 33554433u, 33554434u};
+  size_t limits[] = {0, 0, 32u, 32u, 33554433u, 33554433u};
+  size_t i;
+  for (i = 0; i < 6; ++i) {
+    struct host h;
+    sl_image_paste_id_t id;
+    sl_t *sl = editor(&h, limits[i], 100, 0);
+    CHECK(sl);
+    image_fixture_size = sizes[i];
+    CHECK(sl_image_paste_start(sl, &id) == SL_OK && drive(&h) == 0);
+    if (i & 1) {
+      CHECK(h.aborts == 1 && !h.end &&
+            h.received <= (limits[i] ? limits[i] : 33554432u));
+      CHECK(sl_image_paste_complete(sl, id, "/late", NULL) == SL_ERROR_INVALID);
+    } else {
+      CHECK(h.end == 1 && !h.aborts && h.received == sizes[i]);
+      CHECK(sl_image_paste_complete(sl, id, "/stored", NULL) == SL_OK);
+      CHECK(sl_image_paste_pump(sl) == SL_OK &&
+            !strcmp(sl_buffer(sl), "/stored"));
+    }
+    sl_destroy(sl);
+  }
+  return 0;
+}
+static int failures(void) {
+  struct host h;
+  sl_t *sl;
+  sl_image_paste_id_t id;
+  int mode;
+  image_fixture_size = 64;
+  for (mode = 0; mode < 9; ++mode) {
+    sl = editor(&h, 0, 8, 0);
+    CHECK(sl && sl_set_buffer(sl, "keep") == SL_OK &&
+          sl_image_paste_start(sl, &id) == SL_OK);
+    if (mode == 0) {
+      CHECK(sl_image_paste_cancel(sl, id) == SL_OK);
+      CHECK(sl_image_paste_cancel(sl, id) == SL_ERROR_INVALID);
+    } else if (mode == 1)
+      CHECK(sl_set_buffer(sl, "new") == SL_OK);
+    else if (mode == 2) {
+      h.reject = 1;
+      CHECK(drive(&h) == 0);
+    } else if (mode == 3) {
+      image_fixture_fail = 1;
+      CHECK(drive(&h) == 0);
+      image_fixture_fail = 0;
+    } else if (mode == 4) {
+      CHECK(drive(&h) == 0 && h.end == 1);
+      CHECK(sl_image_paste_complete(sl, id, "/long-path", NULL) == SL_OK);
+      CHECK(sl_image_paste_pump(sl) == SL_OK);
+    } else if (mode == 5) {
+      CHECK(drive(&h) == 0 && h.end == 1);
+      CHECK(sl_image_paste_complete(sl, id, NULL, "backend publish failed") ==
+            SL_OK);
+    } else if (mode == 6) {
+      h.reject = 2;
+      CHECK(drive(&h) == 0);
+    } else if (mode == 7) {
+      CHECK(sl_set_buffer(sl, "replacement exceeds line limit") == SL_ERROR);
+      CHECK(!h.aborts && !strcmp(sl_buffer(sl), "keep"));
+      CHECK(sl_image_paste_cancel(sl, id) == SL_OK);
+    } else {
+      sl_destroy(sl);
+      sl = NULL;
+    }
+    CHECK(h.aborts == 1 && !h.failed);
+    if (sl) {
+      CHECK(!strcmp(sl_buffer(sl), mode == 1 ? "new" : "keep"));
+      CHECK(sl_image_paste_complete(sl, id, "/late", NULL) == SL_ERROR_INVALID);
+      sl_destroy(sl);
+      CHECK(h.aborts == 1);
+    }
+  }
+  return 0;
+}
+static int deadlines(void) {
+  int phase;
+  image_fixture_size = 64;
+  for (phase = 0; phase < 3; ++phase) {
+    struct host h;
+    sl_image_paste_wait_t wait;
+    sl_image_paste_id_t id;
+    sl_t *sl = editor(&h, 0, 100, 20);
+    CHECK(sl && sl_image_paste_start(sl, &id) == SL_OK);
+    if (phase == 0) {
+      image_fixture_gate = 1;
+      CHECK(sl_image_paste_pump(sl) == SL_OK &&
+            sl_image_paste_pump(sl) == SL_OK);
+    }
+    if (phase == 1) {
+      h.pause = 1;
+      CHECK(drive(&h) == 0 && h.paused);
+    }
+    if (phase == 2)
+      CHECK(drive(&h) == 0 && h.end);
+    CHECK(sl_image_paste_prepare(sl, &wait) == SL_OK && wait.timeout_ms >= 0);
+    CHECK(poll(NULL, 0, wait.timeout_ms + 1) == 0);
+    if (phase == 1)
+      CHECK(sl_image_paste_resume(sl, id) == SL_ERROR_INVALID);
+    else if (phase == 2)
+      CHECK(sl_image_paste_complete(sl, id, "/late", NULL) == SL_ERROR_INVALID);
+    else
+      CHECK(sl_image_paste_pump(sl) == SL_OK);
+    CHECK(h.aborts == 1 && !h.failed);
+    image_fixture_gate = 0;
+    sl_destroy(sl);
+  }
+  return 0;
+}
+struct native {
+  struct host host;
+  int master, stage, failed, cancel, suspend, queued, literal, completions;
+  char output[16384];
+  size_t output_length;
+};
+static void capture_native(struct native *n) {
+  ssize_t count;
+  while (n->output_length + 1 < sizeof(n->output)) {
+    count = read(n->master, n->output + n->output_length,
+                 sizeof(n->output) - n->output_length - 1);
+    if (count < 0 && errno == EINTR)
+      continue;
+    if (count <= 0)
+      break;
+    n->output_length += (size_t)count;
+  }
+  n->output[n->output_length] = 0;
+  if (n->output_length + 1 == sizeof(n->output) ||
+      strstr(n->output, "image upload"))
+    n->failed = 1;
+}
+static int deadline_domains(void) {
+  int mode;
+  for (mode = 0; mode < 5; ++mode) {
+    struct host h;
+    sl_config_t config;
+    sl_image_paste_id_t id;
+    memset(&h, 0, sizeof(h));
+    sl_config_init(&config);
+    config.image_paste_callback = receive_image;
+    config.image_paste_context = &h;
+    config.image_paste_source_timeout_ms = mode >= 3 ? 1000 : 20;
+    config.image_paste_host_timeout_ms = mode >= 3 ? 20 : 1000;
+    config.image_paste_total_timeout_ms = mode == 1 ? 20 : 2000;
+    h.sl = sl_create_with_config(&config);
+    CHECK(h.sl);
+    h.pause = mode != 2 && mode != 4;
+    CHECK(sl_image_paste_start(h.sl, &id) == SL_OK && drive(&h) == 0);
+    CHECK(mode == 2 || mode == 4 ? h.end : h.paused);
+    /* Only the active timeout or the overall cap may expire this wait. */
+    CHECK(poll(NULL, 0, 30) == 0);
+    if (mode == 1 || mode >= 3) {
+      if (mode == 4)
+        CHECK(sl_image_paste_complete(h.sl, id, "/late", NULL) ==
+              SL_ERROR_INVALID);
+      else
+        CHECK(sl_image_paste_resume(h.sl, id) == SL_ERROR_INVALID);
+      CHECK(h.aborts == 1);
+    } else {
+      if (mode == 0) {
+        h.pause = h.paused = 0;
+        CHECK(sl_image_paste_resume(h.sl, id) == SL_OK && drive(&h) == 0 &&
+              h.end);
+      }
+      CHECK(sl_image_paste_complete(h.sl, id, "/stored", NULL) == SL_OK);
+      CHECK(sl_image_paste_pump(h.sl) == SL_OK && h.done == 1 && !h.aborts);
+    }
+    CHECK(!h.failed);
+    sl_destroy(h.sl);
+  }
+  return 0;
+}
+static int image_completion(sl_t *sl, char trigger, sl_completion_emit_t emit,
+                            void *context, void *userdata) {
+  struct native *n = userdata;
+  (void)sl;
+  (void)trigger;
+  ++n->completions;
+  return emit("/candidate", context);
+}
+static int suspend_upload(sl_t *sl, sl_key_t key, void *context,
+                          sl_key_action_t *action) {
+  (void)sl;
+  (void)key;
+  (void)context;
+  *action = SL_KEY_ACTION_SUSPEND;
+  return SL_OK;
+}
+static int pending_feed(sl_t *sl, void *context, const char **chunk,
+                        size_t *length) {
+  int *sent = context;
+  (void)sl;
+  *chunk = "feed during upload\n";
+  *length = *sent ? 0 : strlen(*chunk);
+  *sent = 1;
+  return SL_OK;
+}
+static void native_idle(sl_t *sl, void *context) {
+  struct native *n = context;
+  capture_native(n);
+  if (!n->stage) {
+    n->stage = 1;
+    if (sl_set_buffer(sl, n->literal ? "" : "AB") != SL_OK ||
+        sl_set_cursor(sl, n->literal ? 0 : 1) != SL_OK ||
+        sl_image_paste_start(sl, &n->host.id) != SL_OK)
+      n->failed = 1;
+    n->host.pause = 1;
+  } else if (n->stage == 1 && n->host.paused) {
+    n->stage = 2;
+    if (sl_submit(sl) != SL_ERROR_NOT_READY ||
+        (n->queued &&
+         sl_prompt_queue_enqueue_draft(sl) != SL_ERROR_NOT_READY) ||
+        write(n->master, "X\r\033\r\t", 5) != 5)
+      n->failed = 1;
+  } else if (n->stage == 2) {
+    int sent = 0;
+    struct winsize resized;
+    memset(&resized, 0, sizeof(resized));
+    resized.ws_col = 60;
+    resized.ws_row = 18;
+    if (strcmp(sl_buffer(sl), n->literal ? "X" : "AXB") ||
+        sl_prompt_queue_count(sl) != 0)
+      n->failed = 1;
+    if (ioctl(n->master, TIOCSWINSZ, &resized) != 0 ||
+        sl_print_above(sl, pending_feed, &sent) != SL_OK)
+      n->failed = 1;
+    if (n->queued &&
+        sl_set_status_message(sl, "HOST STILL OWNS STATUS") != SL_OK)
+      n->failed = 1;
+    n->stage = 3;
+    if (n->suspend) {
+      if (write(n->master, "\024", 1) != 1)
+        n->failed = 1;
+    } else if (n->cancel) {
+      if (write(n->master, "\003", 1) != 1)
+        n->failed = 1;
+    } else {
+      n->host.pause = n->host.paused = 0;
+      if (sl_image_paste_resume(sl, n->host.id) != SL_OK)
+        n->failed = 1;
+    }
+  } else if (n->stage == 3 && (n->host.end || n->host.aborts)) {
+    n->stage = 4;
+    if (!n->cancel && sl_image_paste_complete(
+                          sl, n->host.id, "/backend/image.png", NULL) != SL_OK)
+      n->failed = 1;
+  } else if (n->stage == 4) {
+    n->stage = 5;
+    if (strcmp(sl_buffer(sl), n->cancel    ? "AXB"
+                              : n->literal ? "/backend/image.pngX"
+                                           : "A/backend/image.pngXB") ||
+        n->completions)
+      n->failed = 1;
+    if (write(n->master, n->cancel ? "\r" : "\037\r", n->cancel ? 1 : 2) !=
+        (n->cancel ? 1 : 2))
+      n->failed = 1;
+  }
+  if (n->failed)
+    (void)sl_cancel(sl);
+}
+static int native_cases(void) {
+  int mode;
+  for (mode = 0; mode < 5; ++mode) {
+    struct native n;
+    sl_config_t config;
+    struct winsize size;
+    sl_t *sl;
+    sl_completion_provider_t provider;
+    int slave;
+    char *line;
+    memset(&n, 0, sizeof(n));
+    memset(&size, 0, sizeof(size));
+    size.ws_col = 100;
+    size.ws_row = 24;
+    CHECK(openpty(&n.master, &slave, NULL, NULL, &size) == 0);
+    CHECK(fcntl(n.master, F_SETFL, O_NONBLOCK) == 0);
+    sl_config_init(&config);
+    config.input_fd = slave;
+    config.output_fd = slave;
+    config.prompt_queue = mode != 0;
+    config.image_paste_callback = receive_image;
+    config.image_paste_context = &n.host;
+    sl = sl_create_with_config(&config);
+    CHECK(sl);
+    n.host.sl = sl;
+    n.cancel = mode == 1;
+    n.suspend = mode == 3;
+    n.queued = mode != 0;
+    n.literal = mode == 4;
+    if (n.queued)
+      CHECK(sl_set_status_message(sl, "HOST OWNS STATUS") == SL_OK);
+    memset(&provider, 0, sizeof(provider));
+    provider.trigger = '/';
+    provider.strip_trigger = 1;
+    provider.callback = image_completion;
+    provider.userdata = &n;
+    CHECK(sl_set_completion_providers(sl, &provider, 1) == SL_OK);
+    CHECK(sl_bind_key(sl, SL_KEY_CTRL_T, suspend_upload, NULL) == SL_OK);
+    image_fixture_size = 64;
+    CHECK(sl_set_idle_callback(sl, native_idle, &n) == SL_OK);
+    line = sl_readline(sl, "> ");
+    if (n.suspend) {
+      sl_image_paste_wait_t wait;
+      CHECK(!line && sl_last_readline_status(sl) == SL_READLINE_SUSPENDED &&
+            n.stage == 3);
+      n.host.pause = n.host.paused = 0;
+      CHECK(sl_image_paste_resume(sl, n.host.id) == SL_OK &&
+            drive(&n.host) == 0);
+      CHECK(sl_image_paste_complete(sl, n.host.id, "/backend/image.png",
+                                    NULL) == SL_OK);
+      CHECK(sl_image_paste_pump(sl) == SL_OK && !strcmp(sl_buffer(sl), "AXB"));
+      CHECK(sl_image_paste_prepare(sl, &wait) == SL_OK &&
+            wait.timeout_ms == -1);
+      n.stage = 4;
+      line = sl_readline(sl, "> ");
+    }
+    capture_native(&n);
+    CHECK(line && !strcmp(line, n.literal ? "X" : "AXB") && !n.failed &&
+          !n.host.failed && n.stage == 5);
+    CHECK(!n.queued || (strstr(n.output, "HOST OWNS STATUS") &&
+                        strstr(n.output, "HOST STILL OWNS STATUS")));
+    CHECK(n.host.aborts == (mode == 1) && n.host.end == (mode != 1));
+    sl_free_string(sl, line);
+    sl_destroy(sl);
+    close(slave);
+    close(n.master);
+  }
+  return 0;
+}
+struct watched_image {
+  struct host host;
+  int events, pump;
+};
+static int watched_image_event(void *context, const sl_image_paste_event_t *e) {
+  struct watched_image *w = context;
+  char event;
+  int status = receive_image(&w->host, e);
+  if (e->operation == SL_IMAGE_PASTE_END ||
+      e->operation == SL_IMAGE_PASTE_DONE) {
+    event = e->operation == SL_IMAGE_PASTE_END ? 'E' : 'D';
+    if (write(w->events, &event, 1) != 1)
+      return SL_ERROR_IO;
+  }
+  return status;
+}
+static int watched_image_ready(sl_t *sl, const sl_watch_event_t *event,
+                               void *context) {
+  struct watched_image *w = context;
+  char command;
+  if (read(event->fd, &command, 1) != 1)
+    return SL_ERROR_IO;
+  if (command == 'S')
+    return sl->image_paste_start(sl, &w->host.id);
+  if (command != 'C' ||
+      sl->image_paste_complete(sl, w->host.id, "/backend/watch-image.png",
+                               NULL) != SL_OK)
+    return SL_ERROR;
+  return w->pump ? sl->image_paste_pump(sl) : SL_OK;
+}
+static double redraw_time(void) {
+  struct timespec t;
+  clock_gettime(CLOCK_MONOTONIC, &t);
+  return t.tv_sec + t.tv_nsec / 1000000000.0;
+}
+static int watched_redraw(int pump) {
+  int master = -1, slave = -1, commands[2] = {-1, -1}, events[2] = {-1, -1};
+  int failed = 1, submitted = 0, done_notice = 0, status;
+  pid_t child = -1;
+  char *output = calloc(1, 8192);
+  size_t used = 0, scanned = 0;
+  double deadline = redraw_time() + 4;
+  struct winsize size;
+  memset(&size, 0, sizeof(size));
+  size.ws_row = 24;
+  size.ws_col = 100;
+  if (!output || openpty(&master, &slave, NULL, NULL, &size) ||
+      pipe(commands) || pipe(events))
+    goto cleanup;
+  child = fork();
+  if (!child) {
+    struct watched_image w;
+    sl_config_t config;
+    sl_watch_id_t watch;
+    char *line;
+    close(master);
+    close(commands[1]);
+    close(events[0]);
+    memset(&w, 0, sizeof(w));
+    w.events = events[1];
+    w.pump = pump;
+    sl_config_init(&config);
+    config.input_fd = config.output_fd = slave;
+    config.image_paste_callback = watched_image_event;
+    config.image_paste_context = &w;
+    w.host.sl = sl_create_with_config(&config);
+    if (!w.host.sl || sl_watch_add(w.host.sl, commands[0], SL_WATCH_READ,
+                                   watched_image_ready, &w, &watch) != SL_OK)
+      _exit(2);
+    image_fixture_size = 64;
+    image_fixture_gate = image_fixture_fail = 0;
+    line = sl_readline(w.host.sl, "watch> ");
+    status = !line || strcmp(line, "/backend/watch-image.png") ||
+             w.host.failed || w.host.done != 1;
+    sl_free_string(w.host.sl, line);
+    sl_destroy(w.host.sl);
+    _exit(status ? 2 : 0);
+  }
+  if (child < 0)
+    goto cleanup;
+  close(slave);
+  slave = -1;
+  close(commands[0]);
+  commands[0] = -1;
+  close(events[1]);
+  events[1] = -1;
+  if (write(commands[1], "S", 1) != 1)
+    goto cleanup;
+  do {
+    struct pollfd fds[2];
+    pid_t exited;
+    fds[0].fd = master;
+    fds[0].events = POLLIN;
+    fds[0].revents = 0;
+    fds[1].fd = events[0];
+    fds[1].events = POLLIN;
+    fds[1].revents = 0;
+    if (poll(fds, 2, 10) < 0 && errno != EINTR)
+      goto cleanup;
+    if (fds[0].revents & POLLIN) {
+      const char *query;
+      ssize_t count = read(master, output + used, 8191 - used);
+      if (count > 0)
+        used += (size_t)count;
+      output[used] = 0;
+      if (used == 8191)
+        goto cleanup;
+      while ((query = strstr(output + scanned, "\033[6n")) != NULL) {
+        if (write(master, "\033[1;1R", 6) != 6)
+          goto cleanup;
+        scanned = (size_t)(query - output) + 4;
+      }
+    }
+    if (fds[1].revents & POLLIN) {
+      char notice;
+      if (read(events[0], &notice, 1) != 1)
+        goto cleanup;
+      if (notice == 'E' && write(commands[1], "C", 1) != 1)
+        goto cleanup;
+      if (notice == 'D')
+        done_notice = 1;
+    }
+    /* No input key is sent until the completed path has actually appeared. */
+    if (!submitted && done_notice &&
+        strstr(output, "/backend/watch-image.png")) {
+      if (write(master, "\r", 1) != 1)
+        goto cleanup;
+      submitted = 1;
+    }
+    exited = waitpid(child, &status, WNOHANG);
+    if (exited == child) {
+      child = -1;
+      failed = !submitted || !WIFEXITED(status) || WEXITSTATUS(status);
+      break;
+    }
+  } while (redraw_time() < deadline);
+cleanup:
+  if (failed)
+    fprintf(stderr,
+            "watch image redraw failed (explicit pump=%d, DONE=%d)\n%s\n", pump,
+            done_notice, output ? output : "");
+  if (child > 0) {
+    kill(child, SIGKILL);
+    waitpid(child, NULL, 0);
+  }
+  if (master >= 0)
+    close(master);
+  if (slave >= 0)
+    close(slave);
+  if (commands[0] >= 0)
+    close(commands[0]);
+  if (commands[1] >= 0)
+    close(commands[1]);
+  if (events[0] >= 0)
+    close(events[0]);
+  if (events[1] >= 0)
+    close(events[1]);
+  free(output);
+  return failed;
+}
+/* Split input must retain its own deadline across immediate acquisition work,
+ * readable acquisition descriptors, and application watch callbacks. */
+struct input_host {
+  struct host image;
+  int events, mode, kind;
+};
+static int input_command(sl_t *sl, const sl_watch_event_t *event,
+                         void *context) {
+  struct input_host *h = context;
+  char command;
+  int result = SL_OK;
+  if (read(event->fd, &command, 1) != 1)
+    return SL_ERROR_IO;
+  if (command == 'S') {
+    if (h->mode)
+      result = sl_image_paste_start(sl, &h->image.id);
+    command = 'R';
+  } else if (command == 'P') {
+    /* A partial UTF-8 character must not reach the editor. */
+    if (*sl_buffer(sl))
+      return SL_ERROR;
+  } else if (command == 'C') {
+    if (strcmp(sl_buffer(sl), h->kind == 1 ? "\342\202\254" : ""))
+      return SL_ERROR;
+    if (h->mode)
+      result = sl_image_paste_cancel(sl, h->image.id);
+    return result == SL_OK ? sl_submit(sl) : result;
+  } else
+    return SL_ERROR;
+  return result == SL_OK && write(h->events, &command, 1) == 1 ? SL_OK
+                                                               : SL_ERROR;
+}
+static int input_key(sl_t *sl, sl_key_t key, void *context,
+                     sl_key_action_t *action) {
+  struct input_host *h = context;
+  char notice = key == SL_KEY_LEFT ? 'L' : 'E';
+  *action = SL_KEY_ACTION_HANDLED;
+  if (key == SL_KEY_CTRL_T) {
+    if (sl_image_paste_start(sl, &h->image.id) != SL_OK)
+      return SL_ERROR;
+    notice = 'R';
+  } else if (h->mode == 3) {
+    if (sl_image_paste_cancel(sl, h->image.id) != SL_OK)
+      return SL_ERROR;
+  }
+  return write(h->events, &notice, 1) == 1 ? SL_OK : SL_ERROR_IO;
+}
+static int split_input(int mode, int kind) {
+  int master = -1, slave = -1, commands[2] = {-1, -1}, events[2] = {-1, -1};
+  int source[2] = {-1, -1}, failed = 1, submitted = 0, suffix = 0, status;
+  int launched = 0;
+  pid_t child = -1;
+  char *output = calloc(1, 8192);
+  size_t used = 0, scanned = 0;
+  double started = 0, deadline = redraw_time() + 3;
+  struct winsize size;
+  memset(&size, 0, sizeof(size));
+  size.ws_row = 24;
+  size.ws_col = 100;
+  if (!output || openpty(&master, &slave, NULL, NULL, &size) ||
+      pipe(commands) || pipe(events) || pipe(source) ||
+      write(source[1], "x", 1) != 1)
+    goto cleanup;
+  child = fork();
+  if (!child) {
+    struct input_host h;
+    sl_config_t config;
+    sl_watch_id_t watch;
+    char *line;
+    close(master);
+    close(commands[1]);
+    close(events[0]);
+    close(source[1]);
+    memset(&h, 0, sizeof(h));
+    h.events = events[1];
+    h.mode = mode;
+    h.kind = kind;
+    image_fixture_idle = 1;
+    image_fixture_fd = mode == 2 ? source[0] : -1;
+    sl_config_init(&config);
+    config.input_fd = config.output_fd = slave;
+    config.image_paste_callback = receive_image;
+    config.image_paste_context = &h.image;
+    h.image.sl = sl_create_with_config(&config);
+    if (!h.image.sl ||
+        (mode != 3 && sl_watch_add(h.image.sl, commands[0], SL_WATCH_READ,
+                                   input_command, &h, &watch) != SL_OK) ||
+        sl_bind_key(h.image.sl, SL_KEY_CTRL_T, input_key, &h) != SL_OK ||
+        sl_bind_key(h.image.sl, SL_KEY_LEFT, input_key, &h) != SL_OK ||
+        sl_bind_key(h.image.sl, SL_KEY_ESCAPE, input_key, &h) != SL_OK)
+      _exit(2);
+    line = sl_readline(h.image.sl, "input> ");
+    status = !line || strcmp(line, kind == 1 ? "\342\202\254" : "") ||
+             h.image.failed || h.image.aborts != (mode != 0);
+    sl_free_string(h.image.sl, line);
+    sl_destroy(h.image.sl);
+    _exit(status ? 2 : 0);
+  }
+  if (child < 0)
+    goto cleanup;
+  close(slave);
+  slave = -1;
+  close(commands[0]);
+  commands[0] = -1;
+  close(events[1]);
+  events[1] = -1;
+  if (mode != 3 && write(commands[1], "S", 1) != 1)
+    goto cleanup;
+  do {
+    struct pollfd fds[2];
+    pid_t exited;
+    double now;
+    fds[0].fd = master;
+    fds[0].events = POLLIN;
+    fds[0].revents = 0;
+    fds[1].fd = events[0];
+    fds[1].events = POLLIN;
+    fds[1].revents = 0;
+    if (poll(fds, 2, 2) < 0 && errno != EINTR)
+      goto cleanup;
+    if (fds[0].revents & POLLIN) {
+      const char *query;
+      ssize_t count = read(master, output + used, 8191 - used);
+      if (count > 0)
+        used += (size_t)count;
+      output[used] = 0;
+      if (used == 8191)
+        goto cleanup;
+      while ((query = strstr(output + scanned, "\033[6n")) != NULL) {
+        if (write(master, "\033[1;1R", 6) != 6)
+          goto cleanup;
+        scanned = (size_t)(query - output) + 4;
+      }
+    }
+    now = redraw_time();
+    if (mode == 3 && !launched && strstr(output, "input> ")) {
+      if (write(master, "\024", 1) != 1)
+        goto cleanup;
+      launched = 1;
+    }
+    if (fds[1].revents & POLLIN) {
+      char notice;
+      if (read(events[0], &notice, 1) != 1)
+        goto cleanup;
+      if (notice == 'R') {
+        started = now;
+        if (write(master, kind == 1 ? "\342" : "\033", 1) != 1)
+          goto cleanup;
+      } else if (notice == 'P' && kind == 1) {
+        if (write(master, "\202\254", 2) != 2)
+          goto cleanup;
+        suffix = 2;
+      } else {
+        if (!started || notice != (kind == 0 ? 'L' : 'E') ||
+            (kind == 2 && (now - started < .08 || now - started > .5)) ||
+            kind == 1 ||
+            (mode == 3 ? write(master, "\r", 1) : write(commands[1], "C", 1)) !=
+                1)
+          goto cleanup;
+        submitted = 1;
+      }
+    }
+    if (started && !suffix && kind != 2 && now - started >= .02) {
+      if ((kind == 0 && write(master, "[D", 2) != 2) ||
+          (kind == 1 && write(commands[1], "P", 1) != 1))
+        goto cleanup;
+      suffix = 1;
+    }
+    if (kind == 1 && suffix == 2 && !submitted &&
+        strstr(output, "\342\202\254")) {
+      if (write(commands[1], "C", 1) != 1)
+        goto cleanup;
+      submitted = 1;
+    }
+    exited = waitpid(child, &status, WNOHANG);
+    if (exited == child) {
+      child = -1;
+      failed = !submitted || !WIFEXITED(status) || WEXITSTATUS(status);
+      break;
+    }
+  } while (redraw_time() < deadline);
+cleanup:
+  if (failed)
+    fprintf(stderr, "split input failed (image mode=%d, input=%d)\n%s\n", mode,
+            kind, output ? output : "");
+  if (child > 0) {
+    kill(child, SIGKILL);
+    waitpid(child, NULL, 0);
+  }
+  if (master >= 0)
+    close(master);
+  if (slave >= 0)
+    close(slave);
+  if (commands[0] >= 0)
+    close(commands[0]);
+  if (commands[1] >= 0)
+    close(commands[1]);
+  if (events[0] >= 0)
+    close(events[0]);
+  if (events[1] >= 0)
+    close(events[1]);
+  if (source[0] >= 0)
+    close(source[0]);
+  if (source[1] >= 0)
+    close(source[1]);
+  free(output);
+  return failed;
+}
+static void *worker(void *unused) {
+  int result;
+  pthread_attr_t attributes;
+  size_t stack, guard;
+  (void)unused;
+  if (pthread_getattr_np(pthread_self(), &attributes) != 0 ||
+      pthread_attr_getstacksize(&attributes, &stack) != 0 ||
+      pthread_attr_getguardsize(&attributes, &guard) != 0 || !guard ||
+      stack > 160u * 1024u)
+    return (void *)1;
+  pthread_attr_destroy(&attributes);
+  result = basic(0) || basic(1) || limits() || failures() || deadlines() ||
+           deadline_domains() || native_cases();
+  return (void *)(size_t)result;
+}
+int main(int argc, char **argv) {
+  pthread_t thread;
+  void *result;
+#if defined(__GLIBC__)
+  pthread_attr_t attributes;
+#endif
+  if (argc == 2 && !strcmp(argv[1], "redraw"))
+    return watched_redraw(0) || watched_redraw(1);
+  if (argc == 2 && !strcmp(argv[1], "input")) {
+    int mode, kind, failed = 0;
+    for (mode = 0; mode < 4; ++mode)
+      for (kind = 0; kind < 3; ++kind)
+        if (mode != 3 || kind != 1)
+          failed |= split_input(mode, kind);
+    return failed;
+  }
+#if defined(__GLIBC__)
+  CHECK(pthread_getattr_default_np(&attributes) == 0);
+  CHECK(pthread_attr_setstacksize(&attributes, 128u * 1024u) == 0);
+  CHECK(pthread_setattr_default_np(&attributes) == 0);
+  CHECK(pthread_attr_destroy(&attributes) == 0);
+#endif
+  CHECK(pthread_create(&thread, NULL, worker, NULL) == 0);
+  CHECK(pthread_join(thread, &result) == 0);
+  return (int)(size_t)result;
+}

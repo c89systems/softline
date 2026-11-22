@@ -176,7 +176,7 @@ static int escape_hung_shell(const char *shell) {
       0);
   REQUIRE(wait_for(&e, "SHELL_READY -i cooked foreground", 0) == 0);
   snprintf(parent, sizeof(parent), "SHELL_PARENT %ld",
-           (long)(remote_owner ? remote_owner_pid : e.child));
+           (long)(remote_owner ? remote_owner_pid : tcgetpgrp(e.master)));
   REQUIRE(wait_for(&e, parent, 0) == 0);
   REQUIRE(wait_for(&e, "SHELL_PROCESS ", 0) == 0);
   process = strstr(e.bytes, "SHELL_PROCESS ");
@@ -692,6 +692,9 @@ int main(int argc, char **argv) {
   setenv("SHELL", shell, 1);
   setenv("SOFTLINE_PROMPT_THEME", "plain", 1);
   setenv("SOFTLINE_CHAT_CHAR_MS", "50", 1);
+  /* These cases inspect queue contents, not the intentional visibility grace.
+   */
+  setenv("SOFTLINE_QUEUE_DISPLAY_DELAY_MS", "0", 1);
   if (!strcmp(argv[1], "pressure") || !strcmp(argv[1], "lua-pressure")) {
     failed = terminal_failure();
     goto cleanup;

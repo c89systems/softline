@@ -6,8 +6,10 @@
 #include "softline_edit.h"
 #include "softline_history.h"
 #include "softline_surface.h"
+#include "softline_tty_guard.h"
 
 #include <signal.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -43,6 +45,7 @@ typedef struct sl_prompt_queue_entry {
   char *text;
   sl_prompt_queue_entry_info_t info;
   int history_recorded;
+  int64_t display_started;
 } sl_prompt_queue_entry_t;
 
 typedef struct sl_prompt_queue {
@@ -51,6 +54,9 @@ typedef struct sl_prompt_queue {
   int cap;
   int max_entries;
   int preview_entries;
+  int display_delay_ms;
+  int display_visible;
+  int64_t display_deadline;
   int enabled;
   int remote;
   sl_prompt_id_t serial;
@@ -77,6 +83,7 @@ typedef struct sl_prompt_queue {
 } sl_prompt_queue_t;
 
 typedef struct sl_backend sl_backend_t;
+typedef struct sl_image sl_image_t;
 
 typedef struct sl_statusline {
   char *elements[SL_STATUS_MAX_ELEMENTS];
@@ -123,8 +130,17 @@ typedef struct sl_history_search {
 } sl_history_search_t;
 
 typedef struct sl_impl {
+  sl_image_t *image;
+  sl_image_paste_callback_t image_callback;
+  void *image_context;
+  size_t image_limit;
+  int image_source_timeout, image_host_timeout, image_total_timeout;
+  int image_callback_active;
+  int image_literal;
   struct sl_pty *terminal_children;
   int terminal_active;
+  struct sl_transcripts *transcripts;
+  struct sl_output_backlog *output_backlog;
   int input_fd;
   int output_fd;
   int screen_width;
@@ -162,9 +178,8 @@ typedef struct sl_impl {
   int preferred_column_valid;
   int control_x_pending;
   int raw_active;
+  sl_tty_guard_t *raw_guard, *terminal_guard;
   struct termios original_termios;
-  tcflag_t original_output_oflag;
-  int output_oflag_changed;
   sl_history_t history;
   /* Sole reverse-search mode flag; readable by application key bindings. */
   int history_search_active;
@@ -218,6 +233,14 @@ typedef struct sl_impl {
   int readline_suspended;
   sl_history_search_t suspended_search;
   int request_submit;
+  unsigned long draft_revision;
+  struct {
+    char *text;
+    size_t length, offset;
+    int64_t deadline;
+    unsigned long revision;
+    sl_prompt_simulation_options_t options;
+  } prompt_simulation;
   int request_cancel;
   int request_suspend;
   int request_queue_dispatch;
@@ -242,11 +265,32 @@ typedef struct sl_impl {
 void sl_terminal_reap(sl_impl_t *impl);
 void sl_terminal_cleanup(sl_impl_t *impl);
 void sl_terminal_abandon(sl_t *self);
+void sl_transcript_destroy(sl_t *self);
+int sl_transcript_key(sl_t *self, int key);
+int sl_transcript_paint(sl_t *self, int rows, int columns);
+int sl_transcript_leave(sl_t *self);
+int sl_output_replay_transcript(sl_t *self);
+
+int sl_image_start(sl_t *, sl_image_paste_id_t *);
+int sl_image_start_source(sl_t *, const sl_image_paste_source_t *,
+                          sl_image_paste_id_t *);
+int sl_image_prepare(sl_t *, sl_image_paste_wait_t *);
+int sl_image_pump(sl_t *);
+int sl_image_resume(sl_t *, sl_image_paste_id_t);
+int sl_image_complete(sl_t *, sl_image_paste_id_t, const char *, const char *);
+int sl_image_cancel(sl_t *, sl_image_paste_id_t);
+int sl_image_pending(const sl_impl_t *);
+void sl_image_changed(sl_t *, size_t, size_t, size_t);
+void sl_image_invalidate(sl_t *, const char *);
+void sl_image_destroy(sl_t *);
+int sl_image_insert_result(sl_t *, size_t, const char *);
+int sl_image_valid_path(const char *);
 
 /* Internal editor/cache operations shared with the transport-independent queue
  * adapter. These are not application queue admission or consumption seams. */
 int sl_queue_cached_edit_begin(sl_t *self, int index);
 void sl_queue_cached_edit_restore(sl_t *self);
+void sl_history_nav_reset(sl_impl_t *impl);
 int sl_backend_create(sl_t *self, const sl_config_t *config);
 void sl_backend_destroy(sl_t *self);
 int sl_backend_callback_active(const sl_impl_t *impl);
@@ -268,7 +312,14 @@ int sl_backend_cancel_edit(sl_t *self);
 void sl_backend_cancel_waiting(sl_impl_t *impl);
 int sl_backend_unsupported(sl_t *self);
 int sl_backend_recover_newest(sl_t *self);
-int sl_backend_notice(const sl_impl_t *impl, char *text, size_t size);
+int64_t sl_queue_display_now(void);
+int sl_prompt_simulation_options_valid(const sl_prompt_simulation_options_t *);
+int sl_quoted_prompt_text_valid(const char *);
+int64_t sl_queue_display_start(const sl_impl_t *impl);
+int sl_queue_display_ready(const sl_impl_t *impl, int64_t started, int64_t now,
+                           int64_t *deadline);
+int sl_backend_notice(const sl_impl_t *impl, int64_t now, int64_t *deadline,
+                      int *visible, char *text, size_t size);
 int sl_queue_backend_request_impl(sl_t *, const sl_queue_request_t *,
                                   sl_queue_request_id_t *);
 int sl_queue_backend_result_impl(sl_t *, const sl_queue_result_t *);

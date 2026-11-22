@@ -358,6 +358,7 @@ static int live_gate_watch(sl_t *sl, const sl_watch_event_t *event,
                 sl_set_status_elements(sl, elements, 1) == SL_OK &&
                 sl_set_status_message(sl, "working") == SL_OK &&
                 sl_set_prompt_queue(sl, 1, 8, 3) == SL_OK &&
+                sl_set_prompt_queue_display_delay(sl, 0) == SL_OK &&
                 sl_set_prompt_queue_delivery(
                     sl, SL_PROMPT_QUEUE_DELIVERY_MANUAL) == SL_OK &&
                 sl_prompt_queue_append(sl, "queued for reset", 0, NULL) == SL_OK

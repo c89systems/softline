@@ -42,6 +42,19 @@ work on the editor owner thread. `sl_queue_backend_result()` records an outcome;
 callback. The library adds no network/storage dependency, worker thread or
 interval queue polling.
 
+Queue/steer previews and pending-send notices wait 500 ms before appearing by
+default. `sl_config_t.prompt_queue_display_delay_ms` and
+`sl_set_prompt_queue_display_delay()` configure this presentation delay; zero
+displays immediately. Entries arriving while the queue is already visible
+appear immediately, including pending sends alongside visible queue previews.
+They stay visible if older entries are consumed. Once an empty queue is drawn,
+the delay applies again. Entries added while the queue is hidden age
+independently; consuming them before their deadline never adds a row. Each entry
+keeps its age across subscription updates with the same identity.
+Queue APIs and dispatch are immediate. Approvals, active edits, rejected/unknown
+outcomes and connection notices remain immediate. The editor's input wait wakes
+at the next display deadline; this adds no worker or recurring polling timer.
+
 An initial `SL_QUEUE_SNAPSHOT` establishes the bounded view. `UPSERT`, `REMOVE`
 and `STATE` deltas chain `previous_revision` to `revision`. Existing entries
 cannot move through UPSERT. Each change includes total count, stopped state and
@@ -175,6 +188,21 @@ make run-chat-riced CHAT_QUEUE=remote
 make run-chat-local
 ```
 
+`make run-chat-queue-server` starts the server with `build/` as its working
+directory. Ctrl-V in remote chat streams PNG/JPEG bytes to that server and inserts
+its acknowledged absolute path. Completed images remain in `build/`; set
+`SOFTLINE_CHAT_IMAGE_DIR` on the server to select another existing directory.
+See [image handover](image-paste.md#remote-chat-example) for limits and cleanup.
+
+The TCP examples opt in to [c89.systems' libcbor](https://github.com/c89systems/libcbor).
+Install the C89Cbor 0.2 SDK and its lonejson and cpkt SDK prerequisites for the
+build target. Pass their prefixes as a semicolon-separated
+`SL_CBOR_SDK_PREFIXES` to `make build-cbor-debug` or the TCP run targets.
+Direct CMake builds use `-DSL_ENABLE_CBOR_TCP=ON` and the same SDK prefixes.
+The Make targets use `build/cbor-debug`; run its tests with
+`ctest --test-dir build/cbor-debug --output-on-failure`. The default Softline
+build and local/web examples build independently of libcbor.
+
 Both commands accept `QUEUE_PORT` (default 7635). `QUEUE_HOST` must be numeric
 `127.0.0.1`: this unauthenticated example only binds loopback. The owner is
 explicitly volatile, not a production protocol or durable service. Restarting
@@ -185,6 +213,47 @@ evicting deduplication records.
 An attachment supplies its prior request watermark when establishing a new
 namespace, keeping outcomes lost in an owner restart unknown and preventing
 readmission under an old identity. This does not provide durable queue storage.
+
+Use `/stream` from the TUI or browser to toggle response pacing. Use
+`/stream direct` to remove the simulated delay and `/stream llm` to send
+four-byte deltas with a simulated rate of about 12.5 deltas per second by
+default. The queue owner applies the setting to the current response and
+keeps it across client reconnects. To choose the owner's startup pace, set
+`SOFTLINE_CHAT_CHAR_MS` on the server (20 ms per byte by default, 0 for
+direct). Without a server setting, the owner's initial pace can follow the
+attached client's startup setting until the first `/stream` command.
+
+From the remote TUI, submit `/type {3:30:3:s} Example prompt` to drive a
+browser on the queue owner's web listener. The browser waits 3 seconds,
+inserts one visible character every 30 ms, waits 3 more seconds, and submits
+through its normal steer action. Use `q` for an ordinary submission or set
+the middle value to `0` for one insertion. Without braces, the command uses
+`{0:50:1:q}`. The owner first selects its newest chat connection and keeps
+using it until disconnect. The next command selects from the remaining live
+connections. Editing the composer or disconnecting cancels auto-submit.
+
+The example sends one CBOR array per libcbor `C89CBOR_LENGTH32` record over
+plain TCP. Its first field is the unsigned message type, followed by unsigned
+integers, text, byte strings or null. Reply deltas use byte strings so UTF-8
+characters can span records. The example carries queue requests and
+snapshots, response Markdown and lifecycle events, image uploads, and PTY
+traffic. Remote shell handoffs use a dedicated connection to the same port.
+
+The queue backend callback pins the request's existing recovery storage and
+enqueues field metadata. The TCP example uses the native libcbor encoder and
+gathers its spans into bounded socket writes. Only the small CBOR headers
+need scratch storage. Payload spans keep borrowing their original bytes
+across partial writes. The reader decodes from a
+bounded socket buffer into typed fields and delivers a request only after
+its CBOR record validates. The outbound queue accounts for bytes without
+retaining a serialized frame. Large snapshots retain their typed fields,
+and image and PTY payloads retain at most their independently bounded chunks.
+
+For an application using libcbor, include `<softline/cbor.h>` and link with
+`C89Cbor::static` or `C89Cbor::shared`. Use `sl_queue_backend_pin_request`
+inside the Softline request callback and give the borrowed text fields
+directly to the native `c89cbor_encoder`. Release the pin after your
+transport finishes writing the borrowed bytes.
 
 Both C executables share the current chat frontend, preserving the v0.15.1
 interaction model while adding backend adapters: Softline renders the

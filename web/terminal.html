@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en" data-theme="default" data-font="mono">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <title>softline terminal</title>
+  <link rel="stylesheet" href="./softline.css">
+  <link rel="stylesheet" href="./xterm.css">
+  <link rel="stylesheet" href="./terminal.css">
+  <script type="module" src="./terminal.js"></script>
+</head>
+<body>
+  <main id="terminal" aria-label="Server terminal"></main>
+  <footer class="terminal-footer">
+    <a href="./">Chat</a>
+    <span id="terminal-status" role="status">Connecting…</span>
+    <button id="terminal-close" class="icon-button" type="button" aria-label="Close terminal" title="Close terminal"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
+  </footer>
+</body>
+</html>

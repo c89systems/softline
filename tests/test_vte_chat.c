@@ -52,6 +52,19 @@ static int wait_frame(struct chat *c, const char *marker, const char *prompt,
                    : "requested busy/idle state");
   return 1;
 }
+static int wait_bottom_prompt(struct chat *c, const char *prompt) {
+  double deadline = now() + 2;
+  do {
+    struct snapshot s = frame(c);
+    long first = (long)v.adjustment_value(v.adjustment(c->screen.terminal));
+    if (s.row == first + v.rows(c->screen.terminal) - 1 &&
+        !strcmp(last_row(s.text), prompt))
+      return 0;
+    pump_once();
+  } while (now() < deadline);
+  fprintf(stderr, "Resized chat did not render its prompt at the bottom\n");
+  return 1;
+}
 static int wait_visible(struct chat *c, const char *marker) {
   double deadline = now() + 2;
   do {
@@ -650,18 +663,17 @@ static int streaming_case(const char *example, const char *theme) {
       "Then use code for the operation; bold marks the result and italic marks "
       "a caveat.",
       "A single line can be italic, bold, or code."};
-  REQUIRE(start_chat(&c, example, theme, 24, 20) == 0);
+  REQUIRE(start_chat(&c, example, theme, 24, 8) == 0);
   for (turn = 0; turn < 3; ++turn) {
     send_input(&c, "\025");
     send_input(&c, messages[turn]);
     send_input(&c, "\r");
-    REQUIRE(wait_frame(&c, headings[turn], NULL, 0, 8) == 0);
+    REQUIRE(wait_frame(&c, headings[turn], NULL, -1, 8) == 0);
     send_input(&c, "draft");
     for (dimension = 0; dimension < 5; ++dimension) {
       REQUIRE(coordinated_resize(&c, dimensions[dimension][0],
                                  dimensions[dimension][1], 0) == 0);
       REQUIRE(wait_frame(&c, NULL, "> draft\n", 0, 8) == 0);
-      settle(.15);
     }
     REQUIRE(wait_frame(&c, endings[turn], "> draft\n", 1, 8) == 0);
     s = frame(&c);
@@ -733,7 +745,7 @@ static int width_case(const char *example, const char *theme) {
                 : turn == 2 ? widths2[stage % 7]
                             : widths3[stage % 6];
         REQUIRE(coordinated_resize(&c, width, 24, 1) == 0);
-        settle(turn == 1 ? .005 : turn == 2 ? .06 : .12);
+        REQUIRE(wait_bottom_prompt(&c, "> draft\n") == 0);
       }
       if (c.worker > 0) {
         resume_producer(&c);

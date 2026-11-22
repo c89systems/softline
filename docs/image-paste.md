@@ -1,0 +1,188 @@
+# Clipboard images and streaming handover
+
+## Standalone X11 paste
+
+With a Linux X11 display, Ctrl+V saves a PNG or JPEG in a private cache file
+and inserts its absolute path at the cursor. Softline reads the X11
+`CLIPBOARD` selection directly, including through SSH X11 forwarding. The
+file remains available after the editor exits. On failure the draft stays
+intact and `sl_last_error()` supplies a diagnostic. Set
+`sl_config_t.disable_image_paste` to disable the built-in key behavior.
+
+The default path is `${XDG_CACHE_HOME}/softline/{xid}.png` or `.jpeg`, with
+`$HOME/.cache` as the fallback cache root. A template set through
+`sl_config_t.image_paste_path_template` or
+`sl_set_image_paste_path_template()` replaces a single `*` with a
+20-character lowercase base32hex XID, then appends the image extension.
+For example, `/tmp/softline/*/image` produces
+`/tmp/softline/{xid}/image.png`. Parent directories are created recursively.
+The template supports `~/`, `{{HOME}}`, `{{home}}`,
+`{{XDG_CACHE_HOME}}` and `{{xdg_cache_home}}`.
+
+Standalone capture has a 32 MiB cap and a 10-second overall deadline.
+The deadline includes X11 setup, hostname resolution and property replies.
+For incremental X11 transfers, Softline waits for and acknowledges the
+zero-length terminator. Failed transfers remove their partial cache files.
+
+## Host handover
+
+A constructor-configured `image_paste_callback` replaces local clipboard-image
+storage with owner-thread handover. Ctrl-V still selects PNG, falling back to
+JPEG. An explicit `sl_image_paste_start()` uses exactly the same lifecycle at the
+current draft cursor. A key binding for Ctrl-V takes precedence. This feature
+requires Linux and an available X11 DISPLAY, including SSH-forwarded X11. Plain
+SSH without X11 forwarding does not provide clipboard access.
+
+Only encoded PNG/JPEG image content is acquired. File-list clipboard targets,
+local-file opening, arbitrary file upload and terminal file-transfer protocols
+are outside this interface. Pasted text and path-looking strings remain text.
+Softline does not implement a backend transport, filesystem service or workers.
+
+The `sl_image_paste_*` functions and their receiver equivalents are
+documented in `<softline/softline.h>`. Use
+`sl_image_paste_start_source()` for a host-provided source such as a browser
+upload.
+
+## Callback lifecycle
+
+Set `image_paste_callback` and borrowed `image_paste_context` in `sl_config_t`
+before constructing the editor. All calls and callbacks use the editor owner
+thread. The callback must return promptly, must not reenter Softline, and must
+not block or yield. Its context remains valid until editor destruction finishes.
+
+1. BEGIN admits the selected media type and suggested display filename before
+   image content is requested. Its nonzero ID identifies this transfer only;
+   IDs are never reused during one handle's lifetime.
+2. DATA supplies a binary chunk, length and byte offset. Return SL_OK only after
+   consuming or copying all bytes. SL_ERROR_NOT_READY means no consumption;
+   Softline retains that one chunk, stops acquisition and retries it only after
+   `sl_image_paste_resume()`. Metadata and data pointers are callback-scoped.
+3. END confirms clean acquisition EOF and the actual accepted byte count. It
+   does not acknowledge backend storage. There are no more source reads.
+4. After backend publication, call `sl_image_paste_complete()` with its real,
+   absolute filesystem path. A transfer ID, URL or frontend cache path is not
+   a substitute. The path is copied and inserted at a subsequent dispatch
+   boundary. To report backend failure, pass NULL for the path and a reason.
+5. ABORT reports source failure, rejected admission/chunks, timeout, cancellation,
+   invalidated draft or failed result insertion. It is terminal and exactly once;
+   the host aborts/releases incomplete or unreferenced backend work. No local
+   cache fallback occurs. DONE reports successful insertion. Each admitted
+   transfer ends with exactly one ABORT or DONE, allowing the host to release
+   its transfer bookkeeping. Return values of terminal notifications are ignored.
+
+A callback failure aborts the upload while keeping editing available. Callback
+failure reasons are concise native diagnostics; backend failures can supply a
+bounded reason through complete. Invalid/stale/duplicate resume, cancel and
+completion calls return SL_ERROR_INVALID and cannot duplicate insertion. An
+invalid result path can be corrected while the transfer remains in backend wait.
+Never call through a destroyed handle; remove application watches before closing
+it. Destruction aborts pending work before releasing the borrowed context.
+
+## Bounds and deadlines
+
+`image_paste_max_bytes = 0` selects **32 MiB (33,554,432 bytes) per image**. Positive
+values select explicit byte limits up to INT_MAX. Actual acquired bytes enforce
+the limit even when X11 size hints are dishonest. Known oversized properties are
+rejected early. An exact-limit image requires clean EOF. Source chunks are at
+most 16,384 bytes, with fixed bounded X11 setup/property buffers; no whole-image
+buffer, mmap, temporary file or frontend cache copy is created in handover mode.
+INCR properties are acknowledged only after the host accepts their chunks.
+
+Timeout options are milliseconds; zero selects the defaults:
+
+| Option | Default | Measures |
+| --- | --- | --- |
+| `image_paste_source_timeout_ms` | 10,000 | No newly accepted image chunk or representation admission; excludes host pause |
+| `image_paste_host_timeout_ms` | 30,000 | Each host pause or backend acknowledgement wait |
+| `image_paste_total_timeout_ms` | 120,000 | Entire transfer, including pauses |
+
+Negative timeouts and unrepresentable limits are rejected. Once an acknowledged
+path is retained for safe insertion during terminal suspension, it no longer has
+an acquisition/backend deadline. Retained result paths are limited to 4,095 bytes
+and must be valid UTF-8 absolute paths without terminal control characters.
+Without an adapter, standalone image caching retains its 32 MiB limit and path
+template behavior, using the same X11 acquisition machinery.
+
+## Editing and event-loop integration
+
+One transfer can be pending per editor. The host owns all progress, status and
+error presentation through lifecycle callbacks and the existing status-message
+APIs. Image handover allocates no UI row and never changes status text, prefixes,
+colors or spinner state. Failure diagnostics remain available through
+`sl_last_error()` and the ABORT event. Callback handlers defer any editor/status
+calls until the owner-thread event loop resumes, outside the callback.
+
+Typing remains available; edits before the insertion anchor move it, while
+typing exactly at the anchor follows the future image path. A deletion across the
+anchor, draft replacement, history recall, queued-edit replacement/cancellation
+or editor destruction aborts the transfer. Hosts switching sessions/workspaces
+must cancel the old transfer or replace its draft before accepting new work.
+
+Enter, Alt-Enter, configured queue admission keys and programmatic submission
+retain the draft while an image is pending. Ctrl-C cancels only the pending
+image and immediately continues editing the preserved draft. Outside a transfer,
+Ctrl-C retains its ordinary interrupt behavior. Explicit host key bindings retain
+precedence except for pending-upload cancellation/submission guards.
+
+After acknowledgement, insertion is literal, atomic against `line_max_len`, and
+one undoable edit. It does not trigger completion, add history or submit anything.
+Undo affects text only; backend retention/deletion belongs to the application.
+Existing queue identities, edit holds and approval state follow their normal
+submission path when the user explicitly submits the resolved draft.
+
+Rendering suspension preserves acquisition. An application's loop can call
+`sl_image_paste_prepare()` to obtain borrowed descriptors/readiness interests and
+the next timeout, then `sl_image_paste_pump()` on readiness or deadline. Prepare
+again after each operation. A zero timeout requests an immediate bounded step;
+-1 means no deadline. There is no periodic polling requirement. Native editing
+uses these same functions automatically. While suspended, a completed result is
+retained and inserted when the original draft resumes. Replacing it cancels.
+
+Network readiness is application-owned. A host can register its transport or
+wakeup descriptor with `sl_watch_add()`, then resume/complete on the owner thread.
+No worker may access the editor directly. Backpressure must continue through the
+host transport: accepting chunks into an unbounded application queue defeats the
+resource bound even though Softline retains only one chunk.
+
+## Remote chat example
+
+The C chat frontend (`example_chat HOST PORT` or `example_chat_remote HOST PORT`)
+registers this handover adapter when connected to `example_queue_owner`. It sends
+PNG/JPEG chunks over the existing example TCP connection, with one chunk awaiting
+server acknowledgement at a time. The frontend creates no image file. Typing
+continues during a transfer; Ctrl-C cancels the image without submitting the draft
+or cancelling the simulated response. A disconnected upload is aborted rather
+than retried on a different connection.
+
+The chat host explicitly presents upload activity in its existing italic
+Thinking/Reasoning message row using `sl_set_status_message()` and the usual
+spinner. The adapter only delivers lifecycle notifications from its owner-thread
+watch; it does not set UI state. Finishing or cancelling an upload restores the
+host's current response activity without adding a row.
+
+The server saves images in its starting working directory by default.
+`make run-chat-queue-server` starts it inside the checkout's `build/` directory,
+so default uploads stay out of the source tree. For direct invocation after
+building, use `(cd build && ./cbor-debug/examples/example_queue_owner 7635)`. Set
+`SOFTLINE_CHAT_IMAGE_DIR` on the server to choose another existing directory.
+Generated `softline-image-*.png` / `*.jpeg` files have mode 0600; clipboard names
+cannot select a destination. The server streams into the destination directory,
+publishes only after clean EOF and successful storage, and returns its absolute
+path. Softline inserts that path only after this acknowledgement.
+
+Both processes default to 32 MiB per image. Set `SOFTLINE_CHAT_IMAGE_MAX_BYTES`
+independently on the frontend and server to change their respective byte limits;
+0 selects the default, and values above INT_MAX are rejected. The server rejects
+oversized uploads even if a frontend permits them. Incomplete transfers expire
+after 30 seconds without a chunk or 120 seconds overall.
+
+Completed images remain for the operator to manage, including after server exit.
+Cancellation removes incomplete and explicitly abandoned uploads. A disconnect
+removes partial files but retains published images: an acknowledgement may have
+been lost after the frontend inserted its path. This example storage/transport
+policy stays outside libsoftline.
+
+See the public header for C declarations and [the Lua facade](../lua/README.md)
+for equivalent callbacks and methods. `tests/clipboard_fixture.c` and
+`tests/lua-fixtures/image-paste.lua` demonstrate streaming checksums with deferred
+acknowledgement; they explicitly submit their final draft to drive test automation.

@@ -1,12 +1,13 @@
 #ifndef SOFTLINE_DEMO_TERMINAL_H
 #define SOFTLINE_DEMO_TERMINAL_H
-#include "../src/softline_pty.h"
 #include "queue_demo_wire.h"
 #include <netinet/in.h>
+#include <softline/terminal.h>
 /* Demo protocol only: transport/security remain outside libsoftline. */
 typedef struct demo_terminal_server {
   struct demo_terminal_server *next;
-  sl_pty_t pty;
+  sl_terminal_session_t *session;
+  sl_terminal_event_t wait;
   char input[4096];
   size_t input_len;
   int eof, ready;

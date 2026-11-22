@@ -23,7 +23,14 @@ cat > "$work/build/debug/examples/example_chat" <<'SH'
 #!/bin/sh
 printf '%s %s\n' "$SOFTLINE_CHAT_CHAR_MS" "$SOFTLINE_PROMPT_THEME"
 SH
-chmod +x "$work/bin/cmake" "$work/scripts/build-local-lua.sh" "$work/build/debug/examples/example_chat"
+cat > "$work/build/debug/examples/softline_terminal_supervisor" <<'SH'
+#!/bin/sh
+test "$1" = -- || exit 2
+shift
+printf 'supervised %s\n' "$*" >> "$CALL_LOG"
+exec "$@"
+SH
+chmod +x "$work/bin/cmake" "$work/scripts/build-local-lua.sh" "$work/build/debug/examples/"{example_chat,softline_terminal_supervisor}
 export CALL_LOG="$work/calls" PATH="$work/bin:$PATH" REAL_CMAKE="$real_cmake"
 cd "$work"
 : > "$CALL_LOG"
@@ -40,6 +47,7 @@ for theme in default riced; do
   if [[ "$theme" == default ]]; then target=run-chat-without-delay; else target=run-chat-without-delay-riced; fi
   output=$(SOFTLINE_CHAT_CHAR_MS=999 SOFTLINE_PROMPT_THEME=plain make --no-print-directory "$target")
   [[ "$output" == "0 $theme" ]]
+  grep -qx 'supervised ./build/debug/examples/example_chat' "$CALL_LOG"
 done
 # Packaging consumes resolver readiness: optional Darwin skips an unavailable
 # SDK, while required Darwin fails before any producer is invoked.

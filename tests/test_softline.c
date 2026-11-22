@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #define _POSIX_C_SOURCE 200809L
 
+#include "silent_cursor_probe.h"
 #include "softline/softline.h"
 
 #include <assert.h>
@@ -31,6 +32,7 @@
 static int tests_run = 0;
 static int tests_passed = 0;
 static volatile sig_atomic_t signal_seen = 0;
+#if SL_TEST_PTY
 static int signal_ack_fd = -1;
 
 static void remember_signal(int signo) {
@@ -42,6 +44,7 @@ static void remember_signal(int signo) {
     (void)write(signal_ack_fd, &byte, 1);
   }
 }
+#endif
 
 static void ignore_signal(int signo) { (void)signo; }
 
@@ -154,6 +157,8 @@ static void test_config_init(void) {
   ASSERT_TRUE(cfg.prompt_queue_max_entries == 64, "prompt queue max default");
   ASSERT_TRUE(cfg.prompt_queue_preview_entries == 3,
               "prompt queue preview default");
+  ASSERT_TRUE(cfg.prompt_queue_display_delay_ms == 500,
+              "prompt queue display delay default");
   ASSERT_TRUE(cfg.prompt_theme == SL_PROMPT_THEME_DEFAULT,
               "prompt theme default");
   ASSERT_TRUE(cfg.statusline == 0, "status line default");
@@ -235,6 +240,8 @@ static void test_receiver_shell(void) {
   ASSERT_TRUE(sl->set_live_scroll_region != NULL,
               "set_live_scroll_region method missing");
   ASSERT_TRUE(sl->set_prompt_queue != NULL, "set_prompt_queue method missing");
+  ASSERT_TRUE(sl->set_prompt_queue_display_delay != NULL,
+              "set_prompt_queue_display_delay method missing");
   ASSERT_TRUE(sl->set_prompt_theme != NULL, "set_prompt_theme method missing");
   ASSERT_TRUE(sl->set_statusline != NULL, "set_statusline method missing");
   ASSERT_TRUE(sl->set_status_message != NULL,
@@ -400,7 +407,6 @@ struct full_editor_stream_probe {
 
 #if SL_TEST_PTY
 static size_t read_live_pty_output(int fd, char *bytes, size_t capacity);
-#endif
 
 static void full_editor_stream_idle(sl_t *sl, void *userdata) {
   struct full_editor_stream_probe *probe;
@@ -426,6 +432,7 @@ static void full_editor_stream_idle(sl_t *sl, void *userdata) {
   }
   (void)sl_cancel(sl);
 }
+#endif
 
 static void test_live_output_retains_row_with_full_editor(int start_inside) {
 #if SL_TEST_PTY
@@ -490,6 +497,7 @@ struct finite_partial_chunk {
   int end_result;
 };
 
+#if SL_TEST_PTY
 static int finite_partial_stream(sl_t *sl, void *userdata, const char **chunk,
                                  size_t *length) {
   struct finite_partial_chunk *state = (struct finite_partial_chunk *)userdata;
@@ -527,6 +535,7 @@ static void finite_recovery_idle(sl_t *sl, void *userdata) {
   }
   (void)sl_cancel(sl);
 }
+#endif
 
 static void test_finite_output_recovers_from_partial_sequences(void) {
 #if SL_TEST_PTY
@@ -1473,6 +1482,7 @@ static void test_print_above_uses_lf_for_non_tty_output(void) {
   PASS();
 }
 
+#if SL_TEST_PTY
 static int contains_bytes(const char *haystack, const char *needle) {
   return strstr(haystack, needle) != NULL;
 }
@@ -1824,6 +1834,7 @@ static ssize_t read_some_with_timeout_ms(int fd, char *buf, size_t cap,
   } while (ready < 0 && errno == EINTR);
   return ready;
 }
+#endif
 
 static void test_redirected_live_output_validates_stream(void) {
   static const char expected[] = "\xc3\xa4\033[31mXZH";
@@ -2587,6 +2598,7 @@ static void test_quote_spacing_after_partial_invalid_write(void) {
 #endif
 }
 
+#if defined(__linux__)
 static ssize_t read_until_eof_with_timeout(int fd, char *buf, size_t cap) {
   ssize_t total;
   total = 0;
@@ -2602,7 +2614,6 @@ static ssize_t read_until_eof_with_timeout(int fd, char *buf, size_t cap) {
   return total;
 }
 
-#if defined(__linux__)
 struct idle_print_state {
   int printed;
 };
@@ -3110,6 +3121,7 @@ static int run_pty_readline_completion_case(int prompt_queue, char *terminal,
     cfg.input_fd = slave_fd;
     cfg.output_fd = slave_fd;
     cfg.prompt_queue = prompt_queue;
+    cfg.prompt_queue_display_delay_ms = 0;
     sl = sl_create_with_config(&cfg);
     if (!sl)
       _exit(2);
@@ -3194,6 +3206,7 @@ static int run_pty_history_case_with_options(
     cfg.output_fd = slave_fd;
     cfg.screen_width = width;
     cfg.prompt_queue = prompt_queue;
+    cfg.prompt_queue_display_delay_ms = 0;
     sl = sl_create_with_config(&cfg);
     if (!sl)
       _exit(2);
@@ -3392,6 +3405,7 @@ static int run_pty_prompt_queue_case_with_width(
     cfg.input_fd = slave_fd;
     cfg.output_fd = slave_fd;
     cfg.prompt_queue = 1;
+    cfg.prompt_queue_display_delay_ms = 0;
     cfg.prompt_queue_max_entries = 8;
     cfg.prompt_queue_preview_entries = 1;
     cfg.prompt_theme = theme;
@@ -5234,6 +5248,8 @@ static void test_non_ctrl_c_signal_does_not_interrupt_readline(void) {
   char terminal[4096];
   char result[256];
   char ack;
+  struct termios mode;
+  const struct timespec retry = {0, 1000000};
   size_t terminal_len;
   size_t result_len;
   ssize_t n;
@@ -5297,6 +5313,15 @@ static void test_non_ctrl_c_signal_does_not_interrupt_readline(void) {
   ASSERT_TRUE(kill(pid, SIGUSR1) == 0, "signal failed");
   n = read_some_with_timeout(ack_pipe[0], &ack, 1);
   ASSERT_TRUE(n == 1, "signal handler did not run");
+  /* The handler acknowledges while the terminal is restored. Wait for
+   * readline to resume raw input before sending a carriage return. */
+  for (tries = 0; tries < 500; ++tries) {
+    ASSERT_TRUE(tcgetattr(master_fd, &mode) == 0, "read terminal mode failed");
+    if (!(mode.c_lflag & ICANON))
+      break;
+    (void)nanosleep(&retry, NULL);
+  }
+  ASSERT_TRUE(tries < 500, "readline did not restore raw input after signal");
   ASSERT_TRUE(write(master_fd, "ok\r", 3) == 3, "submit failed");
   result_len = 0;
   result[0] = '\0';
@@ -7544,6 +7569,7 @@ static void test_normal_prompt_pins_at_bottom_for_live_output(void) {
     cfg.input_fd = slave_fd;
     cfg.output_fd = slave_fd;
     cfg.prompt_queue = 1;
+    cfg.prompt_queue_display_delay_ms = 0;
     cfg.live_scroll_region = 1;
     sl = sl_create_with_config(&cfg);
     if (!sl)
@@ -7807,6 +7833,7 @@ static void test_cursor_probe_preserves_concurrent_queue_input(void) {
     cfg.input_fd = slave_fd;
     cfg.output_fd = slave_fd;
     cfg.prompt_queue = 1;
+    cfg.prompt_queue_display_delay_ms = 0;
     cfg.live_scroll_region = 1;
     sl = sl_create_with_config(&cfg);
     if (!sl)
@@ -7984,6 +8011,7 @@ static void test_queued_turns_profile_promotes_manually(void) {
     cfg.input_fd = slave_fd;
     cfg.output_fd = slave_fd;
     cfg.prompt_queue = 1;
+    cfg.prompt_queue_display_delay_ms = 0;
     sl = sl_create_with_config(&cfg);
     if (!sl ||
         sl_set_prompt_queue_profile(sl, SL_PROMPT_QUEUE_PROFILE_QUEUED_TURNS) !=
@@ -8088,6 +8116,7 @@ static void test_queued_turns_cancellation_pauses_auto_delivery(void) {
     cfg.input_fd = slave_fd;
     cfg.output_fd = slave_fd;
     cfg.prompt_queue = 1;
+    cfg.prompt_queue_display_delay_ms = 0;
     sl = sl_create_with_config(&cfg);
     if (!sl ||
         sl_set_prompt_queue_profile(sl, SL_PROMPT_QUEUE_PROFILE_QUEUED_TURNS) !=
@@ -8232,6 +8261,7 @@ static void test_watch_prints_while_editing(void) {
     cfg.input_fd = slave_fd;
     cfg.output_fd = slave_fd;
     cfg.prompt_queue = 1;
+    cfg.prompt_queue_display_delay_ms = 0;
     sl = sl_create_with_config(&cfg);
     if (!sl || sl_set_statusline(sl, 1, 0) != SL_OK ||
         sl_set_status_element(sl, 0, "waiting") != SL_OK ||
@@ -8551,6 +8581,7 @@ static void test_queued_turns_auto_dispatches_on_watch(void) {
     cfg.input_fd = slave_fd;
     cfg.output_fd = slave_fd;
     cfg.prompt_queue = 1;
+    cfg.prompt_queue_display_delay_ms = 0;
     sl = sl_create_with_config(&cfg);
     if (!sl ||
         sl_set_prompt_queue_profile(sl, SL_PROMPT_QUEUE_PROFILE_QUEUED_TURNS) !=
@@ -8646,6 +8677,7 @@ static void test_queued_turns_preserve_alt_enter_during_completion(void) {
     cfg.input_fd = slave_fd;
     cfg.output_fd = slave_fd;
     cfg.prompt_queue = 1;
+    cfg.prompt_queue_display_delay_ms = 0;
     sl = sl_create_with_config(&cfg);
     if (!sl ||
         sl_set_prompt_queue_profile(sl, SL_PROMPT_QUEUE_PROFILE_QUEUED_TURNS) !=
@@ -8757,6 +8789,7 @@ test_queued_turns_prioritize_input_arriving_during_completion(void) {
     cfg.input_fd = slave_fd;
     cfg.output_fd = slave_fd;
     cfg.prompt_queue = 1;
+    cfg.prompt_queue_display_delay_ms = 0;
     sl = sl_create_with_config(&cfg);
     if (!sl ||
         sl_set_prompt_queue_profile(sl, SL_PROMPT_QUEUE_PROFILE_QUEUED_TURNS) !=
@@ -8879,6 +8912,7 @@ static void test_watch_completion_preserves_input_for_next_prompt(void) {
       cfg.input_fd = slave_fd;
       cfg.output_fd = slave_fd;
       cfg.prompt_queue = 1;
+      cfg.prompt_queue_display_delay_ms = 0;
       sl = sl_create_with_config(&cfg);
       if (!sl)
         _exit(2);
@@ -11245,15 +11279,19 @@ int main(int argc, char **argv) {
   test_tab_render_expands_beyond_line_bytes();
   test_key_binding_tab_inserts_text();
   test_prompt_queue_dispatches_fifo_with_themes();
+#if SL_TEST_PTY
   test_prompt_queue_dispatches_fifo_in_normal_scrollback();
   test_prompt_queue_clips_control_rows_on_narrow_terminals();
   test_prompt_queue_previews_control_bytes_safely();
   test_prompt_queue_rejects_reduced_capacity();
+#endif
   test_prompt_queue_alt_e_recalls_newest();
   test_prompt_themes_style_normal_readline();
   test_statusline_uses_palette_offset_and_truncation();
   test_default_statusline_uses_ansi_palette();
+#if SL_TEST_PTY
   test_queueing_resets_history_navigation();
+#endif
   test_key_binding_alt_m_inserts_text();
   test_key_binding_f1_submits();
   test_key_binding_can_edit_buffer_and_submit();
@@ -11287,14 +11325,18 @@ int main(int argc, char **argv) {
   test_ctrl_c_signal_is_not_delivered_twice(1);
   test_idle_callback_can_submit_without_input();
   test_idle_callback_runs_with_quiet_watch();
+#if SL_TEST_PTY
   test_busy_spinner_ticks_with_quiet_watch();
+#endif
   test_idle_callback_can_cancel_without_input();
   test_watch_prints_while_editing();
   test_watch_preserves_escape_continuation_timeout();
   test_queued_turns_auto_dispatches_on_watch();
   test_queued_turns_preserve_alt_enter_during_completion();
+#if SL_TEST_PTY
   test_queued_turns_prioritize_input_arriving_during_completion();
   test_watch_completion_preserves_input_for_next_prompt();
+#endif
   test_watch_fairness_rotates_ready_flood();
   test_watch_lifecycle_reports_terminal_events();
   test_redirected_live_output_validates_stream();
@@ -11318,8 +11360,10 @@ int main(int argc, char **argv) {
   test_live_output_preserves_reverse_search_prompt(1);
   test_live_output_after_readline_submit_clears_editor();
   test_retained_stream_tracks_readline_scrollback();
+#if SL_TEST_PTY
   test_retained_stream_survives_prompt_growth();
   test_retained_stream_survives_prompt_shrink();
+#endif
   test_live_output_native_scroll_resets_prompt_style();
   test_live_output_prompt_growth_preserves_history();
   test_live_output_stream_chunk_protocol();
@@ -11328,14 +11372,20 @@ int main(int argc, char **argv) {
   test_live_output_reconciles_physical_resize();
   test_live_output_resize_continues_current_row();
   test_live_output_clears_promptless_scroll_row();
+#if SL_TEST_PTY
   test_final_render_failure_reports_error();
+#endif
   test_narrow_terminal_does_not_submit_before_enter();
   test_live_output_end_restores_unbounded_cursor();
   test_unbounded_finite_output_preserves_active_prompt();
   test_idle_callback_prints_above_active_prompt();
+  CURSOR_REPLIES_REAL(1);
   test_normal_prompt_pins_at_bottom_for_live_output();
+#if SL_TEST_PTY
   test_pinned_stream_failure_restores_prompt_cursor();
+#endif
   test_cursor_probe_preserves_concurrent_queue_input();
+  CURSOR_REPLIES_REAL(0);
   test_utf8_input_and_backspace();
   test_utf8_swedish_input_is_rendered_as_full_sequences();
   test_unicode_width_wraps_japanese_and_emoji();

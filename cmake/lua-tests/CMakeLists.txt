@@ -22,9 +22,40 @@ endif()
 set_tests_properties(lua_runtime PROPERTIES ENVIRONMENT
   "SOFTLINE_TOOLCHAIN_ROOT=${runtime_root};SOFTLINE_EXPECTED_LIBRARY_ROOT=${library_root}")
 add_test(NAME lua_smoke COMMAND "${SOFTLINE_LUA_EXECUTABLE}" "${root}/tests/lua_smoke.lua")
+add_test(NAME lua_image_source COMMAND "${SOFTLINE_LUA_EXECUTABLE}" "${root}/tests/lua_image_source.lua")
+if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Linux")
+  set(image_fixtures "${root}/build/debug/tests/test_clipboard_image"
+    "${root}/build/debug/tests/clipboard_fixture")
+  foreach(name small.png large.png oversized.png sample.jpeg)
+    list(APPEND image_fixtures "${root}/build/debug/tests/clipboard-paste-inputs/${name}")
+  endforeach()
+  foreach(fixture IN LISTS image_fixtures)
+    if(NOT EXISTS "${fixture}")
+      message(FATAL_ERROR "Missing Lua X11 test prerequisite: ${fixture}. Prepare with make lua-test or make lua-debug-test.")
+    endif()
+  endforeach()
+  add_test(NAME lua_image_paste COMMAND "${SOFTLINE_LUA_EXECUTABLE}" "${root}/tests/lua_image_paste.lua")
+  set_tests_properties(lua_image_paste PROPERTIES ENVIRONMENT "DISPLAY=")
+  add_test(NAME lua_image_paste_x11 COMMAND "${BASH_EXECUTABLE}" "${root}/scripts/terminal-test-env.sh"
+    xvfb-run -a "${root}/build/debug/tests/test_clipboard_image"
+    "${root}/build/debug/tests/clipboard_fixture" "${root}/build"
+    "${root}/build/debug/tests/clipboard-paste-inputs")
+  set_tests_properties(lua_image_paste_x11 PROPERTIES ENVIRONMENT
+    "SOFTLINE_TEST_LUA=${SOFTLINE_LUA_EXECUTABLE};SOFTLINE_TEST_LUA_IMAGE_SCRIPT=${root}/tests/lua-fixtures/image-paste.lua"
+    REQUIRED_FILES "${image_fixtures}")
+endif()
 add_test(NAME lua_osc8 COMMAND "${SOFTLINE_LUA_EXECUTABLE}" "${root}/tests/lua_osc8.lua")
 add_test(NAME lua_queue_backend COMMAND "${SOFTLINE_LUA_EXECUTABLE}" "${root}/tests/lua_queue_backend.lua")
+add_test(NAME lua_queue_display_option COMMAND "${BASH_EXECUTABLE}"
+  "${root}/tests/check_queue_display_option.sh" "${root}"
+  "${SOFTLINE_LUA_EXECUTABLE}" "${root}/examples/chat.lua")
 add_test(NAME lua_backend_coroutines COMMAND "${pty_test}" backend-coroutines "${SOFTLINE_LUA_EXECUTABLE}" "${root}")
+add_test(NAME lua_libmdf_stream COMMAND "${pty_test}" libmdf "${SOFTLINE_LUA_EXECUTABLE}" "${root}")
+set_tests_properties(lua_libmdf_stream PROPERTIES REQUIRED_FILES
+  "${lua_build}/libmdf/libmdf.lua;${lua_build}/libmdf/libmdf/core.so")
+if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Linux")
+  set_tests_properties(lua_backend_coroutines PROPERTIES ENVIRONMENT "DISPLAY=;SOFTLINE_TEST_IMAGE_ERRORS=1")
+endif()
 foreach(mode history_auto readline simple chat packaged)
   add_test(NAME "lua_console_${mode}" COMMAND "${BASH_EXECUTABLE}"
     "${root}/tests/check_lua_console.sh" "${SOFTLINE_LUA_EXECUTABLE}" "${root}" "${mode}")

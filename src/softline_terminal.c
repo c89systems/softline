@@ -264,9 +264,17 @@ int sl_terminal_handoff(sl_t *self, sl_terminal_callback_t callback,
   relay = calloc(1, sizeof(*relay));
   if (!relay)
     return SL_ERROR_NOMEM;
+  impl->terminal_guard =
+      sl_tty_guard_begin(impl->input_fd, impl->output_fd, impl->raw_guard);
+  if (!impl->terminal_guard) {
+    free(relay);
+    return SL_ERROR_IO;
+  }
   input_flags = fcntl(impl->input_fd, F_GETFL);
   output_flags = fcntl(impl->output_fd, F_GETFL);
   if (input_flags < 0 || output_flags < 0) {
+    (void)sl_tty_guard_end(impl->terminal_guard, !impl->raw_active, 1);
+    impl->terminal_guard = NULL;
     free(relay);
     return SL_ERROR_IO;
   }
@@ -296,17 +304,20 @@ int sl_terminal_handoff(sl_t *self, sl_terminal_callback_t callback,
     raw.c_cc[VMIN] = 1;
     raw.c_cc[VTIME] = 0;
     if (input_flags >= 0 && output_flags >= 0 &&
-        tcsetattr(impl->input_fd, TCSANOW, &raw) == 0 &&
+        sl_tty_setattr(impl->input_fd, TCSANOW, &raw) == 0 &&
         fcntl(impl->input_fd, F_SETFL, input_flags | O_NONBLOCK) == 0 &&
         fcntl(impl->output_fd, F_SETFL, output_flags | O_NONBLOCK) == 0 &&
         tcgetattr(impl->output_fd, &raw_output) == 0) {
       raw_output.c_oflag &= ~OPOST;
-      if (tcsetattr(impl->output_fd, TCSANOW, &raw_output) == 0)
+      if (sl_tty_setattr(impl->output_fd, TCSANOW, &raw_output) == 0)
         status = relay_loop(impl, callback, context, relay);
     }
-    if (tcsetattr(impl->output_fd, TCSANOW, &original_output))
-      status = SL_ERROR_IO;
-    restore = tcsetattr(impl->input_fd, TCSANOW, &original);
+    if (!stream && impl->raw_active) {
+      restore = sl_tty_setattr(impl->output_fd, TCSANOW, &original_output);
+      if (sl_tty_setattr(impl->input_fd, TCSANOW, &original))
+        restore = -1;
+    } else
+      restore = sl_tty_guard_restore_modes(impl->terminal_guard);
     if (restore)
       status = SL_ERROR_IO;
   }
@@ -315,10 +326,9 @@ int sl_terminal_handoff(sl_t *self, sl_terminal_callback_t callback,
     status = SL_ERROR_IO;
   }
 finished:
-  if (fcntl(impl->input_fd, F_SETFL, input_flags))
+  if (sl_tty_guard_end(impl->terminal_guard, !impl->raw_active, 1))
     status = SL_ERROR_IO;
-  if (fcntl(impl->output_fd, F_SETFL, output_flags))
-    status = SL_ERROR_IO;
+  impl->terminal_guard = NULL;
   impl->terminal_active = 0;
   free(relay);
   return status;

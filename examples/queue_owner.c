@@ -5,9 +5,12 @@
 #define _DARWIN_C_SOURCE 1
 #endif
 #define _POSIX_C_SOURCE 200809L
+#include "chat_charts.h"
 #include "chat_demo_data.h"
+#include "queue_demo_image.h"
 #include "queue_demo_terminal.h"
 #include "queue_demo_wire.h"
+#include "web_chat.h"
 #include <arpa/inet.h>
 #include <errno.h>
 #include <limits.h>
@@ -44,6 +47,13 @@ typedef struct item {
   int direct_start;
 } item_t;
 typedef struct owner {
+  demo_web_chat_t *web;
+  client_t web_client, *request_client;
+  sl_queue_result_status_t web_status;
+  int web_reasoning;
+  int terminal_policy, terminal_sent, sent_terminal_policy;
+  size_t sent_handoffs;
+  demo_image_store_t image;
   demo_terminal_server_t *terminal, *closed_terminals;
   demo_link_t link;
   item_t items[DEMO_ITEM_MAX];
@@ -54,15 +64,29 @@ typedef struct owner {
   int stopped, auto_approval, active, injection;
   int gated, input_empty, shell_pending, shell_requested, attach_wait_seam,
       initialized, demo_enabled, gate_fd, waiting_gate, stall_hello_once;
-  unsigned long delay_us, interval_ms;
+  unsigned int stream_initial_delay;
+  enum demo_stream_mode stream_mode;
+  int stream_has_owner_delay;
+  unsigned long interval_ms;
   unsigned int turn_index;
+  demo_charts_t charts;
+  char chart[DEMO_CHART_CAPACITY];
+  int chart_pending;
   const char *answer;
   size_t answer_pos;
   char previous;
   double next_piece, next_injection;
 } owner_t;
+static int web_submit(void *, const char *, int, sl_queue_request_id_t *);
+static void terminal_lock_command(owner_t *, const char *);
+static int web_control(void *, const char *, const char *, const char *);
+static void web_snapshot(void *, demo_web_chat_t *);
+static int owner_command(const char *text) {
+  return is_local_command(text) || command_named(text, "/type");
+}
 static volatile sig_atomic_t quitting;
 static volatile sig_atomic_t producer_paused;
+static int completion_fd = -1;
 /* Optional deterministic fixture control: queue service remains live while
  * response production is paused, just like the local demo's child producer. */
 static void pause_producer(int signum) { producer_paused = signum == SIGUSR1; }
@@ -103,17 +127,20 @@ static char *duplicate(const char *text) {
   return copy;
 }
 static void disconnect(owner_t *o) {
+  demo_image_store_close(&o->image);
   if (o->terminal) {
     sl_terminal_event_t event;
     memset(&event, 0, sizeof(event));
     event.operation = SL_TERMINAL_CLOSE;
-    (void)sl_pty_callback(&o->terminal->pty, &event);
+    (void)sl_terminal_session_dispatch(o->terminal->session, &event);
     o->terminal->next = o->closed_terminals;
     o->closed_terminals = o->terminal;
     o->terminal = NULL;
+    demo_www_set_terminal_handoffs(demo_web_listener(o->web), 0);
   }
   demo_link_close(&o->link);
   o->client = NULL;
+  o->terminal_sent = 0;
   o->gated = o->shell_pending = o->shell_requested = 0;
   o->input_empty = 1;
 }
@@ -125,11 +152,53 @@ static void send_packet(owner_t *o, demo_packet_t *p) {
 }
 static void text_event(owner_t *o, int kind, const char *text) {
   demo_packet_t p = {0};
+  if (o->web) {
+    if (kind == DEMO_PROMPT)
+      demo_web_message(o->web, "user", text);
+    else if (kind == DEMO_RESPONSE_BEGIN) {
+      demo_web_response_end(o->web);
+      o->web_reasoning = 0;
+      demo_web_status(o->web, "Thinking...", 1);
+    } else if (kind == DEMO_OUTPUT) {
+      demo_web_response(o->web, text, strlen(text));
+      if (!o->web_reasoning && o->answer_pos >= 15) {
+        o->web_reasoning = 1;
+        demo_web_status(o->web, "Reasoning...", 1);
+      }
+    } else if (kind == DEMO_OUTPUT_END || kind == DEMO_SEGMENT_END) {
+      demo_web_response_end(o->web);
+      if (kind == DEMO_OUTPUT_END)
+        demo_web_status(o->web, "", 0);
+    } else if (kind == DEMO_MESSAGE)
+      demo_web_status(o->web, text ? text : "", o->active);
+    else if (kind == DEMO_NOTE)
+      demo_web_message(o->web, "note", text ? text : "");
+  }
   if (!o->client || o->shell_pending)
     return;
   demo_put_number(&p, (unsigned long)kind);
-  demo_put_string(&p, text);
+  if (kind == DEMO_OUTPUT)
+    demo_put_bytes(&p, text, strlen(text));
+  else
+    demo_put_string(&p, text);
   send_packet(o, &p);
+}
+static void terminal_snapshot(owner_t *o) {
+  size_t active = o->terminal && !o->terminal->eof ? 1 : 0;
+  int enabled = o->terminal_policy;
+  char text[64];
+  if (!o->client || o->shell_pending)
+    return;
+  if (o->web)
+    demo_www_terminal_status(demo_web_listener(o->web), &active, &enabled);
+  if (o->terminal_sent && o->sent_handoffs == active &&
+      o->sent_terminal_policy == enabled)
+    return;
+  (void)snprintf(text, sizeof(text), "%lu %d", (unsigned long)active, enabled);
+  text_event(o, DEMO_TERMINAL_STATE, text);
+  o->terminal_sent = o->client != NULL;
+  o->sent_handoffs = active;
+  o->sent_terminal_policy = enabled;
 }
 static void handoff_shell(owner_t *o, const char *text) {
   text_event(o, DEMO_SEGMENT_END, NULL);
@@ -140,7 +209,7 @@ static void handoff_shell(owner_t *o, const char *text) {
 static sl_queue_entry_t exposed(owner_t *o, size_t index) {
   sl_queue_entry_t e = o->items[index].value;
   e.ready = !e.held && !e.edit_held && !e.stopped &&
-            (is_local_command(e.text) || !o->active);
+            (owner_command(e.text) || !o->active);
   if (!o->client || strcmp(o->items[index].owner, o->client->name))
     e.edit_token = NULL;
   return e;
@@ -155,6 +224,7 @@ static void change(owner_t *o, sl_queue_change_kind_t kind, size_t index,
   if (kind != SL_QUEUE_SNAPSHOT)
     ++o->revision;
   (void)snprintf(revision, sizeof(revision), "q%lu", o->revision);
+  demo_web_queue(o->web);
   if (!o->client || o->shell_pending)
     return;
   memset(&c, 0, sizeof(c));
@@ -163,7 +233,7 @@ static void change(owner_t *o, sl_queue_change_kind_t kind, size_t index,
   c.revision = revision;
   c.index = index;
   c.item_id = removed;
-  c.request_id = request;
+  c.request_id = o->request_client ? 0 : request;
   c.total_count = o->count;
   c.stopped = o->stopped;
   c.auto_approval = o->auto_approval;
@@ -238,6 +308,10 @@ static item_t *add(owner_t *o, const char *text, sl_prompt_queue_mode_t mode,
 }
 static void emit_result(owner_t *o, const sl_queue_result_t *result) {
   demo_packet_t p = {0};
+  if (o->request_client) {
+    o->web_status = result->status;
+    return;
+  }
   demo_put_result(&p, result);
   send_packet(o, &p);
 }
@@ -318,7 +392,7 @@ static int command(const char *text) {
 }
 static void handle_request(owner_t *o, const sl_queue_request_t *r) {
   sl_queue_result_t result;
-  client_t *client = o->client;
+  client_t *client = o->request_client ? o->request_client : o->client;
   unsigned long previous_high;
   item_t *item = NULL;
   size_t index, i;
@@ -509,6 +583,107 @@ done:
   emit_result(
       o, &client->results[(client->next + RESULT_MAX - 1) % RESULT_MAX].value);
 }
+static int web_request(owner_t *o, sl_queue_request_t *r) {
+  if (o->web_client.high == ULONG_MAX)
+    return SL_ERROR_FULL;
+  r->request_id = o->web_client.high + 1;
+  o->request_client = &o->web_client;
+  o->web_status = SL_QUEUE_REJECTED;
+  handle_request(o, r);
+  o->request_client = NULL;
+  return o->web_status == SL_QUEUE_ACCEPTED ? SL_OK : SL_ERROR_CONFLICT;
+}
+static int web_submit(void *context, const char *text, int steer,
+                      sl_queue_request_id_t *request_id) {
+  owner_t *o = context;
+  sl_queue_request_t r;
+  (void)request_id;
+  if (command_named(text, "/terminal-lock")) {
+    terminal_lock_command(o, text);
+    return SL_OK;
+  }
+  if (is_shell_command(text) || !strcmp(text, "/quit") ||
+      command_named(text, "/type"))
+    return SL_ERROR_INVALID;
+  memset(&r, 0, sizeof(r));
+  r.operation = SL_QUEUE_OFFER;
+  r.mode = steer ? SL_PROMPT_QUEUE_MODE_STEER : SL_PROMPT_QUEUE_MODE_QUEUED;
+  r.text = text;
+  return web_request(o, &r);
+}
+static int web_control(void *context, const char *action, const char *id,
+                       const char *revision) {
+  owner_t *o = context;
+  sl_queue_request_t r;
+  if (!strcmp(action, "cancel")) {
+    o->active = o->waiting_gate = o->shell_requested = 0;
+    set_stopped(o, 1, 0);
+    text_event(o, DEMO_OUTPUT_END, NULL);
+    return SL_OK;
+  }
+  memset(&r, 0, sizeof(r));
+  if (!strcmp(action, "approve"))
+    r.operation = SL_QUEUE_APPROVE;
+  else if (!strcmp(action, "reject"))
+    r.operation = SL_QUEUE_WITHDRAW;
+  else
+    return SL_ERROR_INVALID;
+  r.item_id = id;
+  r.item_revision = revision;
+  return web_request(o, &r);
+}
+static void web_snapshot(void *context, demo_web_chat_t *web) {
+  owner_t *o = context;
+  size_t i;
+  demo_web_queue_begin(web);
+  for (i = 0; i < o->count; ++i) {
+    const sl_queue_entry_t *e = &o->items[i].value;
+    /* Keep automation controls out of the browser's conversation preview. */
+    if (!e->held && !e->edit_held && command_named(e->text, "/type"))
+      continue;
+    demo_web_queue_entry(web, e->id, e->revision, e->text,
+                         e->mode == SL_PROMPT_QUEUE_MODE_STEER, e->held);
+  }
+  demo_web_queue_end(web);
+}
+static int web_edit(void *context, const char *id, const char *revision,
+                    const char *text, const char *token,
+                    sl_prompt_queue_mode_t mode, sl_queue_request_id_t *out) {
+  owner_t *o = context;
+  sl_queue_request_t r;
+  size_t i;
+  int status;
+  (void)token;
+  (void)out;
+  if (is_shell_command(text) || !strcmp(text, "/quit"))
+    return SL_ERROR_UNSUPPORTED;
+  for (i = 0; i < o->count; ++i)
+    if (!strcmp(o->items[i].id, id) && o->items[i].value.edit_held)
+      return SL_ERROR_CONFLICT;
+  memset(&r, 0, sizeof(r));
+  r.operation = SL_QUEUE_BEGIN_EDIT;
+  r.item_id = id;
+  r.item_revision = revision;
+  status = web_request(o, &r);
+  if (status != SL_OK)
+    return status;
+  for (i = 0; i < o->count && strcmp(o->items[i].id, id); ++i) {
+  }
+  if (i == o->count)
+    return SL_ERROR_CONFLICT;
+  r.operation = SL_QUEUE_END_EDIT;
+  r.item_revision = o->items[i].revision;
+  r.edit_token = o->items[i].token;
+  r.mode = mode;
+  r.text = text;
+  status = web_request(o, &r);
+  if (status != SL_OK) {
+    r.operation = SL_QUEUE_ABORT_EDIT;
+    r.text = NULL;
+    (void)web_request(o, &r);
+  }
+  return status;
+}
 static void hello(owner_t *o, const char *name, unsigned long delay_us,
                   unsigned long request_high, int approvals,
                   unsigned long interval_ms, unsigned int seed) {
@@ -545,7 +720,8 @@ static void hello(owner_t *o, const char *name, unsigned long delay_us,
     disconnect(o);
     return;
   }
-  o->delay_us = delay_us;
+  if (!o->stream_has_owner_delay && o->stream_mode == DEMO_STREAM_DEFAULT)
+    o->stream_initial_delay = (unsigned int)delay_us;
   o->interval_ms = interval_ms;
   if (!o->initialized) {
     srand(seed);
@@ -582,11 +758,7 @@ static void input(owner_t *o) {
         disconnect(o);
         break;
       }
-      o->terminal->pty.fd = -1;
-      o->terminal->pty.exec_fd = -1;
-      o->terminal->pty.shell = getenv("SHELL");
-      if (!o->terminal->pty.shell || !*o->terminal->pty.shell)
-        o->terminal->pty.shell = "/bin/sh";
+      o->terminal->wait.fd = -1;
       if (demo_terminal_server_input(o->terminal, &o->link, kind, &p))
         disconnect(o);
     } else if (o->terminal) {
@@ -599,7 +771,7 @@ static void input(owner_t *o) {
       int approvals = (int)demo_number(&p);
       unsigned long interval_ms = demo_number(&p);
       unsigned int seed = (unsigned int)demo_number(&p);
-      if (!p.failed && p.offset == p.length)
+      if (demo_packet_done(&p))
         hello(o, name, delay_us, request_high, approvals, interval_ms, seed);
       else
         disconnect(o);
@@ -607,21 +779,25 @@ static void input(owner_t *o) {
       sl_queue_request_t r;
       o->gated = 1;
       demo_get_request(&p, &r);
-      if (!p.failed && p.offset == p.length)
+      if (demo_packet_done(&p))
         handle_request(o, &r);
       else
         disconnect(o);
-    } else if (kind == DEMO_CANCEL && o->client && p.offset == p.length) {
+    } else if (kind >= DEMO_IMAGE_BEGIN && kind <= DEMO_IMAGE_DONE &&
+               o->client && !o->shell_pending) {
+      if (demo_image_store_input(&o->image, &o->link, kind, &p, milliseconds()))
+        disconnect(o);
+    } else if (kind == DEMO_CANCEL && o->client && demo_packet_done(&p)) {
       o->active = o->waiting_gate = o->shell_requested = 0;
       set_stopped(o, 1, 0);
       text_event(o, DEMO_OUTPUT_END, NULL);
     } else if (kind == DEMO_IDLE && o->client) {
       o->input_empty = (int)demo_number(&p);
-      if (p.failed || p.offset != p.length)
+      if (!demo_packet_done(&p))
         disconnect(o);
       else
         o->gated = 0;
-    } else if (kind == DEMO_SHELL_BEGIN && o->client && p.offset == p.length) {
+    } else if (kind == DEMO_SHELL_BEGIN && o->client && demo_packet_done(&p)) {
       o->shell_requested = 1;
     } else
       disconnect(o);
@@ -637,14 +813,97 @@ static void start_response(owner_t *o, double now) {
       response_templates[o->turn_index++ % (sizeof(response_templates) /
                                             sizeof(response_templates[0]))];
   o->answer_pos = 0;
+  o->chart_pending =
+      demo_chart_next(&o->charts, o->chart, sizeof(o->chart)) > 0;
   o->previous = 0;
   o->next_piece = now;
   o->attach_wait_seam = 0;
   o->waiting_gate = o->gate_fd >= 0;
   text_event(o, DEMO_RESPONSE_BEGIN, NULL);
 }
+static void terminal_lock_command(owner_t *o, const char *text) {
+  demo_www_t *web = demo_web_listener(o->web);
+  size_t active;
+  int enabled = o->terminal_policy;
+  if (web)
+    demo_www_terminal_status(web, &active, &enabled);
+  enabled = terminal_lock_setting(text, enabled);
+  if (enabled < 0) {
+    text_event(o, DEMO_MESSAGE, "Usage: /terminal-lock [on|off]");
+    return;
+  }
+  o->terminal_policy = enabled;
+  demo_www_set_terminal_prompt_lock(web, o->terminal_policy);
+  text_event(o, DEMO_MESSAGE,
+             o->terminal_policy ? "Terminal prompt lock on."
+                                : "Terminal prompt lock off.");
+}
+static int type_delay(const char **source, unsigned long maximum,
+                      unsigned long *value) {
+  char *end;
+  if (**source < '0' || **source > '9')
+    return -1;
+  errno = 0;
+  *value = strtoul(*source, &end, 10);
+  if (errno || *value > maximum || *end != ':')
+    return -1;
+  *source = end + 1;
+  return 0;
+}
+
+static void type_command(owner_t *o, const char *text) {
+  sl_prompt_simulation_options_t options = {0, 50, 1000,
+                                            SL_PROMPT_QUEUE_MODE_QUEUED};
+  unsigned long seconds = SL_PROMPT_SIMULATION_DELAY_MAX_MS / 1000;
+  int status;
+  text += sizeof("/type") - 1;
+  while (*text == ' ')
+    ++text;
+  if (*text == '{') {
+    ++text;
+    if (type_delay(&text, seconds, &options.start_delay_ms) ||
+        type_delay(&text, SL_PROMPT_SIMULATION_DELAY_MAX_MS,
+                   &options.character_delay_ms) ||
+        type_delay(&text, seconds, &options.submit_delay_ms) ||
+        (*text != 'q' && *text != 's') || text[1] != '}' || text[2] != ' ')
+      goto usage;
+    options.mode =
+        *text == 's' ? SL_PROMPT_QUEUE_MODE_STEER : SL_PROMPT_QUEUE_MODE_QUEUED;
+    options.start_delay_ms *= 1000;
+    options.submit_delay_ms *= 1000;
+    text += 3;
+  }
+  if (!text[strspn(text, " \t\n")])
+    goto usage;
+  status = demo_web_simulate_prompt(o->web, text, &options);
+  if (status != SL_OK)
+    text_event(o, DEMO_MESSAGE,
+               status == SL_ERROR_NOT_READY
+                   ? "No browser is available for /type."
+                   : "Could not send simulated prompt to browser.");
+  return;
+usage:
+  text_event(
+      o, DEMO_MESSAGE,
+      "Usage: /type [{start-seconds:character-ms:submit-seconds:q|s}] prompt");
+}
+
 static void host_action(owner_t *o, const char *text, int at_seam, double now) {
-  if (!strcmp(text, "/status")) {
+  if (command_named(text, "/terminal-lock")) {
+    terminal_lock_command(o, text);
+  } else if (command_named(text, "/type")) {
+    type_command(o, text);
+  } else if (command_named(text, "/stream")) {
+    unsigned int delay =
+        demo_stream_delay(o->stream_mode, o->stream_initial_delay);
+    enum demo_stream_mode mode = demo_stream_setting(text, delay);
+    if (mode != DEMO_STREAM_INVALID) {
+      o->stream_mode = mode;
+      if (demo_stream_delay(mode, o->stream_initial_delay) != delay)
+        o->next_piece = now;
+    }
+    text_event(o, DEMO_MESSAGE, demo_stream_message(mode));
+  } else if (!strcmp(text, "/status")) {
     char line[256];
     (void)snprintf(line, sizeof(line),
                    "Status: %s / backlog %s / %lu queued / auto-approval %s",
@@ -682,9 +941,16 @@ static void host_action(owner_t *o, const char *text, int at_seam, double now) {
   }
 }
 static int ready(owner_t *o, item_t *item, int at_seam) {
-  if (o->gated || item->value.held || item->value.edit_held)
+  if (item->value.held || item->value.edit_held)
     return 0;
-  if (is_local_command(item->value.text))
+  /* Conversation settings can change even while prompt dispatch is gated. */
+  if (command_named(item->value.text, "/terminal-lock") ||
+      command_named(item->value.text, "/stream") ||
+      command_named(item->value.text, "/type"))
+    return 1;
+  if (o->gated)
+    return 0;
+  if (owner_command(item->value.text))
     return 1;
   if (item->value.stopped)
     return 0;
@@ -699,11 +965,11 @@ static int eligible(owner_t *o, size_t index, int at_seam) {
   size_t i;
   if (!ready(o, o->items + index, at_seam))
     return 0;
-  if (is_local_command(after->text))
+  if (owner_command(after->text))
     return 1;
   for (i = 0; i < index; ++i) {
     const sl_queue_entry_t *before = &o->items[i].value;
-    if (is_local_command(before->text) || before->stopped)
+    if (owner_command(before->text) || before->stopped)
       continue;
     if (!before->action &&
         (before->held || (after->mode == SL_PROMPT_QUEUE_MODE_STEER &&
@@ -757,17 +1023,22 @@ static void refresh(owner_t *o) {
   }
 }
 static void pump(owner_t *o, double now) {
-  char chunk[65];
-  size_t used = 0, budget = o->delay_us ? 1 : 64;
+  char chunk[DEMO_STREAM_DIRECT_BYTES + 1];
+  size_t used = 0, produced = 0, budget;
+  unsigned int delay;
   if (o->shell_requested && !o->active)
     handoff_shell(o, NULL);
   claim_ready(o, 0, now);
+  delay = demo_stream_delay(o->stream_mode, o->stream_initial_delay);
+  budget = now < o->next_piece ? 0
+           : delay             ? DEMO_STREAM_LLM_BYTES
+                               : DEMO_STREAM_DIRECT_BYTES;
   while (o->active && !o->waiting_gate && !producer_paused &&
-         now >= o->next_piece && budget--) {
+         produced < budget) {
     char byte = o->answer[o->answer_pos++];
     if (!o->attach_wait_seam)
       chunk[used++] = byte;
-    o->next_piece = now + (double)o->delay_us / 1000.0;
+    o->next_piece = now + (double)delay * ++produced / 1000.0;
     if (byte == '\n' && o->previous == '\n') {
       if (used) {
         chunk[used] = 0;
@@ -780,6 +1051,11 @@ static void pump(owner_t *o, double now) {
         handoff_shell(o, NULL);
     }
     o->previous = byte;
+    if (!o->answer[o->answer_pos] && o->chart_pending) {
+      o->answer = o->chart;
+      o->answer_pos = 0;
+      o->chart_pending = 0;
+    }
     if (!o->answer[o->answer_pos]) {
       if (used) {
         chunk[used] = 0;
@@ -787,6 +1063,10 @@ static void pump(owner_t *o, double now) {
         used = 0;
       }
       o->active = 0;
+      if (completion_fd >= 0) {
+        ssize_t notified = write(completion_fd, "\n", 1);
+        (void)notified;
+      }
       text_event(o, DEMO_OUTPUT_END, NULL);
       if (o->shell_requested)
         handoff_shell(o, NULL);
@@ -808,6 +1088,7 @@ int main(int argc, char **argv) {
   long port = argc > 1 ? strtol(argv[1], &end, 10) : 7635;
   owner_t *o = calloc(1, sizeof(*o));
   const char *gate = getenv("SOFTLINE_CHAT_GATE_FD");
+  const char *stream_delay = getenv("SOFTLINE_CHAT_CHAR_MS");
   if (!o)
     return 1;
   if (argc > 2 || (argc > 1 && (!*argv[1] || *end)) || port < 0 ||
@@ -817,11 +1098,33 @@ int main(int argc, char **argv) {
     return 1;
   }
   demo_link_init(&o->link, -1);
+  demo_charts_init(&o->charts,
+                   (unsigned long)time(NULL) ^ (unsigned long)getpid());
+  if (demo_image_store_init(&o->image)) {
+    free(o);
+    return 1;
+  }
   o->revision = 1;
-  o->delay_us = 20000;
+  o->stream_initial_delay = demo_stream_initial_delay(stream_delay);
+  o->stream_has_owner_delay = stream_delay && *stream_delay;
   o->gate_fd = -1;
+  if (getenv("SOFTLINE_CHAT_TEST_COMPLETION_FD")) {
+    const char *value = getenv("SOFTLINE_CHAT_TEST_COMPLETION_FD");
+    long fd = strtol(value, &end, 10);
+    if (!*value || *end || fd < 3 || fd > INT_MAX || demo_nonblock((int)fd)) {
+      free(o);
+      return 1;
+    }
+    completion_fd = (int)fd;
+  }
   o->stall_hello_once = getenv("SOFTLINE_CHAT_TEST_STALL_HELLO") != NULL;
   o->input_empty = 1;
+  if (demo_www_terminal_lock_environment(&o->terminal_policy)) {
+    perror("terminal prompt policy");
+    free(o);
+    return 1;
+  }
+  (void)snprintf(o->web_client.name, sizeof(o->web_client.name), "web");
   if (gate) {
     long fd = strtol(gate, &end, 10);
     if (!*gate || *end || fd < 3 || fd > 9) {
@@ -867,11 +1170,37 @@ int main(int argc, char **argv) {
   (void)getsockname(listener, (struct sockaddr *)&address, &address_length);
   printf("LISTEN 127.0.0.1 %u\n", (unsigned)ntohs(address.sin_port));
   fflush(stdout);
+  {
+    demo_web_ops_t ops;
+    int enabled;
+    memset(&ops, 0, sizeof(ops));
+    ops.submit = web_submit;
+    ops.control = web_control;
+    ops.edit = web_edit;
+    ops.snapshot = web_snapshot;
+    ops.terminal = 1;
+    ops.terminal_unlock_command = "/terminal-lock off";
+    o->web = demo_web_open(NULL, &ops, o, 8081, &enabled);
+    if (enabled && !o->web) {
+      perror("web listener");
+      close(listener);
+      free(o);
+      return 1;
+    }
+    if (o->web) {
+      printf("WEB http://127.0.0.1:%u\n", (unsigned)demo_web_port(o->web));
+      fflush(stdout);
+    }
+  }
   while (!quitting) {
-    struct pollfd fds[4];
+    struct pollfd fds[4 + DEMO_WWW_FDS];
     double now = milliseconds(), due = now + 60000;
-    int ready;
-    if (o->active && !o->waiting_gate && !producer_paused)
+    double image_due = demo_image_store_due(&o->image);
+    int ready, web_fds = 0, timeout;
+    if (image_due && image_due < due)
+      due = image_due;
+    if (o->active && !o->waiting_gate && !producer_paused &&
+        o->next_piece < due)
       due = o->next_piece;
     if (o->demo_enabled && o->next_injection < due)
       due = o->next_injection;
@@ -887,17 +1216,19 @@ int main(int argc, char **argv) {
     fds[2].fd = o->waiting_gate ? o->gate_fd : -1;
     fds[2].events = POLLIN;
     fds[2].revents = 0;
-    fds[3].fd = o->terminal && !o->terminal->eof
-                    ? (o->terminal->pty.exec_fd >= 0 ? o->terminal->pty.exec_fd
-                       : o->terminal->pty.eof_deadline ? -1
-                                                       : o->terminal->pty.fd)
-                    : -1;
+    fds[3].fd = o->terminal && !o->terminal->eof ? o->terminal->wait.fd : -1;
     fds[3].events = (o->link.count < 2 ? POLLIN : 0) |
                     (o->terminal && o->terminal->input_len ? POLLOUT : 0);
     if (!fds[3].events)
       fds[3].fd = -1;
     fds[3].revents = 0;
-    ready = poll(fds, 4, due <= now ? 0 : (int)(due - now) + 1);
+    if (o->web)
+      web_fds = demo_www_descriptors(demo_web_listener(o->web), fds + 4,
+                                     DEMO_WWW_FDS);
+    if (web_fds < 0)
+      break;
+    timeout = demo_web_timeout(o->web, due <= now ? 0 : (int)(due - now) + 1);
+    ready = poll(fds, (nfds_t)(4 + web_fds), timeout);
     if (ready < 0 && errno != EINTR)
       break;
     if (o->terminal && o->terminal->input_len &&
@@ -932,19 +1263,26 @@ int main(int argc, char **argv) {
       }
     }
     now = milliseconds();
+    if (demo_image_store_tick(&o->image, &o->link, now))
+      disconnect(o);
     if (o->terminal && demo_terminal_server_pump(o->terminal, &o->link))
       disconnect(o);
+    demo_www_set_terminal_handoffs(demo_web_listener(o->web),
+                                   o->terminal && !o->terminal->eof ? 1 : 0);
     {
       demo_terminal_server_t **at = &o->closed_terminals;
       while (*at) {
         demo_terminal_server_t *s = *at;
-        if (sl_pty_reap(&s->pty)) {
+        if (sl_terminal_session_destroy(s->session) == SL_OK) {
           *at = s->next;
           free(s);
         } else
           at = &s->next;
       }
     }
+    if (demo_web_tick(o->web))
+      break;
+    terminal_snapshot(o);
     pump(o, now);
     if (o->demo_enabled && now >= o->next_injection) {
       schedule_injection(o, now);
@@ -952,6 +1290,8 @@ int main(int argc, char **argv) {
         inject(o);
     }
   }
+  demo_web_close(o->web);
+  o->web = NULL;
   disconnect(o);
   {
     int remaining = 100;
@@ -960,7 +1300,8 @@ int main(int argc, char **argv) {
     delay.tv_nsec = 1000000;
     while (o->closed_terminals) {
       demo_terminal_server_t *s = o->closed_terminals;
-      if (!sl_pty_reap(&s->pty) && remaining-- > 0) {
+      if (sl_terminal_session_destroy(s->session) == SL_ERROR_NOT_READY &&
+          remaining-- > 0) {
         (void)nanosleep(&delay, NULL);
         continue;
       }

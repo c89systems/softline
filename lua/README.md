@@ -39,6 +39,7 @@ fields are:
 - `prompt_queue`
 - `prompt_queue_max_entries`
 - `prompt_queue_preview_entries`
+- `prompt_queue_display_delay_ms` (default `500`; `0` displays immediately)
 - `queue_backend` (default `nil`; keeps the native local queue; see
   [queue backends](#constructor-selected-queue-backend))
 - `queue_backend_context` (default `nil`; retained until backend detach)
@@ -143,6 +144,15 @@ live scroll regions, status lines, and spinners are off; the theme is
   Alt-E to edit the newest queued entry. Disabling the queue clears it;
   reducing `max_entries` below the current queue length fails.
 - `sl:queue_count()` and `sl:queue_capacity()` return the queue state.
+- `sl:set_queue_display_delay(delay_ms)` changes the queue/steer preview and
+  pending-send display delay for local or backend queues. The default is 500 ms;
+  zero displays immediately. Arrivals into an already visible queue appear
+  immediately and stay visible if older entries are consumed. After an empty
+  queue is drawn, the delay applies again. Entries added while the queue is
+  hidden age independently; consuming them during the delay never displays
+  them. Delivery and API counts stay immediate. Approval
+  prompts, active edits, errors and connection notices are not delayed.
+  The chat example also accepts `SOFTLINE_QUEUE_DISPLAY_DELAY_MS`.
 - `sl:inject_queued_prompt(text)` and `sl:inject_steer_prompt(text)` are the
   host injection calls, returning a stable entry ID. Both require an enabled
   queue and hold the message unless automatic approval is enabled. Approval
@@ -205,6 +215,8 @@ live scroll regions, status lines, and spinners are off; the theme is
   a fresh draft; its old identity and hold stay removed. On an ordinary draft,
   Alt-N clears the text with undo support. Alt-K saves and clears the whole draft
   in one per-handle stash; Alt-J appends that saved text after current input.
+  Alt-K leaves both the draft and stash unchanged for empty or whitespace-only
+  input.
   The stash survives submissions and is independent of Ctrl-Y/Alt-Y's kill ring.
   Editing reserves one queue slot; cancellation/EOF/read failure restores the
   original entry. Clear preserves an active edit, and disable is refused until
@@ -265,7 +277,8 @@ live scroll regions, status lines, and spinners are off; the theme is
   seam, but not older managed commands or its own execution hold. Legacy
   approval suggestions do not hold ordinary user prompts. This does not change FIFO
   approval decisions. Non-TTY input retains its existing direct behavior.
-- `sl:queue_stopped()` exposes the backlog stop caused by cancellation.
+- `sl:queue_stop()` pauses the backlog without changing the current draft.
+  `sl:queue_stopped()` exposes the stop caused by this operation or cancellation.
   Fresh managed submissions can execute without releasing the old backlog;
   passive enqueues and edits inherit the stop. `sl:queue_resume()` explicitly
   resumes that backlog, preserving execution and approval holds and manual
@@ -311,6 +324,14 @@ live scroll regions, status lines, and spinners are off; the theme is
   boundary when possible.
 - `sl:submit()` submits the active buffer or reverse-search match from a callback,
   applying queue admission. Idle/watch submissions have ordinary queued intent.
+- `sl:simulate_prompt(text, options)` schedules a turn on an empty TTY draft.
+  The optional table takes `start_delay_ms`, `character_delay_ms`,
+  `submit_delay_ms`, and `mode` (`softline.QUEUE_MODE_QUEUED` or
+  `softline.QUEUE_MODE_STEER`). All delays default to zero and the mode
+  defaults to queued. With zero character delay, the full prompt is inserted
+  together. Real input takes over the draft and cancels auto-submit.
+- `sl:cancel_prompt_simulation()` cancels automation and leaves visible text
+  editable.
 - `sl:cancel()` cancels the active `readline()`.
 - `sl:bind_key(key, callback)` binds a decoded key to a callback. The callback
   receives the key code and returns a `softline.KEY_ACTION_*` value, or `nil`
@@ -577,6 +598,32 @@ without a named constant, add the letter byte to `softline.KEY_ALT_BASE`.
 The repository ships Lua examples for simple prompts and queued chat turns.
 The Lua chat example demonstrates queue delivery without libmdf.
 
+The Softline Lua module does support streaming output from the separate libmdf
+Lua facade. Its sink callback can call `sl:output_stream_write(chunk)` directly
+on the Lua/editor thread; no complete response is collected between renderers.
+For example, with an open Softline output session:
+
+```lua
+local mdf = require("libmdf")
+local renderer = mdf.document_stream({format = "ansi", ansi_mode = "on",
+    width = 80}, function(chunk)
+  assert(sl:output_stream_write(chunk))
+  return true
+end)
+-- In the host's producer/watch callback, for each arriving source chunk:
+assert(renderer:write(chunk))
+-- Once, at response EOF:
+assert(renderer:finish_document())
+renderer:close()
+```
+
+`lua_libmdf_stream` tests this composition using the checksum-pinned libmdf
+0.23.1 Lua facade against the existing SDK. It feeds one-byte Markdown and chart
+fragments, verifies output before EOF and concurrent typing, and constructs both
+handles on a coroutine collected before later callbacks. The facade is built
+only under the local Lua test runtime; libsoftline and its installed Lua module
+do not acquire a libmdf runtime dependency.
+
 The exact commands `!sh` and `/shell` open `$SHELL -i` (`/bin/sh -i` when
 unset or empty), only between turns on an interactive terminal. Enter or idle
 Alt-Enter launches the shell. Busy shell submissions remain queued and editable
@@ -607,6 +654,9 @@ lua examples/chat.lua
 
 The facade loads the installed public shared `libsoftline`; a static-only SDK
 is rejected. Local SDK tests install from the common Debug library producer.
+`make lua-test` (also `make lua-rock`) and `make lua-debug-test` prepare the
+pinned terminal-test environment, X11 fixture executables and generated images
+before configuring the Lua suite. A prior native test build is not required.
 
 `examples/chat.lua` accepts the same `SOFTLINE_PROMPT_THEME` values as the C
 chat example. It uses the default native persistent output session: transcript
@@ -739,7 +789,7 @@ for handoff; backend acceptance arrives later. They cannot reenter Softline.
 All copied text is bounded by `line_max_len`, backend IDs/revisions/tokens by
 127 bytes, and snapshots by `prompt_queue_max_entries`. No network or storage
 implementation is imposed by Softline. The C constructor uses equivalent
-callbacks and a borrowed context; rebuild C/Lua consumers for shared ABI 4.
+callbacks and a borrowed context; rebuild C/Lua consumers for shared ABI 5.
 
 - `sl:queue_backend_request(request)` returns a per-handle request ID, or
   `nil, status`. Request fields are `operation`, `item_id`, `item_revision`,
@@ -948,3 +998,76 @@ local terminal modes and the suspended draft/cursor/undo/queue holds on return.
 Enter then `~.` works even while setup or transport I/O is stalled; `~~` at the
 start of a line sends one literal tilde. Oversized pending input fails explicitly
 instead of silently dropping bytes. See [the full contract](../docs/terminal-handoff-design.md).
+
+## Streaming image paste
+
+`image_paste_callback` (default nil) receives PNG/JPEG clipboard data instead of
+saving an image locally. `image_paste_context` is any retained Lua value passed
+as the first callback argument; the second is an event table. Callback/context
+cycles are collectible. Callbacks run synchronously in the coroutine driving
+readline, next_prompt or the explicit pump/cancel operation, through a protected
+Lua frame. They must return promptly without yielding or reentering the editor.
+
+`image_paste_max_bytes` defaults to 33,554,432 bytes (32 MiB) when zero. Positive
+values select a per-image cap, at most INT_MAX. `image_paste_source_timeout_ms`,
+`image_paste_host_timeout_ms` and `image_paste_total_timeout_ms` use zero for
+10,000, 30,000 and 120,000 milliseconds respectively. Negative values are invalid.
+See [the full image contract](../docs/image-paste.md) for editing, ownership,
+resource bounds and source-vs-host deadline semantics.
+
+Events use `softline.IMAGE_PASTE_BEGIN`, `softline.IMAGE_PASTE_DATA`,
+`softline.IMAGE_PASTE_END`, `softline.IMAGE_PASTE_ABORT` and
+`softline.IMAGE_PASTE_DONE`. DONE confirms successful path insertion; ABORT
+confirms failure/cancellation. Their return values are ignored. Fields are `id`,
+`operation`, `media_type`, `filename`, `offset`, `length`, `data` and `reason`.
+DATA is a binary Lua string, including embedded NULs. Return true or softline.OK
+only after consuming/copying the entire chunk. Return softline.ERROR_NOT_READY
+only for DATA to pause without consuming it. Other returns or a Lua exception
+abort the upload; the exception is available through `sl:last_error()`.
+
+- `sl:image_paste_start()` returns a transfer ID or nil, status. Native Ctrl-V
+  starts the same image-only handover. File clipboard lists are not uploads.
+- `sl:image_paste_start_source(source)` adopts a host-owned image source through
+  the same handover, limits and cancellation. `source` is a table with `context`
+  and `next(context)`, `prepare(context)`, `close(context)` functions. `next`
+  returns a BEGIN/DATA/END event table, nil to wait, or nil plus a failure
+  reason. DATA contains a binary `data` string (at most 16 KiB) and byte
+  `offset`; BEGIN supplies `media_type` and optional `filename`. `prepare`
+  returns the same readiness table as `sl:image_paste_prepare()`. Adoption
+  failure leaves ownership with the caller. After adoption, close runs exactly
+  once. Source callbacks run on the calling coroutine and may not reenter the
+  editor or yield. Source/event strings remain retained across backpressure;
+  next-callback exceptions become transfer failures. Prepare errors return
+  nil/status so the host can cancel; close exceptions are contained and
+  ownership is still released.
+  This API has no background VM
+  calls or worker thread.
+- `sl:image_paste_prepare()` returns `{fds={{fd=..., events=...}, ...},
+  timeout_ms=...}` for an external owner loop. Descriptors belong to the source.
+- `sl:image_paste_pump()` advances bounded work without waiting. Native editing
+  automatically prepares and pumps while continuing to handle terminal input.
+- `sl:image_paste_resume(id)` permits retry of the same paused chunk.
+- `sl:image_paste_complete(id, absolute_path)` acknowledges published backend
+  storage after END. The path is inserted at the originating draft anchor on a
+  subsequent safe dispatch, as one undoable edit. Use
+  `sl:image_paste_complete(id, nil, reason)` for backend failure.
+- `sl:image_paste_cancel(id)` aborts the transfer and preserves draft text.
+  Ctrl-C does this while an upload is pending; ordinary interrupt behavior
+  applies otherwise. Enter/Alt-Enter retain drafts with pending uploads.
+
+The host owns upload status presentation. Image handover adds no row and never
+changes status-message text or spinner state. Record lifecycle updates in the
+callback, then use the normal status-message APIs from the owner loop after the
+callback returns.
+
+Native callbacks run on the coroutine making the active native call. Nested
+accessors, validation errors, and calls from another coroutine restore the
+previous caller on return; they cannot redirect subsequent readline callbacks.
+Image callback exceptions remain available through `last_error()` until a new
+transfer, input call, or native diagnostic supersedes the failed operation.
+
+Mutation methods return true or nil, status. Stale IDs, duplicate notifications
+and invalid ordering return softline.ERROR_INVALID. Metadata/paths are literal;
+no completion, prompt submission, history append or server-file deletion occurs
+as a consequence of progress or acknowledgement. Without a callback, standalone
+image saving remains available. Rebuild C and Lua consumers for ABI 5.

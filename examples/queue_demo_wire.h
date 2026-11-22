@@ -9,6 +9,7 @@
 /* A full accepted queue snapshot, with bounded per-entry metadata. */
 #define DEMO_FRAME_MAX (DEMO_ITEM_MAX * (DEMO_PROMPT_MAX + 1024u) + 4096u)
 #define DEMO_QUEUED_BYTES_MAX (DEMO_FRAME_MAX + 2u * DEMO_PROMPT_MAX)
+#define DEMO_IMAGE_CHUNK_MAX 16384u
 enum demo_message {
   DEMO_HELLO = 1,
   DEMO_REQUEST,
@@ -30,29 +31,63 @@ enum demo_message {
   DEMO_PTY_READY,
   DEMO_PTY_DATA,
   DEMO_PTY_RESIZE,
-  DEMO_PTY_EXIT
+  DEMO_PTY_EXIT, /* Exit code 0..255, or 256 when unavailable. */
+  DEMO_IMAGE_BEGIN,
+  DEMO_IMAGE_DATA,
+  DEMO_IMAGE_END,
+  DEMO_IMAGE_ABORT,
+  DEMO_IMAGE_DONE,
+  DEMO_IMAGE_READY,
+  DEMO_IMAGE_RESULT,
+  DEMO_TERMINAL_STATE /* Text: conversation handoff count and prompt policy. */
 };
+#ifdef SOFTLINE_CBOR_TCP
+#include <softline/cbor.h>
+#include <sys/uio.h>
+
+#define DEMO_INLINE_FIELDS 12
+#define DEMO_SEND_SPANS 16
+typedef struct demo_field {
+  c89cbor_type type;
+  uint64_t value;
+  const void *bytes;
+} demo_field_t;
 typedef struct demo_packet {
-  unsigned char *data;
-  size_t length, offset, capacity;
+  demo_field_t fields[DEMO_INLINE_FIELDS], *heap;
+  size_t count, capacity, offset, body_size;
+  sl_queue_request_lease_t *lease;
   int failed;
 } demo_packet_t;
 typedef struct demo_link {
   int fd;
   unsigned char header[4];
-  size_t header_length;
+  struct iovec send_spans[DEMO_SEND_SPANS];
+  unsigned char send_headers[DEMO_SEND_SPANS][9];
+  size_t send_count, send_pos, send_field;
+  int send_borrowed, send_finished;
+  c89cbor_encoder encoder;
+  c89cbor_reader reader;
+  unsigned char buffer[C89CBOR_CHUNK];
+  size_t buffered, consumed, remaining, frame_size, string_read, item_count;
+  int send_phase, read_phase, reading_string, writer_live, reader_live;
   demo_packet_t input;
   demo_packet_t output[DEMO_OUT_MAX];
   size_t count, queued_bytes, input_limit;
 } demo_link_t;
 void demo_packet_free(demo_packet_t *packet);
+int demo_packet_done(const demo_packet_t *packet);
 void demo_put_number(demo_packet_t *packet, unsigned long number);
 void demo_put_string(demo_packet_t *packet, const char *text);
 void demo_put_bytes(demo_packet_t *packet, const char *bytes, size_t length);
 const char *demo_bytes(demo_packet_t *packet, size_t *length);
+void demo_put_image_bytes(demo_packet_t *packet, const unsigned char *bytes,
+                          size_t length);
+const unsigned char *demo_image_bytes(demo_packet_t *packet, size_t *length);
 unsigned long demo_number(demo_packet_t *packet);
 const char *demo_string(demo_packet_t *packet);
 void demo_put_request(demo_packet_t *packet, const sl_queue_request_t *request);
+void demo_put_pinned_request(demo_packet_t *, sl_t *,
+                             const sl_queue_request_t *);
 void demo_get_request(demo_packet_t *packet, sl_queue_request_t *request);
 void demo_put_result(demo_packet_t *packet, const sl_queue_result_t *result);
 void demo_get_result(demo_packet_t *packet, sl_queue_result_t *result);
@@ -69,4 +104,5 @@ int demo_link_flush(demo_link_t *link);
  * Reads never fetch bytes belonging to a second frame. */
 int demo_link_read(demo_link_t *link, demo_packet_t *packet);
 int demo_nonblock(int fd);
+#endif
 #endif

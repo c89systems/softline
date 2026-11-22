@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en" data-theme="default" data-font="sans" data-margin="none" data-width="standard">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="color-scheme" content="dark light">
+  <title>softline</title>
+  <link rel="stylesheet" href="./softline.css">
+  <link rel="stylesheet" href="./xterm.css">
+  <script type="module" src="./softline.js"></script>
+</head>
+<body>
+  <header id="toolbar" class="toolbar">
+    <div id="brand" class="brand" hidden></div>
+    <div class="appearance">
+      <label>Theme <select id="theme" aria-label="Theme">
+        <option value="default">Default</option><option value="light">Light</option>
+        <option value="gruvbox">Gruvbox</option><option value="dracula">Dracula</option>
+        <option value="solarized">Solarized</option><option value="monokai">Monokai</option>
+        <option value="synthwave">Synthwave</option><option value="plain">Plain</option>
+        <option value="accent">Accent</option><option value="monochrome">Monochrome</option>
+        <option value="monogreen">Monogreen</option><option value="outrun">Outrun</option>
+        <option value="riced">Riced</option>
+      </select></label>
+      <label>Font <select id="font" aria-label="Font"><option value="sans">Sans</option><option value="mono">JetBrains Mono</option></select></label>
+      <label>Margin <select id="margin" aria-label="Margin">
+        <option value="none">None</option><option value="small">Small</option><option value="medium">Medium</option><option value="large">Large</option><option value="extra-large">Extra large</option>
+      </select></label>
+      <label>Width <select id="width" aria-label="Content and prompt width">
+        <option value="standard">Standard</option><option value="medium">Medium</option><option value="wide">Wide</option>
+      </select></label>
+    </div>
+    <button id="transcript-toggle" type="button" aria-controls="transcripts" aria-expanded="false" aria-keyshortcuts="F8" title="Cycle transcripts (F8)" hidden>Transcripts</button>
+    <span id="connection" role="status">Connecting</span>
+  </header>
+  <div id="workspace">
+  <div id="conversation-pane">
+  <div id="chat-slot">
+  <main id="chat" class="welcome-state">
+    <div id="scroll-frame">
+      <div id="scroll" tabindex="0" aria-label="Conversation">
+        <div id="messages" role="log" aria-label="Messages" aria-live="off"></div>
+      </div>
+    </div>
+    <section id="welcome"><div id="banner"></div><div id="welcome-text">Welcome to softline</div></section>
+    <div id="composer-area">
+      <button id="latest" class="icon-button" aria-label="Jump to latest" title="Jump to latest" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14m-6-6 6 6 6-6"/></svg></button>
+      <div id="queue" role="region" aria-label="Prompt queue" tabindex="0" hidden></div>
+      <div id="activity" role="status"></div>
+      <div id="completions" role="listbox" aria-label="Completions" hidden></div>
+      <form id="composer" autocomplete="off">
+        <div id="uploads" aria-label="Image attachments" hidden></div>
+        <div class="input-row">
+          <button id="plus" class="icon-button" type="button" aria-label="Actions, completions and images" aria-expanded="false" title="Actions, completions and images">+</button>
+          <div class="prompt-editor">
+            <pre id="prompt-projection" aria-hidden="true" hidden><span id="projection-before"></span><span id="simulation-caret"></span><span id="completion-ghost"></span><span id="projection-after"></span></pre>
+            <textarea id="prompt" rows="1" placeholder="Ask softline" aria-label="Message" aria-description="Press Escape outside other text fields or dialogs to focus the prompt." aria-keyshortcuts="Escape" aria-autocomplete="inline" spellcheck="false"></textarea>
+          </div>
+          <button id="send" type="submit" aria-label="Send message" title="Send (Enter)"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5m-6 6 6-6 6 6"/></svg></button>
+        </div>
+      </form>
+      <div class="composer-hint"><span>Enter to send · Shift+Enter for a new line · Alt+Enter to steer</span></div>
+    </div>
+  </main>
+  </div>
+  <div id="terminal-divider" class="pane-divider" role="separator" aria-label="Terminal height" aria-controls="terminal-panel" aria-orientation="horizontal" tabindex="0" hidden></div>
+  <section id="terminal-panel" aria-label="Server terminal panel" hidden></section>
+  </div>
+  <div id="transcript-divider" class="pane-divider" role="separator" aria-label="Transcript size" aria-controls="transcripts" aria-orientation="vertical" tabindex="0" hidden></div>
+  <aside id="transcripts" aria-label="Read-only terminal transcripts" hidden>
+    <div class="transcript-content">
+      <div class="transcript-header">
+        <div id="transcript-tabs" role="tablist" aria-label="Transcripts"></div>
+        <button id="transcript-close" class="icon-button" type="button" aria-label="Close transcript pane" title="Close transcript pane"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
+      </div>
+      <div id="transcript-screen" tabindex="0" aria-label="Transcript screen"></div>
+    </div>
+  </aside>
+  </div>
+  <input id="image-input" type="file" accept="image/png,image/jpeg" multiple hidden>
+  <dialog id="queue-editor" aria-labelledby="queue-editor-title">
+    <form id="queue-edit-form">
+      <h2 id="queue-editor-title">Edit queued message</h2>
+      <textarea id="queue-edit-text" aria-label="Queued message" rows="6" spellcheck="false" required></textarea>
+      <p class="composer-hint">Enter to save · Shift+Enter for a new line</p>
+      <p id="queue-edit-error" role="status"></p>
+      <div class="queue-edit-tools"><button id="queue-edit-cancel" type="button">Cancel</button><button id="queue-edit-save" type="submit">Save</button></div>
+    </form>
+  </dialog>
+  <div id="toast" role="status" hidden></div>
+  <div id="image-preview" role="button" tabindex="0" aria-label="Open image" hidden><img id="image-preview-content" alt=""></div>
+  <dialog id="image-viewer" aria-labelledby="image-viewer-title">
+    <div id="image-viewer-tools">
+      <span id="image-viewer-title">Image</span>
+      <button id="image-viewer-copy" class="icon-button" type="button" aria-label="Copy image" title="Copy image"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="4" width="12" height="13" rx="3"/><path d="M16 17v2a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V9a2 2 0 0 1 2-2h3"/></svg></button>
+      <button id="image-viewer-close" class="icon-button" type="button" aria-label="Close image" title="Close image" autofocus><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
+    </div>
+    <div id="image-viewer-stage"><img id="image-viewer-content" alt=""></div>
+  </dialog>
+  <template id="copy-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="4" width="12" height="13" rx="3"/><path d="M16 17v2a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V9a2 2 0 0 1 2-2h3"/></svg></template>
+</body>
+</html>

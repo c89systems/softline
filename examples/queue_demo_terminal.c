@@ -27,6 +27,8 @@ static int size_packet(demo_link_t *link, unsigned long kind, unsigned int rows,
   demo_put_number(&p, kind);
   demo_put_number(&p, rows);
   demo_put_number(&p, columns);
+  if (kind == DEMO_PTY_OPEN)
+    demo_put_string(&p, getenv("TERM") ? getenv("TERM") : "xterm-256color");
   if (demo_link_queue(link, &p)) {
     demo_packet_free(&p);
     return SL_ERROR_IO;
@@ -96,12 +98,17 @@ static int remote_callback(void *context, sl_terminal_event_t *e) {
             if (!p.failed)
               memcpy(r->output, data, r->length);
           } else if (kind == DEMO_PTY_EXIT) {
-            r->exit_status = (int)demo_number(&p);
-            r->ready = 1;
-            r->eof = 1;
+            unsigned long code = demo_number(&p);
+            if (p.failed || code > 256u)
+              p.failed = 1;
+            else {
+              r->exit_status = code == 256u ? -1 : (int)code;
+              r->ready = 1;
+              r->eof = 1;
+            }
           } else
             p.failed = 1;
-          status = p.failed || p.offset != p.length ? SL_ERROR_IO : SL_OK;
+          status = !demo_packet_done(&p) ? SL_ERROR_IO : SL_OK;
           demo_packet_free(&p);
           if (status != SL_OK)
             return status;
@@ -168,15 +175,29 @@ int demo_terminal_server_input(demo_terminal_server_t *s, demo_link_t *link,
   sl_terminal_event_t e;
   memset(&e, 0, sizeof(e));
   if (kind == DEMO_PTY_OPEN || kind == DEMO_PTY_RESIZE) {
-    if (kind == DEMO_PTY_OPEN && s->pty.fd >= 0)
+    const char *term = NULL;
+    if (kind == DEMO_PTY_OPEN && s->session)
       return -1;
     e.rows = (unsigned int)demo_number(p);
     e.columns = (unsigned int)demo_number(p);
-    if (p->failed || p->offset != p->length || !e.rows || !e.columns ||
-        e.rows > 65535 || e.columns > 65535)
+    if (kind == DEMO_PTY_OPEN)
+      term = demo_string(p);
+    if (!demo_packet_done(p) || !e.rows || !e.columns || e.rows > 65535 ||
+        e.columns > 65535)
+      return -1;
+    if (kind == DEMO_PTY_OPEN) {
+      sl_terminal_session_config_t config;
+      if (!term || !*term || strlen(term) > 127)
+        return -1;
+      sl_terminal_session_config_init(&config);
+      config.terminal_type = term;
+      s->session = sl_terminal_session_create(&config);
+      if (!s->session)
+        return -1;
+    } else if (!s->session)
       return -1;
     e.operation = kind == DEMO_PTY_OPEN ? SL_TERMINAL_OPEN : SL_TERMINAL_RESIZE;
-    if (sl_pty_callback(&s->pty, &e) != SL_OK)
+    if (sl_terminal_session_dispatch(s->session, &e) != SL_OK)
       return -1;
   } else if (kind == DEMO_PTY_DATA && !s->eof) {
     size_t length;
@@ -193,18 +214,20 @@ int demo_terminal_server_pump(demo_terminal_server_t *s, demo_link_t *link) {
   sl_terminal_event_t e;
   char data[2048];
   int status;
-  (void)sl_pty_reap(&s->pty);
   if (s->eof)
     return 0;
   memset(&e, 0, sizeof(e));
   e.operation = SL_TERMINAL_STEP;
-  status = sl_pty_callback(&s->pty, &e);
+  status = sl_terminal_session_dispatch(s->session, &e);
+  s->wait = e;
   if (status != SL_OK) {
     demo_packet_t p = {0};
-    if (s->pty.status < 0)
+    int exit_status = -1;
+    if (sl_terminal_session_status(s->session, &exit_status) != SL_OK ||
+        exit_status < 0)
       return -1;
     demo_put_number(&p, DEMO_PTY_EXIT);
-    demo_put_number(&p, (unsigned long)s->pty.status);
+    demo_put_number(&p, (unsigned long)exit_status);
     s->eof = 1;
     if (demo_link_queue(link, &p)) {
       demo_packet_free(&p);
@@ -228,7 +251,7 @@ int demo_terminal_server_pump(demo_terminal_server_t *s, demo_link_t *link) {
     e.operation = SL_TERMINAL_WRITE;
     e.data = s->input;
     e.length = s->input_len;
-    status = sl_pty_callback(&s->pty, &e);
+    status = sl_terminal_session_dispatch(s->session, &e);
     if (status == SL_OK) {
       s->input_len -= e.transferred;
       memmove(s->input, s->input + e.transferred, s->input_len);
@@ -241,7 +264,7 @@ int demo_terminal_server_pump(demo_terminal_server_t *s, demo_link_t *link) {
     e.operation = SL_TERMINAL_READ;
     e.data = data;
     e.length = sizeof(data);
-    status = sl_pty_callback(&s->pty, &e);
+    status = sl_terminal_session_dispatch(s->session, &e);
     if (status == SL_ERROR_NOT_READY)
       return 0;
     if (status != SL_OK)
@@ -250,9 +273,10 @@ int demo_terminal_server_pump(demo_terminal_server_t *s, demo_link_t *link) {
       demo_put_number(&p, DEMO_PTY_DATA);
       demo_put_bytes(&p, data, e.transferred);
     } else {
+      int exit_status = -1;
+      (void)sl_terminal_session_status(s->session, &exit_status);
       demo_put_number(&p, DEMO_PTY_EXIT);
-      demo_put_number(&p,
-                      (unsigned long)(s->pty.status < 0 ? 0 : s->pty.status));
+      demo_put_number(&p, (unsigned long)(exit_status < 0 ? 256 : exit_status));
       s->eof = 1;
     }
     if (demo_link_queue(link, &p)) {

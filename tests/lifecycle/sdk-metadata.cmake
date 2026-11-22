@@ -6,12 +6,24 @@ set(header "${work}/include/softline/softline_version.h")
 function(prepare target libdir)
   file(REMOVE_RECURSE "${work}")
   set(files include/softline/softline.h include/softline/softline_version.h
+    include/softline/cbor.h include/softline/terminal.h include/softline/transcript.h include/softline/www.h
     ${libdir}/libsoftline.a ${libdir}/pkgconfig/softline.pc
     ${libdir}/cmake/softline/softlineConfig.cmake
     ${libdir}/cmake/softline/softlineConfigVersion.cmake
     ${libdir}/cmake/softline/softlineTargets.cmake
     ${libdir}/cmake/softline/softlineTargets-release.cmake
     share/doc/softline/LICENSE share/doc/softline/README.md
+    share/doc/softline/docs/web-frontend.md share/doc/softline/docs/web-terminal.md
+    share/doc/softline/docs/terminal-handoff-design.md share/doc/softline/docs/transcripts.md
+    share/doc/softline/docs/softline-spec.md share/doc/softline/docs/image-paste.md
+    share/doc/softline/docs/queue-backends.md share/doc/softline/docs/softline-mdf-stream-design.md
+    share/doc/softline/docs/lifecycle-migration.md share/doc/softline/docs/retained-resize-investigation.md
+    share/doc/softline/lua/README.md
+    share/doc/softline/streaming-markdown/LICENSE share/doc/softline/streaming-markdown/README.softline
+    share/doc/softline/jetbrains-mono/OFL.txt share/doc/softline/jetbrains-mono/README.softline
+    share/doc/softline/xterm/LICENSE share/doc/softline/xterm/LICENSE.addon-fit share/doc/softline/xterm/README.softline
+    share/softline/licenses/libvterm/LICENSE share/softline/licenses/libvterm/README.softline.md
+    share/softline/licenses/libvterm/provenance.json
     share/softline/package-metadata.json)
   set(dependencies "[]")
   if(target MATCHES "-linux-")
@@ -25,6 +37,9 @@ function(prepare target libdir)
     list(APPEND files ${libdir}/libsoftline.dylib ${libdir}/libsoftline.1.dylib
       ${libdir}/libsoftline.1.2.3.dylib)
   endif()
+  string(JSON idx LENGTH "${dependencies}")
+  string(JSON dependencies SET "${dependencies}" "${idx}"
+    "{\"name\":\"libvterm\",\"version\":\"0.3.3\",\"license\":\"MIT\",\"provenance\":\"share/softline/licenses/libvterm/provenance.json\"}")
   foreach(file IN LISTS files)
     file(WRITE "${work}/${file}" "fixture\n")
   endforeach()
@@ -61,16 +76,18 @@ foreach(target arm64-apple-darwin x86_64-linux-gnu)
     string(JSON bad SET "${good}" bundled_dependencies "\"[]\"")
     file(WRITE "${metadata}" "${bad}")
     check("SDK bundled dependency metadata")
-    if(target MATCHES "-linux-")
-      string(JSON bad SET "${good}" bundled_dependencies "[]")
-      file(WRITE "${metadata}" "${bad}")
-      check("SDK bundled dependency metadata")
+    string(JSON bad SET "${good}" bundled_dependencies "[]")
+    file(WRITE "${metadata}" "${bad}")
+    check("SDK bundled dependency metadata")
+    string(JSON last LENGTH "${good}" bundled_dependencies)
+    math(EXPR last "${last} - 1")
+    foreach(index RANGE ${last})
       foreach(field name version license provenance)
-        string(JSON bad SET "${good}" bundled_dependencies 0 "${field}" "\"wrong\"")
+        string(JSON bad SET "${good}" bundled_dependencies ${index} "${field}" "\"wrong\"")
         file(WRITE "${metadata}" "${bad}")
         check("SDK bundled dependency metadata")
       endforeach()
-    endif()
+    endforeach()
     file(WRITE "${metadata}" "${good}")
     foreach(extra include/softline/private.h build/CMakeCache.txt .cache/deps/input
         lua/softline.so ${libdir}/libextra.a)

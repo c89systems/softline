@@ -1,0 +1,55 @@
+@media (prefers-reduced-motion: no-preference) {
+  /* Tab focus and scrollIntoView must not scroll the workspace during entry. */
+  #workspace { overflow: clip; }
+
+  #scroll-frame::before, #scroll-frame::after {
+    content: "";
+    position: absolute;
+    inset-inline: 0;
+    height: min(32px, 12%);
+    pointer-events: none;
+    z-index: 1;
+    opacity: 0;
+    transition: opacity 160ms ease-out;
+    background: linear-gradient(to var(--edge-direction), var(--bg), transparent);
+    backdrop-filter: blur(5px);
+    mask-image: linear-gradient(to var(--edge-direction), #000 30%, transparent);
+  }
+  #scroll-frame::before { --edge-direction: bottom; top: 0; }
+  #scroll-frame::after { --edge-direction: top; bottom: 0; }
+  #chat:not(.welcome-state) #scroll-frame[data-scrolled="1"]::before,
+  #chat:not(.welcome-state):has(#latest:not([hidden])) #scroll-frame::after {
+    opacity: 1;
+  }
+
+  .message.user > .body:empty { visibility: hidden; }
+  .message.user > .body:not(:empty) {
+    animation: message-arrive 410ms cubic-bezier(.32, .12, .24, 1);
+  }
+  #terminal-panel:not([hidden]), #transcripts:not([hidden]) {
+    /* The split advances with the pane's leading edge. Clip the contents
+       while reserving space so they use their final size from the start. */
+    overflow: clip;
+    animation: split-open 540ms cubic-bezier(.42, 0, .20, 1);
+  }
+  #terminal-panel > .terminal-frame { height: var(--pane-size); }
+  #transcripts > .transcript-content { width: var(--pane-size); }
+  .pane-divider[inert] { overflow: clip; }
+  @media (max-width: 640px) {
+    #transcripts { justify-content: flex-end; }
+    #transcripts > .transcript-content {
+      flex: 0 0 var(--pane-size);
+      width: 100%;
+    }
+  }
+}
+
+@keyframes message-arrive {
+  from { opacity: 0; transform: translate(16px, 14px); }
+  to { opacity: 1; transform: translate(0, 0); }
+}
+
+@keyframes split-open {
+  from { flex-basis: 0px; }
+  to { flex-basis: var(--pane-size); }
+}

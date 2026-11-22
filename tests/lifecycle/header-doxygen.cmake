@@ -1,15 +1,16 @@
 cmake_minimum_required(VERSION 3.24)
 # Check attachment to declarations, separately from API/doc name parity.
 set(declaration_patterns
-  "^typedef (struct sl sl_t\\;|unsigned long sl_watch_id_t\\;|struct sl_[a-z0-9_]+[ \t]*\\{|enum sl_[a-z0-9_]+[ \t]*\\{)"
+  "^typedef (struct sl sl_t\\;|unsigned long sl_[a-z0-9_]+_t\\;|struct sl_[a-z0-9_]+[ \t]*\\{|enum sl_[a-z0-9_]+[ \t]*\\{)"
   "^(SL|SOFTLINE)_[A-Z0-9_]+([ \t]*=|[ \t]|$)"
   "^(int|size_t|unsigned int|unsigned char|char|const char[ \t]*\\*|sl_[a-z0-9_]+_t)[ \t]*[a-z][a-z0-9_]*\\;$"
-  "^struct sl[ \t]*\\{"
+  "^struct sl(_[a-z0-9_]+)?[ \t]*\\{"
   "^void[ \t]*\\*[ \t]*impl\\;"
   "\\(\\*[a-z][a-z0-9_]*\\)[ \t]*\\("
-  "^(char[ \t]*\\*|const char[ \t]*\\*|void|int|size_t|sl_t[ \t]*\\*|sl_readline_status_t)[ \t]*sl_[a-z0-9_]+\\("
-  "^#define (SOFTLINE_VERSION(_[A-Z]+)?|SL_STATUS_MAX_ELEMENTS)([ \t]|$)")
-foreach(relative include/softline/softline.h cmake/softline_version.h.in)
+  "^(char[ \t]*\\*|const char[ \t]*\\*|void|int|size_t|sl_[a-z0-9_]*_t[ \t]*\\*|sl_t[ \t]*\\*|sl_readline_status_t)[ \t]*sl_[a-z0-9_]+\\("
+  "^#define (SOFTLINE_VERSION(_[A-Z]+)?|SL_[A-Z0-9_]+)([ \t]|$)")
+foreach(relative include/softline/softline.h include/softline/www.h
+    include/softline/terminal.h include/softline/transcript.h cmake/softline_version.h.in)
   file(STRINGS "${ROOT}/${relative}" lines ENCODING UTF-8)
   set(in_comment FALSE)
   set(documented FALSE)
@@ -52,3 +53,7 @@ foreach(relative include/softline/softline.h cmake/softline_version.h.in)
     message(FATAL_ERROR "${relative}: unterminated documentation comment")
   endif()
 endforeach()
+file(STRINGS "${ROOT}/include/softline/cbor.h" cbor_doc REGEX "^/\\*\\*[ \t]+@file")
+if(NOT cbor_doc)
+  message(FATAL_ERROR "include/softline/cbor.h: missing Doxygen comment for @file")
+endif()

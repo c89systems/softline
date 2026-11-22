@@ -2,7 +2,7 @@
 
 This is the historical investigation of the reconciliation repair first shipped
 in v0.11.0. Its original ABI and test counts below are historical evidence, not
-current release proof. The current API uses ABI 4; see the
+current release proof. The current API uses ABI 5; see the
 [ABI contract](softline-mdf-stream-design.md#shared-library-abi).
 
 The standalone C fixture and real tmux cell assertions reproduce the reported

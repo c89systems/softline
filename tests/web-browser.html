@@ -1,0 +1,453 @@
+<!doctype html>
+<html lang="en" data-theme="default"><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Softline browser checks</title><link rel="stylesheet" href="/softline.css">
+<style>body{overflow:auto;padding:30px}#checks{max-width:900px;margin:auto}.pass{color:#8c8}.fail{color:#f88}.fixture{border:1px solid var(--line);margin:15px 0;padding:20px}</style>
+<main id="checks"><h1>Softline browser checks</h1><p>These checks execute in this browser. A green result is separate from native/source checks.</p><ol id="results"></ol><div id="fixtures"></div></main>
+<script type="module">
+import { MarkdownStream } from '/markdown.js';
+const results=document.querySelector('#results'), fixtures=document.querySelector('#fixtures');
+let failures=0;
+function assert(value,message){if(!value)throw new Error(message)}
+function render(text,width=1){const root=document.createElement('div');root.className='fixture body';fixtures.append(root);const parser=new MarkdownStream(root);for(let i=0;i<text.length;i+=width)parser.write(text.slice(i,i+width));parser.end();return root}
+function check(name,fn){const row=document.createElement('li');try{fn();row.className='pass';row.textContent=`PASS ${name}`}catch(error){++failures;row.className='fail';row.textContent=`FAIL ${name}: ${error.message}`}results.append(row)}
+for(const width of [1,2,7,64]){
+  check(`incremental Markdown (${width}-character input)`,()=>{
+    const root=render('# Heading\n\nHello **world** and `code`.\n\n- one\n- two\n\n> quoted\n',width);
+    assert(root.querySelector('h1')?.textContent==='Heading','heading');assert(root.querySelector('strong')?.textContent==='world','bold');assert(root.querySelector('code')?.textContent==='code','inline code');assert(root.querySelectorAll('li').length===2,'list');assert(root.querySelector('blockquote'),'quote');
+  });
+  check(`chart fences (${width}-character input)`,()=>{
+    for(const kind of ['mdf-bar-chart','mdf-horizontal-bar-chart','mdf-vertical-bar-chart','mdf-tile-chart']){
+      const root=render('```'+kind+',sort=desc,colored_bars=on\nLabel,Value\n"small, part",10\nlarge,30\n```\n',width);
+      assert(root.querySelector('.mdf-chart svg'),'graphic chart');assert(root.querySelector('.chart-legend')?.textContent.startsWith('large 30'),'descending sort');
+      assert(!root.querySelector('pre:not([hidden])'),'ordinary fence hidden');
+      if(kind==='mdf-tile-chart')assert(root.querySelectorAll('svg path').length===2,'actual pie sectors');
+    }
+  });
+}
+check('append without replacing existing Markdown nodes',()=>{const root=document.createElement('div');fixtures.append(root);const parser=new MarkdownStream(root);parser.write('Hello **world**\n\n');const first=root.firstChild;parser.write('Another paragraph\n\n');assert(root.firstChild===first,'existing node was replaced');assert(root.textContent.includes('Another paragraph'),'new text visible before end');parser.end()});
+check('Unicode byte deltas',()=>{const bytes=new TextEncoder().encode('€ café 👩🏽‍💻\n\n'),decoder=new TextDecoder(),root=document.createElement('div'),parser=new MarkdownStream(root);fixtures.append(root);for(const byte of bytes)parser.write(decoder.decode(new Uint8Array([byte]),{stream:true}));parser.write(decoder.decode());parser.end();assert(root.textContent.includes('€ café 👩🏽‍💻'),'Unicode changed')});
+check('unsafe links and literal HTML',()=>{window.softlineInjected=false;const root=render('[bad](javascript:alert(1))\n\n<script>window.softlineInjected=true;<\/script>\n\n![bad](data:text/html,unsafe)\n');assert(!root.querySelector('script'),'script DOM');assert(!root.querySelector('[href^="javascript:"]'),'unsafe URL');assert(!root.querySelector('[src^="data:"]'),'unsafe image URL');assert(!window.softlineInjected,'HTML executed')});
+check('zero-value pie',()=>{const root=render('```mdf-tile-chart\nnone,0\n```\n');assert(root.querySelector('circle.chart-empty'),'empty pie');assert(!root.innerHTML.includes('NaN'),'invalid numeric geometry')});
+check('fractional bar scaling',()=>{const root=render('```mdf-bar-chart\nsmall,0.25\nlarge,0.5\n```\n');const bars=root.querySelectorAll('svg rect');assert(Number(bars[1]?.getAttribute('width'))===340,'largest fractional value should fill the scale')});
+check('negative first value is not a header',()=>{const root=render('```mdf-bar-chart\nbad,-1\n```\n');assert(!root.querySelector('.mdf-chart'),'negative value accepted as a header');assert(root.querySelector('pre:not([hidden])'),'fallback missing')});
+check('quoted CSV and ascending order',()=>{const root=render('```mdf-bar-chart,sort=asc\n"two ""quotes""",2\n"one\nline",1\n```\n');assert(root.querySelector('.chart-legend')?.textContent.startsWith('one\nline 1'),'CSV quoting/sort')});
+check('invalid chart remains readable code',()=>{const root=render('```mdf-tile-chart\na,1\nb,-2\n```\n');assert(!root.querySelector('.mdf-chart'),'invalid chart accepted');assert(root.querySelector('pre:not([hidden])')?.textContent.includes('b,-2'),'source missing')});
+check('chart row bound',()=>{const root=render('```mdf-bar-chart\n'+Array.from({length:257},(_,i)=>`row${i},1`).join('\n')+'\n```\n',64);assert(!root.querySelector('.mdf-chart'),'row limit not enforced');assert(root.querySelector('pre:not([hidden])'),'fallback missing')});
+check('bounded unfinished constructs keep source text',()=>{const root=render('['+'a'.repeat(100000),64);assert(root.textContent.includes('a'.repeat(10000)),'fallback lost text')});
+async function uiCheck(name,fn){const row=document.createElement('li');try{await fn();row.className='pass';row.textContent=`PASS ${name}`}catch(error){++failures;row.className='fail';row.textContent=`FAIL ${name}: ${error.message}`}results.append(row)}
+async function waitFor(fn){const until=Date.now()+5000;while(!fn()){if(Date.now()>until)throw new Error('UI fixture timed out');await new Promise(resolve=>setTimeout(resolve,10))}}
+const frame=document.createElement('iframe');frame.title='Actual Softline UI regression fixture';frame.style.cssText='width:100%;height:500px;border:1px solid var(--line)';fixtures.append(frame);
+const bootstrap=`<script>
+window.softlineTestCopied=[];
+window.softlineTestImages=[];
+const hostFetch=window.fetch.bind(window);
+window.fetch=async(...args)=>{
+  const response=await hostFetch(...args);
+  if(typeof args[0]==='string'&&args[0].endsWith('config.json')){
+    const config=await response.json();return new Response(JSON.stringify({...config,images:'1'}),{headers:{'Content-Type':'application/json'}});
+  }
+  return response;
+};
+Object.defineProperty(navigator,'clipboard',{value:{
+  writeText:async text=>{window.softlineTestCopied.push(text)},
+  write:async items=>{for(const item of items)window.softlineTestImages.push(await item.getType('image/png'))}
+}});
+window.WebSocket=class extends EventTarget {
+  static OPEN=1;
+  constructor(){super();this.readyState=1;this.sent=[];window.softlineTestSocket=this;setTimeout(()=>{
+    this.dispatchEvent(new Event('open'));
+    this.reply({type:'session',id:'browser-fixture'});
+    for(const [trigger,scope,strip,expand] of [['@','word','1','1'],['/','start','0','1'],['h','start','0','0'],['v','word','0','0'],['n','word','0','0']])
+      this.reply({type:'completion_provider',trigger,scope,strip,expand});
+  },0)}
+  reply(value){this.dispatchEvent(new MessageEvent('message',{data:JSON.stringify(value)}))}
+  send(value){
+    if(typeof value!=='string'){queueMicrotask(()=>this.reply({type:'image_credit',id:this.upload}));return}
+    this.sent.push(value);const q=new URLSearchParams(value);
+    if(q.get('action')==='image_begin'){this.upload=q.get('id');queueMicrotask(()=>this.reply({type:'image_credit',id:this.upload}));return}
+    if(q.get('action')==='image_end'){queueMicrotask(()=>this.reply({type:'image_done',id:this.upload,path:'/backend/softline-image-preview.png'}));return}
+    if(q.get('action')==='send'){
+      queueMicrotask(()=>{
+        const id=q.get('request'),text=q.get('text'),cut=Math.floor(text.length/2);
+        this.reply({type:'accepted',request:id});this.reply({type:'begin',id,role:'user'});
+        this.reply({type:'delta',id,role:'user',text:text.slice(0,cut)});
+        this.reply({type:'delta',id,role:'user',text:text.slice(cut)});this.reply({type:'end',id});
+      });return;
+    }
+    if(q.get('action')!=='complete')return;
+    const lists={'@':['@README.md','@space dir/','@@literal.txt'],'@space dir/':['@space dir/file.txt'],'/':['/approve','/status'],'/approve':['/approve on','/approve off']};
+    const candidates=q.get('all')==='1'?['/status','@']:lists[q.get('resolve')]||[];
+    queueMicrotask(()=>{
+      for(const candidate of candidates)this.reply({type:'complete',request:q.get('request'),candidate,label:candidate,
+        value:candidate.startsWith('@')&&!candidate.endsWith('/')&&candidate!=='@'?candidate.slice(1):candidate,
+        start:q.get('start')||'0',end:q.get('cursor'),continue:candidate.endsWith('/')||candidate==='@'?'1':'0'});
+      this.reply({type:'complete_end',request:q.get('request'),status:'ok'});
+    });
+  } close(){}
+};
+<\/script>`;
+frame.srcdoc=(await (await fetch('/')).text()).replace('<head>','<head>'+bootstrap);
+await uiCheck('actual frontend starts with mock host',async()=>{await waitFor(()=>frame.contentWindow.softlineTestSocket&&frame.contentDocument.querySelector('#connection')?.textContent==='Connected')});
+function event(value){const w=frame.contentWindow;w.softlineTestSocket.dispatchEvent(new w.MessageEvent('message',{data:JSON.stringify(value)}))}
+await uiCheck('toolbar toggle reclaims layout space and margins only inset chat', async () => {
+  const w = frame.contentWindow, doc = frame.contentDocument;
+  const toolbar = doc.querySelector('#toolbar'), workspace = doc.querySelector('#workspace');
+  const chat = doc.querySelector('#chat'), chatSlot = doc.querySelector('#chat-slot');
+  const margin = doc.querySelector('#margin');
+  const toggle = () => w.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'F9', cancelable: true }));
+  const select = value => { margin.value = value; margin.dispatchEvent(new w.Event('change')); };
+  const previousWidth = frame.style.width, previousMargin = margin.value, hidden = toolbar.hidden;
+  try {
+    if (toolbar.hidden) toggle();
+    for (const [width, inset] of [[1280, .23], [760, .17], [360, .12]]) {
+      frame.style.width = `${width}px`;
+      await waitFor(() => w.innerWidth <= width && w.innerWidth > width - 8);
+      select('none');
+      const bar = toolbar.getBoundingClientRect();
+      const work = workspace.getBoundingClientRect(), slot = chatSlot.getBoundingClientRect();
+      assert(Math.abs(chat.getBoundingClientRect().top - bar.bottom) < 1, 'None still added a margin');
+      let previous = 0;
+      for (const option of [...margin.options].slice(1)) {
+        select(option.value);
+        const box = chat.getBoundingClientRect(), currentBar = toolbar.getBoundingClientRect();
+        const horizontal = box.left - slot.left, vertical = box.top - slot.top;
+        const changedWork = workspace.getBoundingClientRect();
+        assert(horizontal > previous && vertical > 0 && horizontal > vertical, 'invalid margin size or axis ratio');
+        assert(Math.abs(slot.right - box.right - horizontal) < 1 && Math.abs(slot.bottom - box.bottom - vertical) < 1, 'chat margins are uneven');
+        assert(currentBar.left === bar.left && currentBar.right === bar.right, 'margin inset the toolbar');
+        assert(changedWork.left === work.left && changedWork.top === work.top && changedWork.width === work.width && changedWork.height === work.height, 'chat margin inset the workspace');
+        previous = horizontal;
+      }
+      assert(previous >= w.innerWidth * inset, 'Extra large left too little space around the workspace');
+      assert(chat.getBoundingClientRect().width >= Math.min(480, w.innerWidth - 96) - 1, 'Extra large squeezed the chat');
+    }
+    const before = workspace.getBoundingClientRect();
+    margin.focus(); toggle();
+    const after = workspace.getBoundingClientRect();
+    assert(toolbar.hidden && after.height > before.height && after.top < before.top && doc.activeElement === doc.querySelector('#prompt'), 'hidden toolbar still took space or focus');
+  } finally { select(previousMargin); if (toolbar.hidden !== hidden) toggle(); frame.style.width = previousWidth; }
+});
+await uiCheck('width presets size messages and the composer from the same limits', async () => {
+  const w = frame.contentWindow, doc = frame.contentDocument;
+  const margin = doc.querySelector('#margin'), width = doc.querySelector('#width');
+  const chat = doc.querySelector('#chat'), slot = doc.querySelector('#chat-slot'), scroll = doc.querySelector('#scroll');
+  const messages = doc.querySelector('#messages'), composer = doc.querySelector('#composer-area');
+  const select = (control, value) => { control.value = value; control.dispatchEvent(new w.Event('change')); };
+  const previousWidth = frame.style.width, previousMargin = margin.value, previousPreset = width.value;
+  const near = (actual, expected) => Math.abs(actual - expected) < 1;
+  const checkWidth = (messageWidth, promptWidth) => {
+    assert(near(messages.getBoundingClientRect().width, messageWidth) &&
+      near(composer.getBoundingClientRect().width, promptWidth), `unexpected message or prompt width for ${width.value}`);
+  };
+  try {
+    frame.style.width = '1920px';
+    await waitFor(() => w.innerWidth >= 1910 && w.innerWidth <= 1920);
+    select(margin, 'none');
+    const wide = slot.getBoundingClientRect().width * .75;
+    for (const [preset, expected] of [['standard', 820], ['medium', (820 + wide) / 2], ['wide', wide]]) {
+      select(width, preset); checkWidth(expected, expected);
+    }
+    select(margin, 'extra-large');
+    checkWidth(scroll.clientWidth, chat.getBoundingClientRect().width);
+    frame.style.width = '1697px';
+    await waitFor(() => w.innerWidth >= 1690 && w.innerWidth <= 1697);
+    select(margin, 'none');
+    const resizedWide = slot.getBoundingClientRect().width * .75;
+    checkWidth(resizedWide, resizedWide);
+    frame.style.width = '1024px';
+    await waitFor(() => w.innerWidth >= 1014 && w.innerWidth <= 1024);
+    select(margin, 'none'); checkWidth(820, 820);
+  } finally { select(margin, previousMargin); select(width, previousPreset); frame.style.width = previousWidth; }
+});
+await uiCheck('animated scroll edges fade and blur only on the sides with overflow', async () => {
+  const w = frame.contentWindow, doc = frame.contentDocument;
+  const scroll = doc.querySelector('#scroll'), scrollFrame = doc.querySelector('#scroll-frame');
+  const latest = doc.querySelector('#latest');
+  const top = () => w.getComputedStyle(scrollFrame, '::before');
+  const bottom = () => w.getComputedStyle(scrollFrame, '::after');
+  const animated = doc.querySelector('link[href="./motion.css"]') && w.matchMedia('(prefers-reduced-motion: no-preference)').matches;
+  try {
+    event({type:'delta',id:'edge-fixture',role:'assistant',text:'Scrollable conversation output.\n\n'.repeat(85)});
+    event({type:'end',id:'edge-fixture'});
+    await waitFor(() => scroll.scrollHeight > scroll.clientHeight + 200);
+    scroll.scrollTop = 140;
+    await waitFor(() => !latest.hidden);
+    if (animated) {
+      await waitFor(() => top().opacity === '1' && bottom().opacity === '1');
+      assert(top().backdropFilter === 'blur(5px)' && bottom().backdropFilter === 'blur(5px)', 'edge effects did not blur their backdrop');
+    } else {
+      assert(top().content === 'none' && bottom().content === 'none', 'scroll edge effects appeared without motion');
+    }
+    scroll.scrollTop = 0;
+    if (animated) await waitFor(() => top().opacity === '0' && bottom().opacity === '1');
+    latest.click();
+    if (animated) await waitFor(() => top().opacity === '1' && bottom().opacity === '0');
+  } finally { latest.click(); event({type:'reset'}); }
+});
+function checkPaneMargins(pane) {
+  const doc = pane.ownerDocument, margin = doc.querySelector('#margin'), previous = margin.value;
+  const select = value => { margin.value = value; margin.dispatchEvent(new doc.defaultView.Event('change')); };
+  try {
+    select('none');
+    const before = pane.getBoundingClientRect();
+    select('extra-large');
+    const after = pane.getBoundingClientRect();
+    assert(['left', 'top', 'width', 'height'].every(key => before[key] === after[key]), 'chat margin changed the pane bounds');
+  } finally { select(previous); }
+}
+function checkSplit(panel, neighbor, size, edge, contents, closing = false) {
+  const divider = panel.previousElementSibling;
+  const animation = panel.getAnimations().find(item => closing ? item.id === 'split-close' : item.animationName === 'split-open');
+  const dividerAnimation = closing && divider.getAnimations().find(item => item.id === 'split-close');
+  assert(animation && (!closing || dividerAnimation), 'split has no pane or divider animation');
+  const animations = closing ? [animation, dividerAnimation] : [animation];
+  const duration = animation.effect.getTiming().duration;
+  const measure = time => {
+    for (const effect of animations) effect.currentTime = time;
+    return [panel.getBoundingClientRect()[size], neighbor.getBoundingClientRect()[size],
+      panel.getBoundingClientRect()[edge], contents.getBoundingClientRect()[size], divider.getBoundingClientRect()[size]];
+  };
+  try {
+    for (const effect of animations) effect.pause();
+    const start = measure(0), middle = measure(duration / 2), end = measure(duration);
+    const [collapsed, expanded] = closing ? [end, start] : [start, end];
+    assert(collapsed[0] < 1 && middle[0] > collapsed[0] && middle[0] < expanded[0], 'pane bounds did not change gradually');
+    assert(collapsed[1] > middle[1] && middle[1] > expanded[1], 'chat snapped to the final split');
+    assert(Math.abs(start[2] - end[2]) < 1 && Math.abs(middle[2] - end[2]) < 1, 'pane left its entry edge');
+    assert(Math.abs(start[3] - end[3]) < 1 && Math.abs(middle[3] - end[3]) < 1, 'pane contents resized during the animation');
+    if (closing) assert(start[4] > middle[4] && end[4] < 1, 'divider remained in the collapsed split');
+  } finally { for (const effect of animations) effect.finish(); }
+}
+const motionEnabled = frame.contentDocument.querySelector('link[href="./motion.css"]') &&
+  frame.contentWindow.matchMedia('(prefers-reduced-motion: no-preference)').matches;
+if (motionEnabled) await uiCheck('streamed lines ease the feed without moving the draft', async () => {
+  const w = frame.contentWindow, doc = frame.contentDocument;
+  const scroll = doc.querySelector('#scroll'), prompt = doc.querySelector('#prompt'), latest = doc.querySelector('#latest');
+  const id = 'scroll-motion-fixture', draft = prompt.value;
+  try {
+    event({type:'delta',id,role:'assistant',text:'Earlier output.\n\n'.repeat(85)});
+    await new Promise(resolve => w.requestAnimationFrame(() => w.requestAnimationFrame(resolve)));
+    latest.click();
+    await waitFor(() => scroll.scrollTop > 200);
+    const start = scroll.scrollTop;
+    event({type:'delta',id,role:'assistant',text:'A new line of output.\n\n'});
+    const bottom = scroll.scrollHeight - scroll.clientHeight;
+    assert(bottom > start + 10 && Math.abs(scroll.scrollTop - start) < 1, 'streamed growth immediately snapped to the bottom');
+    await new Promise(resolve => w.requestAnimationFrame(resolve));
+    assert(scroll.scrollTop > start && scroll.scrollTop < bottom, 'feed skipped its intermediate scroll position');
+    await waitFor(() => Math.abs(scroll.scrollTop - bottom) <= 1);
+    assert(latest.hidden && prompt.value === draft, 'following changed the draft or revealed the jump arrow');
+  } finally { latest.click(); event({type:'reset'}); }
+});
+if (motionEnabled) await uiCheck('transcript split moves the conversation as it opens and closes', async () => {
+  const doc = frame.contentDocument, panel = doc.querySelector('#transcripts');
+  const conversation = doc.querySelector('#conversation-pane'), toggle = doc.querySelector('#transcript-toggle');
+  const previousWidth = frame.style.width;
+  try {
+    for (const [width, size, edge] of [[760, 'width', 'right'], [360, 'height', 'top']]) {
+      frame.style.width = `${width}px`;
+      await waitFor(() => frame.contentWindow.matchMedia('(max-width: 640px)').matches === (width <= 640));
+      event({type:'transcript_open',id:'split',title:'Split fixture',rows:'25',columns:'80'});
+      toggle.click();
+      const contents = panel.querySelector('.transcript-content');
+      checkSplit(panel, conversation, size, edge, contents);
+      checkPaneMargins(panel);
+      doc.querySelector('#transcript-close').click();
+      checkSplit(panel, conversation, size, edge, contents, true);
+      await waitFor(() => panel.hidden);
+      event({type:'transcript_remove',id:'split'});
+      panel.getBoundingClientRect();
+    }
+  } finally { event({type:'transcript_remove',id:'split'}); frame.style.width = previousWidth; }
+});
+await uiCheck('terminal docks below the composer and fits short and tall viewports',async()=>{
+  const doc=frame.contentDocument,w=frame.contentWindow,p=doc.querySelector('#prompt');
+  let metrics;
+  const measured=e=>{if(e.source===doc.querySelector('#terminal-panel iframe')?.contentWindow&&e.origin===location.origin&&e.data?.type==='softline-terminal-size')metrics=e.data};
+  w.addEventListener('message',measured);
+  try{
+  event({type:'capabilities',terminal:'/terminal'});
+  p.dispatchEvent(new w.KeyboardEvent('keydown',{key:'`',code:'Backquote',ctrlKey:true,bubbles:true,cancelable:true}));
+  const panel=doc.querySelector('#terminal-panel');
+  if (motionEnabled) checkSplit(panel, doc.querySelector('#chat'), 'height', 'bottom', panel.querySelector('iframe'));
+  await waitFor(()=>!panel.hidden&&panel.querySelector('iframe')?.contentDocument?.querySelector('.xterm-screen'));
+  const terminalFrame=panel.querySelector('iframe');
+  checkPaneMargins(panel);
+  const terminalDocument=terminalFrame.contentDocument,grid=terminalDocument.querySelector('#terminal'),footer=terminalDocument.querySelector('.terminal-footer');
+  assert(!terminalDocument.querySelector('header')&&Math.abs(grid.getBoundingClientRect().top)<1,'terminal still has a top status bar');
+  assert(footer&&Math.abs(footer.getBoundingClientRect().height-24)<1&&footer.getBoundingClientRect().top>=grid.getBoundingClientRect().bottom-1,'terminal status is not a compact footer');
+  for(const height of [1400,500]){
+    frame.style.height=`${height}px`;
+    await new Promise(resolve=>setTimeout(resolve,150));
+    const terminal=terminalFrame.contentDocument.querySelector('.xterm-screen');
+    assert(panel.getBoundingClientRect().top>=doc.querySelector('#composer-area').getBoundingClientRect().bottom-1,'terminal covers composer');
+    assert(panel.getBoundingClientRect().bottom<=w.innerHeight+1,'terminal exceeds chat viewport');
+    assert(terminal.getBoundingClientRect().height>0,'terminal has no visible grid');
+    if(height===1400){await waitFor(()=>metrics);assert(terminal.getBoundingClientRect().height>=25*metrics.rowHeight-1,'tall viewport lost terminal rows')}
+  }
+  event({type:'terminal_state',active:'2',disable_prompt:'1'});
+  assert(p.readOnly&&doc.querySelector('#composer').dataset.disabled==='1'&&!doc.querySelector('#scroll').inert,'lock disabled conversation scrolling');
+  terminalFrame.contentDocument.querySelector('#terminal-close').click();
+  if (motionEnabled) {
+    await waitFor(() => panel.inert);
+    checkSplit(panel, doc.querySelector('#chat'), 'height', 'bottom', terminalFrame, true);
+  }
+  await waitFor(()=>panel.hidden&&!panel.querySelector('iframe'));
+  assert(p.readOnly,'closing terminal overrode host lock');
+  event({type:'terminal_state',active:'1',disable_prompt:'1'});assert(p.readOnly,'another active handoff lost its lock');
+  event({type:'terminal_state',active:'0',disable_prompt:'1'});assert(!p.readOnly,'last handoff did not unlock prompt');
+  }finally{
+    event({type:'capabilities',terminal:''});event({type:'terminal_state',active:'0',disable_prompt:'0'});event({type:'prompt_state',disabled:'0'});frame.style.height='500px';w.removeEventListener('message',measured);
+  }
+});
+await uiCheck('thinking slot stays reserved across status changes',async()=>{
+  event({type:'begin',id:'status-fixture',role:'assistant'});
+  for(const width of [760,360]){
+    frame.style.width=`${width}px`;
+    for(const font of ['sans','mono']){
+      frame.contentDocument.documentElement.dataset.font=font;
+      await frame.contentDocument.fonts.ready;
+      const doc=frame.contentDocument,box=()=>[doc.querySelector('#composer').getBoundingClientRect().top,doc.querySelector('#scroll').clientHeight,doc.querySelector('#activity').getBoundingClientRect().height],before=box();
+      assert(before[2]>0,'empty status has no reserved height');
+      for(const text of ['Thinking…','','Reasoning about the next step','long status '.repeat(100)+'\nsecond line','']){
+        event({type:'status',text,busy:text?'1':'0'});
+        assert(JSON.stringify(box())===JSON.stringify(before),'status changed composer/scroll/slot geometry');
+        assert(doc.querySelector('#activity').textContent===text,'host text changed');
+      }
+    }
+  }
+});
+await uiCheck('copy preserves raw streamed Markdown before and after end',async()=>{
+  const id='raw-copy-fixture',source='# Heading\n\n**bold** and _italic_, `code` & <literal>\n\n```c\n  puts("€");\n```\n\n',doc=frame.contentDocument;
+  event({type:'begin',id,role:'assistant'});
+  const bytes=new TextEncoder().encode(source),cut=bytes.indexOf(0xe2)+1;
+  for(let i=0;i<cut;++i)event({type:'delta',id,encoding:'base64',data:btoa(String.fromCharCode(bytes[i]))});
+  const button=doc.querySelector(`[data-message="${id}"] .copy`);
+  button.click();await waitFor(()=>frame.contentWindow.softlineTestCopied.length===1);
+  assert(frame.contentWindow.softlineTestCopied[0]===new TextDecoder().decode(bytes.slice(0,cut-1)),'live copy must preserve received Markdown/UTF-8 boundary');
+  for(let i=cut;i<bytes.length;++i)event({type:'delta',id,encoding:'base64',data:btoa(String.fromCharCode(bytes[i]))});
+  event({type:'end',id});button.click();await waitFor(()=>frame.contentWindow.softlineTestCopied.length===2);
+  assert(frame.contentWindow.softlineTestCopied[1]===source,'final copy changed Markdown, whitespace or Unicode');
+  event({type:'reset'});assert(!doc.querySelector(`[data-message="${id}"]`),'reset retained old output');
+});
+function inputDraft(text,inputType='insertText'){
+  const w=frame.contentWindow,p=frame.contentDocument.querySelector('#prompt');
+  p.focus();p.setSelectionRange(0,p.value.length);
+  p.dispatchEvent(new w.InputEvent('beforeinput',{bubbles:true,inputType,data:text}));
+  p.setRangeText(text,p.selectionStart,p.selectionEnd,'end');
+  p.dispatchEvent(new w.InputEvent('input',{bubbles:true,inputType,data:text}));
+  return p;
+}
+function lastAction(action){return frame.contentWindow.softlineTestSocket.sent.map(value=>new URLSearchParams(value)).filter(value=>value.get('action')===action).at(-1)}
+function sendDraft(){const w=frame.contentWindow;frame.contentDocument.querySelector('#composer').dispatchEvent(new w.Event('submit',{bubbles:true,cancelable:true}))}
+await uiCheck('simulated caret blinks at the end of the draft without taking focus',async()=>{
+  const w=frame.contentWindow,doc=frame.contentDocument,p=doc.querySelector('#prompt');
+  const caret=doc.querySelector('#simulation-caret'),theme=doc.querySelector('#theme');
+  theme.focus();
+  event({type:'simulate_begin',start:'60',pace:'0',submit:'1000',mode:'q'});
+  event({type:'simulate_text',text:'First line\nSecond line'});event({type:'simulate_end'});
+  const start=caret.getBoundingClientRect(),blink=w.getComputedStyle(caret,'::after');
+  assert(!p.value&&start.height>0&&w.getComputedStyle(caret).visibility==='visible','caret missing during grace');
+  assert(blink.animationName===(w.matchMedia('(prefers-reduced-motion: reduce)').matches?'none':'caret-blink'),'caret blink timing is inactive');
+  await waitFor(()=>p.value==='First line\nSecond line');
+  const end=caret.getBoundingClientRect();
+  assert(end.left>start.left&&end.top>start.top&&doc.activeElement===theme,'caret did not follow the draft or took focus');
+  await waitFor(()=>lastAction('send')?.get('text')==='First line\nSecond line');
+  assert(w.getComputedStyle(caret).display==='none'&&doc.activeElement===theme,'simulated caret stayed active after send');
+});
+await uiCheck('send-button submission commits a typed file trigger',async()=>{
+  inputDraft('@README.md');sendDraft();assert(lastAction('send')?.get('text')==='README.md','@ reached the prompt payload');
+});
+await uiCheck('Alt-Enter commits directory completion before steering',async()=>{
+  const p=inputDraft('@examples/'),w=frame.contentWindow;
+  p.dispatchEvent(new w.KeyboardEvent('keydown',{key:'Enter',altKey:true,bubbles:true,cancelable:true}));
+  assert(lastAction('steer')?.get('text')==='examples/','directory trigger reached steer payload');
+});
+await uiCheck('literal at-signs survive completion commit',async()=>{
+  inputDraft('email user@example.com @icon@2x.png');sendDraft();
+  assert(lastAction('send')?.get('text')==='email user@example.com icon@2x.png','literal at-sign changed');
+});
+await uiCheck('selected directory with spaces is sent as a canonical path',async()=>{
+  const p=inputDraft('@spa'),w=frame.contentWindow;
+  await waitFor(()=>frame.contentDocument.querySelector('#completion-ghost').textContent==='ce dir/');
+  assert(frame.contentDocument.querySelector('#completions').hidden,'typing opened a popup');
+  p.dispatchEvent(new w.KeyboardEvent('keydown',{key:'Tab',bubbles:true,cancelable:true}));
+  await waitFor(()=>p.value==='@space dir/');sendDraft();
+  await waitFor(()=>lastAction('send')?.get('text')==='space dir/');
+  assert(lastAction('send')?.get('text')==='space dir/','selected directory retained trigger');
+});
+await uiCheck('selected filename keeps its own leading at-sign',async()=>{
+  const p=inputDraft('@@li'),w=frame.contentWindow;
+  await waitFor(()=>frame.contentDocument.querySelector('#completion-ghost').textContent==='teral.txt');
+  p.dispatchEvent(new w.KeyboardEvent('keydown',{key:'Tab',bubbles:true,cancelable:true}));
+  await waitFor(()=>p.value==='@@literal.txt');sendDraft();
+  await waitFor(()=>lastAction('send')?.get('text')==='@literal.txt');
+  assert(lastAction('send')?.get('text')==='@literal.txt','filename at-sign was stripped twice');
+});
+await uiCheck('inline ghosts use composer font, wrap within the editor and never create a popup',async()=>{
+  for(const width of [760,360])for(const font of ['sans','mono']){
+    frame.style.width=width+'px';frame.contentDocument.documentElement.dataset.font=font;
+    await frame.contentDocument.fonts.ready;
+    const p=inputDraft('@REA'),doc=frame.contentDocument;
+    await waitFor(()=>doc.querySelector('#completion-ghost').textContent==='DME.md');
+    const overlay=doc.querySelector('#prompt-projection'),w=frame.contentWindow;
+    assert(p.value==='@REA','ghost changed actual draft');
+    assert(doc.querySelector('#completions').hidden,'automatic popup is present');
+    assert(w.getComputedStyle(p).fontFamily===w.getComputedStyle(overlay).fontFamily,'ghost font differs');
+    assert(Math.abs(p.getBoundingClientRect().left-overlay.getBoundingClientRect().left)<1,'ghost offset differs');
+    assert(Math.abs(p.clientWidth-overlay.clientWidth)<1,'ghost wrap width differs');
+    sendDraft();assert(lastAction('send')?.get('text')==='REA','Enter accepted ghost');
+  }
+});
+await uiCheck('local image path hover uses the retained upload without changing editor geometry',async()=>{
+  const w=frame.contentWindow,doc=frame.contentDocument,p=doc.querySelector('#prompt');
+  const bytes=Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII='),c=>c.charCodeAt(0));
+  const transfer=new w.DataTransfer();transfer.items.add(new w.File([bytes],'preview.png',{type:'image/png'}));
+  inputDraft('');doc.querySelector('#image-input').files=transfer.files;
+  doc.querySelector('#image-input').dispatchEvent(new w.Event('change',{bubbles:true}));
+  const path='/backend/softline-image-preview.png';
+  await waitFor(()=>p.value===path&&doc.querySelector('#uploads').hidden);
+  for(const width of [760,360])for(const font of ['sans','mono']){
+    frame.style.width=width+'px';doc.documentElement.dataset.font=font;await doc.fonts.ready;
+    inputDraft('long prefix '.repeat(6)+path);
+    await new Promise(resolve=>w.requestAnimationFrame(()=>w.requestAnimationFrame(resolve)));
+    const span=doc.querySelector('#projection-before [data-image-path]'),bounds=p.getBoundingClientRect();
+    assert(span,'draft path reference missing');
+    const rect=[...span.getClientRects()].find(r=>r.bottom>bounds.top&&r.top<bounds.bottom);
+    assert(rect,'wrapped path has no visible hit target');
+    const x=Math.max(bounds.left+1,Math.min(bounds.right-1,(rect.left+rect.right)/2));
+    const y=Math.max(bounds.top+1,Math.min(bounds.bottom-1,(rect.top+rect.bottom)/2));
+    const before=doc.querySelector('#composer').getBoundingClientRect().height;
+    p.dispatchEvent(new w.PointerEvent('pointermove',{clientX:x,clientY:y,bubbles:true}));
+    const panel=doc.querySelector('#image-preview'),image=doc.querySelector('#image-preview-content');
+    assert(!panel.hidden&&image.src.startsWith('blob:'),'hover lost the local upload');
+    await waitFor(()=>image.complete&&image.naturalWidth>0);
+    assert(p.value==='long prefix '.repeat(6)+path,'hover changed the prompt');
+    assert(doc.querySelector('#composer').getBoundingClientRect().height===before,'preview changed composer height');
+    panel.click();
+    const viewer=doc.querySelector('#image-viewer'),full=doc.querySelector('#image-viewer-content');
+    assert(viewer.open&&viewer.matches(':modal'),'thumbnail did not open a native modal');
+    await waitFor(()=>full.complete&&full.naturalWidth>0);
+    const box=viewer.getBoundingClientRect();
+    assert(box.left>=11&&box.top>=11&&box.right<=w.innerWidth-11&&box.bottom<=w.innerHeight-11,'viewer is flush with viewport edges');
+    assert(w.getComputedStyle(full).objectFit==='contain','full-size image does not preserve its aspect ratio');
+    const count=w.softlineTestImages.length;doc.querySelector('#image-viewer-copy').click();
+    await waitFor(()=>w.softlineTestImages.length===count+1);
+    assert(w.softlineTestImages.at(-1).type==='image/png','copy did not write image pixels');
+    doc.querySelector('#image-viewer-close').click();assert(!viewer.open,'close icon retained the modal');
+    p.dispatchEvent(new w.PointerEvent('pointerleave'));await waitFor(()=>panel.hidden);
+  }
+  inputDraft(path);sendDraft();
+  await waitFor(()=>[...doc.querySelectorAll('.user .image-reference')].some(span=>span.textContent===path));
+  const reference=[...doc.querySelectorAll('.user .image-reference')].find(span=>span.textContent===path);
+  reference.focus();assert(!doc.querySelector('#image-preview').hidden,'submitted path lost keyboard preview');
+  w.document.dispatchEvent(new w.KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true}));
+  assert(doc.querySelector('#image-preview').hidden,'Escape retained the image layer');
+  reference.click();assert(doc.querySelector('#image-viewer').open,'posted path did not open the full image');
+  doc.querySelector('#image-viewer').dispatchEvent(new w.Event('cancel',{cancelable:true}));
+  assert(!doc.querySelector('#image-viewer').open&&doc.activeElement===reference,'Escape did not close the modal or restore focus');
+});
+document.title=failures?`FAIL (${failures}) softline browser checks`:'PASS softline browser checks';
+document.documentElement.dataset.checks=failures?'failed':'passed';
+</script></html>

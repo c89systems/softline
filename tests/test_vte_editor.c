@@ -99,24 +99,25 @@ static int prompt(struct editor *e, struct snapshot *result) {
   return 0;
 }
 static int case_editor(const char *example, const char *source,
-                       const char *position, int filled) {
+                       const char *position, int filled,
+                       struct snapshot expected_frames[3]) {
   struct editor actual, reference;
-  struct snapshot observed, expected, current;
+  struct snapshot observed, current;
   char prior[4096], kept[4096], submitted[4096], label[32];
   int count = filled ? 20 : 2, index, width, stage, failed = 1;
   const int widths[] = {20, 36, 18};
   size_t used = 0, keep_used, submit_used, length;
   const char *line, *end, *begin;
   memset(&observed, 0, sizeof(observed));
-  memset(&expected, 0, sizeof(expected));
   for (index = 0; index < count; ++index)
     used += (size_t)snprintf(prior + used, sizeof(prior) - used, "keep%03d\r\n",
                              index);
   if (start_editor(&actual, example, 40, prior, source, position, NULL))
     goto cleanup;
   for (stage = 0; stage < 3; ++stage) {
+    struct snapshot *expected = &expected_frames[stage];
     width = widths[stage];
-    resize_geometry(&actual.screen, width, 8);
+    resize(&actual.screen, width, 8);
     if (rendered(&actual))
       goto cleanup;
     current = transcript(&actual.screen);
@@ -139,22 +140,24 @@ static int case_editor(const char *example, const char *source,
       fprintf(stderr, "Readline overwrote retained output\n%s\n", current.text);
       goto cleanup;
     }
-    if (start_editor(&reference, example, width, prior, source, position,
-                     NULL)) {
+    /* prompt() strips the preceding history and normalizes the cursor row.
+     * Both history depths must match the same fresh prompt. */
+    if (!filled) {
+      int failed_reference = start_editor(&reference, example, width, prior,
+                                          source, position, NULL) ||
+                             prompt(&reference, expected);
       stop_editor(&reference);
-      goto cleanup;
+      if (failed_reference)
+        goto cleanup;
     }
-    if (prompt(&actual, &observed) || prompt(&reference, &expected) ||
-        strcmp(observed.text, expected.text) || observed.row != expected.row ||
-        observed.column != expected.column) {
+    if (prompt(&actual, &observed) || strcmp(observed.text, expected->text) ||
+        observed.row != expected->row || observed.column != expected->column) {
       fprintf(stderr,
               "Resized readline differs from fresh terminal: width=%d "
               "source=%s\n%s\n%s\n",
-              width, source, observed.text, expected.text);
-      stop_editor(&reference);
+              width, source, observed.text, expected->text);
       goto cleanup;
     }
-    stop_editor(&reference);
     if (stage == 1) {
       char damage[128];
       int length;
@@ -167,8 +170,9 @@ static int case_editor(const char *example, const char *source,
       pump();
       v.send(actual.screen.terminal, "\014", 1);
       if (rendered(&actual) || prompt(&actual, &observed) ||
-          strcmp(observed.text, expected.text) ||
-          observed.row != expected.row || observed.column != expected.column) {
+          strcmp(observed.text, expected->text) ||
+          observed.row != expected->row ||
+          observed.column != expected->column) {
         fprintf(stderr, "Ctrl-L did not restore the owned editor frame\n");
         goto cleanup;
       }
@@ -328,7 +332,7 @@ static int case_viewport(const char *example, int native) {
   if (start_editor(&e, example, 80, "retained marker\r\n", "", "",
                    native ? "--viewport-native" : "--viewport"))
     goto cleanup;
-  resize_geometry(&e.screen, 80, 24);
+  resize(&e.screen, 80, 24);
   if (rendered(&e))
     goto cleanup;
   for (i = 0; i < 40; ++i)
@@ -368,10 +372,10 @@ static int case_viewport(const char *example, int native) {
   if (rendered(&e) || viewport_rows(&e, 28, 39, 39) ||
       inspect_draft(&e, source, used))
     goto cleanup;
-  resize_geometry(&e.screen, 80, 10);
+  resize(&e.screen, 80, 10);
   if (rendered(&e) || viewport_rows(&e, 35, 39, 39))
     goto cleanup;
-  resize_geometry(&e.screen, 80, 24);
+  resize(&e.screen, 80, 24);
   if (rendered(&e) || viewport_rows(&e, 28, 39, 39))
     goto cleanup;
   v.send(e.screen.terminal, "\033g", 2);
@@ -388,10 +392,10 @@ static int case_viewport(const char *example, int native) {
   v.send(e.screen.terminal, "\033[200~", 6);
   v.send(e.screen.terminal, source, (long)used);
   v.send(e.screen.terminal, "\033[201~", 6);
-  resize_geometry(&e.screen, 16, 8);
+  resize(&e.screen, 16, 8);
   if (rendered(&e) || inspect_draft(&e, source, used))
     goto cleanup;
-  resize_geometry(&e.screen, 80, 24);
+  resize(&e.screen, 80, 24);
   if (rendered(&e) || inspect_draft(&e, source, used))
     goto cleanup;
   v.send(e.screen.terminal, "\033g", 2);
@@ -411,10 +415,10 @@ static int case_viewport(const char *example, int native) {
   v.send(e.screen.terminal, "中\033[201~", 9);
   if (rendered(&e) || inspect_draft(&e, large, 131072))
     goto cleanup;
-  resize_geometry(&e.screen, 24, 8);
+  resize(&e.screen, 24, 8);
   if (rendered(&e) || inspect_draft(&e, large, 131072))
     goto cleanup;
-  resize_geometry(&e.screen, 80, 24);
+  resize(&e.screen, 80, 24);
   if (rendered(&e) || inspect_draft(&e, large, 131072))
     goto cleanup;
   v.send(e.screen.terminal, "\037", 1);
@@ -514,9 +518,12 @@ int main(int argc, char **argv) {
     return case_themes(argv[1], "abc", "\001\033[C") || errors != 0;
   }
   for (source = 0; source < sizeof(sources) / sizeof(sources[0]); ++source)
-    for (position = 0; position < 3; ++position)
+    for (position = 0; position < 3; ++position) {
+      struct snapshot expected_frames[3];
       for (filled = 0; filled < 2; ++filled)
-        if (case_editor(argv[1], sources[source], positions[position], filled))
+        if (case_editor(argv[1], sources[source], positions[position], filled,
+                        expected_frames))
           return 1;
+    }
   return errors != 0;
 }

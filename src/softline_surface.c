@@ -875,6 +875,12 @@ void sl_surface_reset_partial(sl_surface_t *surface) {
   surface->utf8_need = 0;
 }
 
+void sl_surface_reset_native_validation(sl_surface_t *surface) {
+  sl_surface_reset_partial(surface);
+  if (sl_surface_is_native(surface))
+    surface->osc8_open = surface->hyperlink != NULL;
+}
+
 void sl_surface_set_osc8(sl_surface_t *surface, int enabled) {
   if (surface)
     surface->osc8_enabled = enabled;
@@ -883,6 +889,10 @@ void sl_surface_set_osc8(sl_surface_t *surface, int enabled) {
 int sl_surface_hyperlink_active(const sl_surface_t *surface) {
   return surface && (surface->native_stream ? surface->hyperlink != NULL
                                             : surface->osc8_open);
+}
+
+int sl_surface_validated_hyperlink_active(const sl_surface_t *surface) {
+  return surface && surface->osc8_open;
 }
 
 int sl_surface_native_cursor_live(const sl_surface_t *surface) {

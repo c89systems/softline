@@ -28,6 +28,7 @@ typedef struct record {
   char id[128], revision[128], token[128], text[DEMO_PROMPT_MAX + 1];
   int held, edit_held;
 } record_t;
+static int completion_fd = -1;
 typedef struct peer {
   demo_link_t link;
   record_t entries[DEMO_ITEM_MAX];
@@ -45,12 +46,15 @@ typedef struct peer {
   size_t source_bytes;
   char last_source[3];
   char source_tail[64];
+  char message[128];
+  size_t turn_deltas, largest_delta;
+  double turn_start, first_delta, turn_end;
   unsigned long delay_us;
 } peer_t;
 static double now(void) {
   struct timespec ts;
   clock_gettime(CLOCK_MONOTONIC, &ts);
-  return (double)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+  return (double)ts.tv_sec * 1000 + ts.tv_nsec / 1000000.0;
 }
 static void copy(char *out, size_t size, const char *in) {
   snprintf(out, size, "%s", in ? in : "");
@@ -149,18 +153,32 @@ static int receive(peer_t *p) {
   } else if (kind == DEMO_PROMPT || kind == DEMO_OUTPUT ||
              kind == DEMO_OUTPUT_END || kind == DEMO_RESPONSE_BEGIN ||
              kind == DEMO_SEGMENT_END || kind == DEMO_MESSAGE ||
-             kind == DEMO_NOTE || kind == DEMO_SHELL || kind == DEMO_QUIT) {
-    const char *text = demo_string(&packet);
-    if (kind == DEMO_RESPONSE_BEGIN)
+             kind == DEMO_NOTE || kind == DEMO_SHELL || kind == DEMO_QUIT ||
+             kind == DEMO_TERMINAL_STATE) {
+    size_t length;
+    const char *text = kind == DEMO_OUTPUT ? demo_bytes(&packet, &length)
+                                           : demo_string(&packet);
+    if (kind == DEMO_RESPONSE_BEGIN) {
       p->active = 1;
-    if (kind == DEMO_OUTPUT_END)
+      p->turn_start = now();
+      p->turn_deltas = p->largest_delta = 0;
+    }
+    if (kind == DEMO_OUTPUT_END) {
       p->active = 0;
+      p->turn_end = now();
+    }
+    if (kind == DEMO_MESSAGE)
+      copy(p->message, sizeof(p->message), text);
     if (kind == DEMO_SHELL)
       ++p->shells;
     if (kind == DEMO_PROMPT && text && !strcmp(text, "/steer barrier"))
       ++p->barrier_steered;
     if (kind == DEMO_OUTPUT && text) {
       size_t i;
+      if (!p->turn_deltas++)
+        p->first_delta = now();
+      if (length > p->largest_delta)
+        p->largest_delta = length;
       for (i = 0; text[i]; ++i) {
         p->last_source[0] = p->last_source[1];
         p->last_source[1] = text[i];
@@ -177,7 +195,7 @@ static int receive(peer_t *p) {
     }
   } else
     goto fail;
-  if (packet.failed || packet.offset != packet.length)
+  if (!demo_packet_done(&packet))
     goto fail;
   demo_packet_free(&packet);
   return 0;
@@ -238,6 +256,89 @@ static int call_id(peer_t *p, sl_queue_request_t *r, unsigned long id) {
 static int call(peer_t *p, sl_queue_request_t *r) {
   return call_id(p, r, ++p->serial);
 }
+
+static int stream_offer(peer_t *p, const char *text) {
+  sl_queue_request_t r = {0};
+  r.operation = SL_QUEUE_OFFER;
+  r.text = text;
+  return call(p, &r) || p->status != SL_QUEUE_ACCEPTED;
+}
+
+static int stream_start(peer_t *p) {
+  demo_packet_t packet = {0};
+  int failed;
+  if (stream_offer(p, "measure response"))
+    return -1;
+  demo_put_number(&packet, DEMO_IDLE);
+  demo_put_number(&packet, 1);
+  failed = demo_link_queue(&p->link, &packet) || flush(p);
+  demo_packet_free(&packet);
+  if (failed)
+    return -1;
+  while (!p->active)
+    if (receive(p))
+      return -1;
+  return 0;
+}
+
+static int stream_case(peer_t *p, unsigned short port) {
+  size_t paced_bytes, direct_start, paced_deltas;
+  double start, paced_first, paced_time;
+  char tail[sizeof(p->source_tail)];
+
+  /* The owner has a 20 ms byte interval. The client's hint must not override
+   * it, including when we reconnect after toggling the active turn. */
+  p->delay_us = 1;
+  CHECK(!attach(p, port, "stream-controller"));
+  start = now();
+  CHECK(!stream_start(p));
+  while (p->active)
+    CHECK(!receive(p));
+  paced_bytes = p->source_bytes;
+  paced_deltas = p->turn_deltas;
+  paced_first = p->first_delta - start;
+  paced_time = p->turn_end - start;
+  CHECK(paced_bytes > 64 && p->largest_delta == 4 &&
+        p->turn_end - p->turn_start >= 10.0 * paced_bytes);
+  copy(tail, sizeof(tail), p->source_tail);
+
+  CHECK(!stream_start(p));
+  while (!p->turn_deltas)
+    CHECK(!receive(p));
+  CHECK(p->active && !stream_offer(p, "/stream"));
+  while (!*p->message)
+    CHECK(!receive(p));
+  CHECK(p->active && !strcmp(p->message, "Streaming mode: direct."));
+  while (p->active)
+    CHECK(!receive(p));
+  CHECK(p->largest_delta > 4);
+
+  demo_link_close(&p->link);
+  p->delay_us = 60000;
+  CHECK(!attach(p, port, "stream-controller") && !stream_start(p));
+  while (p->active)
+    CHECK(!receive(p));
+  CHECK(p->largest_delta > 4);
+
+  /* Every third reply adds a chart. The fourth ordinary reply is the same
+   * template as the first, so compare equal amounts of source. */
+  direct_start = p->source_bytes;
+  start = now();
+  CHECK(!stream_start(p));
+  while (p->active)
+    CHECK(!receive(p));
+  CHECK(p->source_bytes - direct_start == paced_bytes &&
+        !strcmp(tail, p->source_tail) && p->largest_delta > 4 &&
+        p->turn_deltas < paced_deltas);
+  printf("Loopback TCP/CBOR (%lu bytes): LLM %.3f ms first delta, %.3f ms "
+         "total, %lu records; direct %.3f ms first delta, %.3f ms total, "
+         "%lu records.\n",
+         (unsigned long)paced_bytes, paced_first, paced_time,
+         (unsigned long)paced_deltas, p->first_delta - start,
+         p->turn_end - start, (unsigned long)p->turn_deltas);
+  return 0;
+}
+
 /* STOP and a direct offer update readiness as part of the acknowledged change.
  * With dispatch gated, a later snapshot must not reveal a duplicate refresh. */
 static int readiness_case(peer_t *p, unsigned short port) {
@@ -573,20 +674,21 @@ static int frontend_case(peer_t *p, unsigned short port) {
   return 0;
 }
 static int framing(void) {
+  static const unsigned char payload[] = {0x81, 0x64, 't', 'e', 's', 't'};
   int pair[2], i;
   demo_link_t link;
   demo_packet_t packet = {0}, received = {0};
   uint32_t length;
   CHECK(!socketpair(AF_UNIX, SOCK_STREAM, 0, pair) && !demo_nonblock(pair[0]));
   demo_link_init(&link, pair[0]);
-  length = htonl(4);
+  length = htonl(sizeof(payload));
   CHECK(write(pair[1], &length, 2) == 2 &&
         demo_link_read(&link, &received) == 0);
   CHECK(write(pair[1], (char *)&length + 2, 2) == 2 &&
         demo_link_read(&link, &received) == 0);
-  CHECK(write(pair[1], "test", 4) == 4 &&
+  CHECK(write(pair[1], payload, sizeof(payload)) == (ssize_t)sizeof(payload) &&
         demo_link_read(&link, &received) == 1);
-  CHECK(received.length == 4 && !memcmp(received.data, "test", 4));
+  CHECK(!strcmp(demo_string(&received), "test") && demo_packet_done(&received));
   demo_packet_free(&received);
   demo_put_number(&packet, DEMO_PTY_DATA);
   demo_put_bytes(&packet, "\000\033\377", 3);
@@ -796,6 +898,11 @@ static int shell_case(peer_t *p, unsigned short port) {
    * Start this seam test with its own response, not that finishing turn. */
   while (p->active)
     CHECK(!receive(p));
+  {
+    char completed[32];
+    while (read(completion_fd, completed, sizeof(completed)) > 0) {
+    }
+  }
   memset(&request, 0, sizeof(request));
   request.operation = SL_QUEUE_CLEAR;
   CHECK(!call(p, &request) && p->status == SL_QUEUE_ACCEPTED);
@@ -818,9 +925,17 @@ static int shell_case(peer_t *p, unsigned short port) {
     CHECK(!receive(p));
   CHECK(p->active && !strcmp(p->last_source, "\n\n"));
   before = p->source_bytes;
-  /* Leave this subscription unread for longer than both 2 ms/character
-   * responses. Both turns must finish without output backpressure. */
-  (void)poll(NULL, 0, 1000);
+  /* Keep the subscription unread while an independent fixture pipe observes
+   * both producer completions, including any variable-length chart segment. */
+  {
+    int completed;
+    double deadline = now() + 10000;
+    for (completed = 0; completed < 2; ++completed) {
+      char byte;
+      CHECK(!wait_fd(completion_fd, POLLIN, deadline));
+      CHECK(read(completion_fd, &byte, 1) == 1);
+    }
+  }
   demo_link_close(&p->link);
   CHECK(!attach(p, port, "shell-controller"));
   CHECK(!p->active && !p->count && before == p->source_bytes);
@@ -960,6 +1075,7 @@ static int terminal_disconnect_case(peer_t *p, unsigned short port,
   demo_put_number(&packet, DEMO_PTY_OPEN);
   demo_put_number(&packet, 12);
   demo_put_number(&packet, 80);
+  demo_put_string(&packet, "xterm-256color");
   CHECK(!demo_link_queue(&p->link, &packet) && !flush(p));
   deadline = now() + 2000;
   for (;;) {
@@ -1025,13 +1141,16 @@ int main(int argc, char **argv) {
   int startup[2], status, result, port;
   FILE *output;
   char line[128];
+  int completion[2];
   pid_t child;
   peer_t *p;
   int terminal_only = argc == 3 && !strcmp(argv[1], "disconnect");
   int readiness_only = argc == 3 && !strcmp(argv[1], "readiness");
-  const char *owner_path = terminal_only || readiness_only ? argv[2]
-                           : argc == 2                     ? argv[1]
-                                                           : NULL;
+  int stream_only = argc == 3 && !strcmp(argv[1], "stream");
+  const char *owner_path = terminal_only || readiness_only || stream_only
+                               ? argv[2]
+                           : argc == 2 ? argv[1]
+                                       : NULL;
   if (argc == 2 && !strcmp(argv[1], "-i"))
     return nonreader_shell();
   if (argc == 2 && !strcmp(argv[1], "closed-peer"))
@@ -1046,13 +1165,28 @@ int main(int argc, char **argv) {
   CHECK(waitpid(child, &status, 0) == child && WIFEXITED(status) &&
         WEXITSTATUS(status) == 1);
   CHECK(!pipe(startup));
+  {
+    CHECK(!pipe(completion));
+    completion_fd = completion[0];
+    CHECK(!demo_nonblock(completion_fd));
+    {
+      char number[32];
+      snprintf(number, sizeof(number), "%d", completion[1]);
+      CHECK(!setenv("SOFTLINE_CHAT_TEST_COMPLETION_FD", number, 1));
+    }
+  }
   child = fork();
   CHECK(child >= 0);
   if (!child) {
+    close(completion[0]);
     dup2(startup[1], STDOUT_FILENO);
     close(startup[0]);
     close(startup[1]);
     setenv("SOFTLINE_CHAT_APPROVAL_DEMO", "0", 1);
+    if (stream_only)
+      setenv("SOFTLINE_CHAT_CHAR_MS", "20", 1);
+    else
+      unsetenv("SOFTLINE_CHAT_CHAR_MS");
     setenv("SOFTLINE_CHAT_TEST_SIGNALS", "1", 1);
     setenv("SHELL", terminal_only ? argv[0] : "/bin/sh", 1);
     setenv("ENV", "", 1);
@@ -1061,6 +1195,8 @@ int main(int argc, char **argv) {
     _exit(127);
   }
   close(startup[1]);
+  close(completion[1]);
+  unsetenv("SOFTLINE_CHAT_TEST_COMPLETION_FD");
   output = fdopen(startup[0], "r");
   CHECK(output && fgets(line, sizeof(line), output) &&
         sscanf(line, "LISTEN 127.0.0.1 %d", &port) == 1);
@@ -1073,6 +1209,8 @@ int main(int argc, char **argv) {
              terminal_disconnect_case(p, (unsigned short)port, 1);
   else if (readiness_only)
     result = readiness_case(p, (unsigned short)port);
+  else if (stream_only)
+    result = stream_case(p, (unsigned short)port);
   else {
     result = large_owner_case(p, (unsigned short)port);
     if (!result)
@@ -1095,6 +1233,7 @@ int main(int argc, char **argv) {
   kill(child, SIGTERM);
   CHECK(waitpid(child, &status, 0) == child);
   fclose(output);
+  close(completion_fd);
   CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
   return result;
 }

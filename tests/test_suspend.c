@@ -1,4 +1,5 @@
 #define _DEFAULT_SOURCE
+#include "silent_cursor_probe.h"
 #include <pty.h>
 #include <softline/softline.h>
 #include <stdio.h>
@@ -982,6 +983,12 @@ static int draft_shortcuts(int native) {
        sizeof("prefix café\n中文") - 1},
       {"abc", "\033k\033j\033j", "abcabc", 1, 6},
       {"abc", "\033k\033k\033j", "abc", 1, 3},
+      {"   ", "\033k", "   ", 1, 1},
+      {"\t \n\r\v\f", "\033K", "\t \n\r\v\f", 2, 2},
+      {"abc", "\033k \033k\033j", " abc", 1, 4},
+      {"abc", "\033k\033[200~ \t\n\033[201~\033K\033J", " \t\nabc", 1, 6},
+      {"abc", "\033k \033k\037\033j", "abc", 1, 3},
+      {" \tword\n ", "\033k\033j", " \tword\n ", 2, 8},
       {"abc", "\033ksecond\033k\033j", "second", 1, 6},
       {"café\n中文", "\033k\037", "café\n中文", 1, 1},
       {"abc", "\033kprefix\001\033j\037", "prefix", 1, 0},

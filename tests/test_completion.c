@@ -1,5 +1,6 @@
 #define _DEFAULT_SOURCE
 #include "completion_fixture.h"
+#include "pty_peer.h"
 #include <pty.h>
 #include <softline/softline.h>
 #include <stdio.h>
@@ -40,6 +41,7 @@ static const struct completion_item candidates[] = {
     {"e\314\200tre", SL_COMPLETION_WORD}};
 
 struct driver {
+  struct pty_peer peer;
   int master, calls, phase;
   const char *initial, *keys;
   size_t cursor;
@@ -206,8 +208,10 @@ static int run(int native, const char *initial, size_t cursor, const char *keys,
     CHECK(sl_prompt_queue_append(sl, "ver", 1, &id) == SL_OK);
   CHECK(sl_watch_add(sl, wake[0], SL_WATCH_READ, drive, &d, &watch) == SL_OK);
   CHECK(write(wake[1], "x", 1) == 1);
-  if (native)
+  if (native) {
+    CHECK(!pty_peer_start(&d.peer, master));
     CHECK(sl_output_stream_begin(sl) == SL_OK);
+  }
   line = native ? sl_next_prompt(sl, "> ", NULL) : sl_readline(sl, "> ");
   if (scenario == HELD_EDIT) {
     CHECK(!line && sl_last_readline_status(sl) == SL_READLINE_SUSPENDED);
@@ -240,6 +244,8 @@ static int run(int native, const char *initial, size_t cursor, const char *keys,
     }
   }
   sl_destroy(sl);
+  if (native)
+    CHECK(!pty_peer_stop(&d.peer));
   close(wake[0]);
   close(wake[1]);
   close(master);
@@ -408,8 +414,10 @@ static int provider_cases(int native) {
     CHECK(sl_watch_add(sl, wake[0], SL_WATCH_READ, drive, &data.driver,
                        &watch) == SL_OK);
     CHECK(write(wake[1], "x", 1) == 1);
-    if (native)
+    if (native) {
+      CHECK(!pty_peer_start(&data.driver.peer, master));
       CHECK(sl_output_stream_begin(sl) == SL_OK);
+    }
     line = sl_readline(sl, "> ");
     if (data.kind == 7) {
       CHECK(!line && sl_last_readline_status(sl) == SL_READLINE_SUSPENDED);
@@ -436,6 +444,8 @@ static int provider_cases(int native) {
       sl_free_string(sl, line);
     }
     sl_destroy(sl);
+    if (native)
+      CHECK(!pty_peer_stop(&data.driver.peer));
     close(master);
     close(slave);
     close(wake[0]);
@@ -602,8 +612,10 @@ static int expansion_cases(int native) {
     CHECK(sl_watch_add(sl, wake[0], SL_WATCH_READ, drive, &data.driver,
                        &watch) == SL_OK);
     CHECK(write(wake[1], "x", 1) == 1);
-    if (native)
+    if (native) {
+      CHECK(!pty_peer_start(&data.driver.peer, data.driver.master));
       CHECK(sl_output_stream_begin(sl) == SL_OK);
+    }
     line = sl_readline(sl, "> ");
     if (data.kind == 12) {
       CHECK(!line && sl_last_readline_status(sl) == SL_READLINE_SUSPENDED);
@@ -627,6 +639,8 @@ static int expansion_cases(int native) {
     }
     sl_free_string(sl, line);
     sl_destroy(sl);
+    if (native)
+      CHECK(!pty_peer_stop(&data.driver.peer));
     close(data.driver.master);
     close(slave);
     close(wake[0]);
@@ -719,8 +733,10 @@ static int completion_suspend(void) {
           CHECK(sl_prompt_queue_append(sl, "@a", 1, &id) == SL_OK);
         CHECK(sl_watch_add(sl, wake[0], SL_WATCH_READ, drive, &d, &watch) ==
               SL_OK);
-        if (native)
+        if (native) {
+          CHECK(!pty_peer_start(&d.peer, d.master));
           CHECK(sl_output_stream_begin(sl) == SL_OK);
+        }
         d.keys = cases[i].keys;
         CHECK(write(wake[1], "x", 1) == 1);
         CHECK(!sl_readline(sl, "> ") &&
@@ -756,6 +772,8 @@ static int completion_suspend(void) {
         }
         sl_free_string(sl, line);
         sl_destroy(sl);
+        if (native)
+          CHECK(!pty_peer_stop(&d.peer));
         close(d.master);
         close(slave);
         close(wake[0]);

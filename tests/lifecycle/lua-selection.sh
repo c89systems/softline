@@ -6,6 +6,10 @@ work=$(mktemp -d "$root/build/lua-selection.XXXXXX")
 trap 'rm -rf "$work"' EXIT
 mkdir -p "$work/scripts" "$work/commands" "$work/build/lua-sdk/lib/pkgconfig"
 cp "$root/scripts/"{lua-test.sh,lua-debug.sh,require-host-bash.sh,require-workspace.sh} "$work/scripts/"
+cat > "$work/scripts/terminal-test-env.sh" <<'SH'
+#!/bin/sh
+exec "$@"
+SH
 cat > "$work/scripts/native-linux-target.sh" <<'SH'
 #!/bin/sh
 [ "$SELECT_BOOTLIN" = 1 ] || exit 1

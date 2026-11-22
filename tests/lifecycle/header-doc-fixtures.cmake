@@ -1,7 +1,8 @@
 cmake_minimum_required(VERSION 3.24)
 set(work "${ROOT}/build/host-tests/header-doc-fixture")
 file(REMOVE_RECURSE "${work}")
-foreach(relative include/softline/softline.h cmake/softline_version.h.in
+foreach(relative include/softline/softline.h include/softline/www.h include/softline/terminal.h include/softline/transcript.h
+    include/softline/cbor.h cmake/softline_version.h.in
     cmake/softline.exports lua/softline_lua.c lua/README.md README.md CMakeLists.txt)
   get_filename_component(directory "${work}/${relative}" DIRECTORY)
   file(MAKE_DIRECTORY "${directory}")
@@ -59,5 +60,16 @@ file(WRITE "${work}/include/softline/softline.h" "${header}")
 string(REGEX REPLACE "/\\*([^*]|\\*+[^*/])*\\*+/" "" stripped "${version}")
 file(WRITE "${work}/cmake/softline_version.h.in" "${stripped}")
 check(version_comments_removed "cmake/softline_version[.]h[.]in")
+file(WRITE "${work}/cmake/softline_version.h.in" "${version}")
+file(READ "${ROOT}/include/softline/transcript.h" transcript)
+string(REPLACE "/** Nonzero handle-local identity" "/* Nonzero handle-local identity"
+  modified "${transcript}")
+file(WRITE "${work}/include/softline/transcript.h" "${modified}")
+check(transcript_id_comment_removed sl_transcript_id_t)
+file(WRITE "${work}/include/softline/transcript.h" "${transcript}")
+file(READ "${ROOT}/include/softline/cbor.h" cbor)
+string(REPLACE "/** @file" "/* @file" modified "${cbor}")
+file(WRITE "${work}/include/softline/cbor.h" "${modified}")
+check(cbor_file_comment_removed "include/softline/cbor[.]h")
 file(REMOVE_RECURSE "${work}")
 message(STATUS "Attached Doxygen checks reject missing, ordinary and detached comments across public declarations")

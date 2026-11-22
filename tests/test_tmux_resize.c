@@ -243,7 +243,7 @@ static int fixture_case(const char *tmux, const char *fixture,
       native_cursor = atoi(cursor);
       t.expected_prompt = height - 1;
       owned = owned_row(&native, 0);
-      delay(.03);
+      CHECK(recorded_frame(&t, 0, raw, sizeof(raw)) == 0);
       mark = recording_size(&t);
       CHECK(write(t.command_fd, "b", 1) == 1);
       CHECK(exchange(&t, 'v', width, height, draft_tail) == 0);
@@ -281,8 +281,7 @@ static int fixture_case(const char *tmux, const char *fixture,
                              ? actual_owned - native_cursor - 1
                              : 0));
       }
-      delay(.03);
-      CHECK(recording(&t, mark, raw, sizeof(raw)) == 0);
+      CHECK(recorded_frame(&t, mark, raw, sizeof(raw)) == 0);
       if (flags & QUOTED) {
         CHECK(capture(&t, &history, 1, 0) == 0);
         snprintf(submitted, sizeof(submitted), "> %s", quote[document]);

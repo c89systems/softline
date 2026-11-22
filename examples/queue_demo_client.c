@@ -1,9 +1,11 @@
 #define _POSIX_C_SOURCE 200809L
 #include "queue_demo_client.h"
+#include "queue_demo_image.h"
 #include "queue_demo_terminal.h"
 #include "queue_demo_wire.h"
 #include <arpa/inet.h>
 #include <errno.h>
+#include <limits.h>
 #include <netinet/tcp.h>
 #include <poll.h>
 #include <stdio.h>
@@ -14,6 +16,8 @@
 #include <unistd.h>
 
 struct demo_client {
+  demo_result_fn result;
+  void *result_context;
   sl_t *editor;
   sl_queue_backend_t backend;
   demo_link_t link;
@@ -27,6 +31,14 @@ struct demo_client {
   unsigned int delay_us, interval_ms, seed;
   int approvals, idle_announced, input_empty;
   int state;
+  sl_image_paste_id_t image_id, image_terminal_id;
+  sl_t *image_editor;
+  unsigned long image_wire_id, image_serial;
+  size_t image_sent;
+  int image_wait, image_paused, image_ended, image_end_sent,
+      image_terminal_kind;
+  int image_event;
+  char image_reason[160];
   char name[64];
   sl_queue_entry_t entries[DEMO_ITEM_MAX];
 };
@@ -43,6 +55,191 @@ static int wake(demo_client_t *c) {
              ? SL_OK
              : SL_ERROR_IO;
 }
+static void image_clear(demo_client_t *c) {
+  c->image_id = 0;
+  c->image_editor = NULL;
+  c->image_wire_id = 0;
+  c->image_sent = 0;
+  c->image_wait = c->image_paused = c->image_ended = c->image_end_sent = 0;
+}
+static int image_terminal_queue(demo_client_t *c) {
+  demo_packet_t packet = {0};
+  if (!c->image_terminal_id)
+    return SL_OK;
+  demo_put_number(&packet, (unsigned long)c->image_terminal_kind);
+  demo_put_number(&packet, c->image_terminal_id);
+  if (demo_link_queue(&c->link, &packet)) {
+    demo_packet_free(&packet);
+    return SL_ERROR_FULL;
+  }
+  demo_packet_free(&packet);
+  c->image_terminal_id = 0;
+  return SL_OK;
+}
+int demo_client_image_event(demo_client_t *c, sl_t *editor,
+                            const sl_image_paste_event_t *e) {
+  demo_packet_t p = {0};
+  if (e->operation == SL_IMAGE_PASTE_ABORT ||
+      e->operation == SL_IMAGE_PASTE_DONE) {
+    if (editor == c->image_editor && e->id == c->image_id) {
+      c->image_event = e->operation == SL_IMAGE_PASTE_DONE ? DEMO_IMAGE_FINISHED
+                                                           : DEMO_IMAGE_FAILED;
+      (void)snprintf(c->image_reason, sizeof(c->image_reason), "%s",
+                     e->reason ? e->reason : "");
+      if (c->connected) {
+        c->image_terminal_id = c->image_wire_id;
+        c->image_terminal_kind = e->operation == SL_IMAGE_PASTE_DONE
+                                     ? DEMO_IMAGE_DONE
+                                     : DEMO_IMAGE_ABORT;
+      }
+      image_clear(c);
+    }
+    return wake(c);
+  }
+  if (!c->connected || c->state != DEMO_READY)
+    return SL_ERROR_IO;
+  if (e->operation == SL_IMAGE_PASTE_BEGIN) {
+    if (c->image_id || c->image_serial == ULONG_MAX ||
+        c->link.count >= DEMO_OUT_MAX - 2)
+      return SL_ERROR_FULL;
+    /* Preserve wire order when the next selected image arrives before the
+     * owner loop has serviced the previous DONE/ABORT wakeup. Copy only. */
+    if (image_terminal_queue(c) != SL_OK)
+      return SL_ERROR_FULL;
+    c->image_id = e->id;
+    c->image_editor = editor;
+    c->image_wire_id = ++c->image_serial;
+    c->image_wait = 1;
+    demo_put_number(&p, DEMO_IMAGE_BEGIN);
+    demo_put_number(&p, c->image_wire_id);
+    demo_put_string(&p, e->media_type);
+  } else if (e->operation == SL_IMAGE_PASTE_DATA && e->id == c->image_id &&
+             editor == c->image_editor) {
+    if (e->offset != c->image_sent)
+      return SL_ERROR_INVALID;
+    if (c->image_wait || c->link.count >= DEMO_OUT_MAX - 2) {
+      c->image_paused = 1;
+      return SL_ERROR_NOT_READY;
+    }
+    demo_put_number(&p, DEMO_IMAGE_DATA);
+    demo_put_number(&p, c->image_wire_id);
+    demo_put_number(&p, (unsigned long)e->offset);
+    demo_put_image_bytes(&p, e->data, e->length);
+  } else if (e->operation == SL_IMAGE_PASTE_END && e->id == c->image_id &&
+             editor == c->image_editor) {
+    if (e->offset != c->image_sent)
+      return SL_ERROR_INVALID;
+    c->image_ended = 1;
+    c->image_event = DEMO_IMAGE_STORING;
+    return wake(c);
+  } else
+    return SL_ERROR_INVALID;
+  if (demo_link_queue(&c->link, &p)) {
+    demo_packet_free(&p);
+    return SL_ERROR_IO;
+  }
+  if (e->operation == SL_IMAGE_PASTE_DATA) {
+    c->image_sent += e->length;
+    c->image_wait = 1;
+  } else
+    c->image_event = DEMO_IMAGE_STARTED;
+  /* No editor calls or socket/file I/O inside Softline's callback. */
+  return wake(c);
+}
+static int image_callback(void *context, const sl_image_paste_event_t *e) {
+  demo_client_t *c = context;
+  return demo_client_image_event(c, c->editor, e);
+}
+int demo_client_image_config(demo_client_t *c, sl_config_t *config) {
+  size_t limit;
+  if (!c || !config || demo_image_limit(&limit)) {
+    fprintf(stderr,
+            "SOFTLINE_CHAT_IMAGE_MAX_BYTES must be 0..%d (0 selects 32 MiB)\n",
+            INT_MAX);
+    return SL_ERROR_INVALID;
+  }
+  config->image_paste_callback = image_callback;
+  config->image_paste_context = c;
+  config->image_paste_max_bytes = limit;
+  return SL_OK;
+}
+static int image_service(demo_client_t *c) {
+  demo_packet_t p = {0};
+  if (c->image_event) {
+    int event = c->image_event;
+    c->image_event = 0;
+    if (c->handler &&
+        c->handler(c->handler_context, event,
+                   *c->image_reason ? c->image_reason : NULL) != SL_OK)
+      return SL_ERROR_IO;
+    c->image_reason[0] = 0;
+  }
+  if (!c->connected)
+    return SL_OK;
+  if (c->image_terminal_id && c->link.count < DEMO_OUT_MAX) {
+    if (image_terminal_queue(c) != SL_OK) {
+      return SL_ERROR_IO;
+    }
+  }
+  if (c->image_id && !c->image_wait && c->image_ended && !c->image_end_sent &&
+      c->link.count < DEMO_OUT_MAX) {
+    demo_put_number(&p, DEMO_IMAGE_END);
+    demo_put_number(&p, c->image_wire_id);
+    demo_put_number(&p, (unsigned long)c->image_sent);
+    if (demo_link_queue(&c->link, &p)) {
+      demo_packet_free(&p);
+      return SL_ERROR_IO;
+    }
+    c->image_end_sent = 1;
+  }
+  if (c->image_id && c->image_paused && !c->image_wait &&
+      c->link.count < DEMO_OUT_MAX - 2) {
+    c->image_paused = 0;
+    (void)c->image_editor->image_paste_resume(c->image_editor, c->image_id);
+  }
+  return SL_OK;
+}
+static int image_receive(demo_client_t *c, unsigned long kind,
+                         demo_packet_t *p) {
+  unsigned long id = demo_number(p);
+  unsigned long offset = 0;
+  const char *path = NULL, *reason = NULL;
+  if (kind == DEMO_IMAGE_READY)
+    offset = demo_number(p);
+  else {
+    path = demo_string(p);
+    reason = demo_string(p);
+  }
+  if (!demo_packet_done(p) || !id ||
+      (kind == DEMO_IMAGE_RESULT && ((!path && !reason) || (path && reason))))
+    return -1;
+  if (id != c->image_wire_id || !c->image_editor)
+    return 0; /* Late replies cannot affect a cancelled or subsequent paste. */
+  id = c->image_id;
+  if (kind == DEMO_IMAGE_READY) {
+    if (!c->image_wait || offset != c->image_sent)
+      return -1;
+    c->image_wait = 0;
+  } else if (!path) {
+    size_t i;
+    if (c->image_ended)
+      (void)c->image_editor->image_paste_complete(c->image_editor, id, NULL,
+                                                  reason);
+    else
+      (void)c->image_editor->image_paste_cancel(c->image_editor, id);
+    /* Preserve the backend diagnostic for the host, without presenting it. */
+    for (i = 0; i + 1 < sizeof(c->image_reason) && reason[i]; ++i) {
+      unsigned char ch = (unsigned char)reason[i];
+      c->image_reason[i] = ch >= 32 && ch < 127 ? (char)ch : '?';
+    }
+    c->image_reason[i] = 0;
+  } else if (!c->image_end_sent ||
+             c->image_editor->image_paste_complete(c->image_editor, id, path,
+                                                   NULL) != SL_OK) {
+    (void)c->image_editor->image_paste_cancel(c->image_editor, id);
+  }
+  return 0;
+}
 static int notify(demo_client_t *c, int state) {
   if (c->state == state)
     return SL_OK;
@@ -56,6 +253,10 @@ static int close_transport(demo_client_t *c) {
   c->socket_watch = 0;
   c->connected = c->connecting = 0;
   demo_link_close(&c->link);
+  if (c->image_editor && c->image_id)
+    (void)c->image_editor->image_paste_cancel(c->image_editor, c->image_id);
+  image_clear(c);
+  c->image_terminal_id = 0;
   if (c->editor) {
     memset(&change, 0, sizeof(change));
     change.kind = SL_QUEUE_DISCONNECTED;
@@ -82,13 +283,23 @@ static int request(void *context, const sl_queue_request_t *r) {
   if (!c->connected)
     return SL_ERROR_NOT_READY;
   c->idle_announced = 0;
-  demo_put_request(&p, r);
+  demo_put_pinned_request(&p, c->editor, r);
+  if (p.failed) {
+    demo_packet_free(&p);
+    return SL_ERROR_FULL;
+  }
+  /* Wake before transferring the packet so a wake failure cannot leave a
+   * queued request that Softline was told had failed. */
+  if (wake(c) != SL_OK) {
+    demo_packet_free(&p);
+    return SL_ERROR_IO;
+  }
   if (demo_link_queue(&c->link, &p)) {
     demo_packet_free(&p);
     return SL_ERROR_FULL;
   }
   /* No editor calls, network waits or socket I/O on this callback path. */
-  return wake(c);
+  return SL_OK;
 }
 static void detach(void *context) {
   demo_client_t *c = context;
@@ -128,18 +339,22 @@ static void resolve(demo_client_t *c) {
 static int receive(demo_client_t *c, demo_packet_t *p) {
   unsigned long kind = demo_number(p);
   int status = SL_OK;
+  if (kind == DEMO_IMAGE_READY || kind == DEMO_IMAGE_RESULT)
+    return image_receive(c, kind, p);
   if (kind == DEMO_RESULT) {
     sl_queue_result_t r;
     demo_get_result(p, &r);
-    if (p->failed || p->offset != p->length)
+    if (!demo_packet_done(p))
       return -1;
     status = sl_queue_backend_result(c->editor, &r);
+    if (status == SL_OK && c->result)
+      c->result(c->result_context, &r);
     if (status == SL_OK)
       resolve(c);
   } else if (kind == DEMO_CHANGE) {
     sl_queue_change_t change;
     if (demo_get_change(p, &change, c->entries, DEMO_ITEM_MAX) ||
-        p->offset != p->length)
+        !demo_packet_done(p))
       return -1;
     status = sl_queue_backend_update(c->editor, &change);
     if (status == SL_ERROR_CONFLICT)
@@ -154,9 +369,13 @@ static int receive(demo_client_t *c, demo_packet_t *p) {
   } else if (kind == DEMO_PROMPT || kind == DEMO_OUTPUT ||
              kind == DEMO_OUTPUT_END || kind == DEMO_RESPONSE_BEGIN ||
              kind == DEMO_SEGMENT_END || kind == DEMO_MESSAGE ||
-             kind == DEMO_NOTE || kind == DEMO_SHELL || kind == DEMO_QUIT) {
-    const char *text = demo_string(p);
-    if (p->failed || p->offset != p->length ||
+             kind == DEMO_NOTE || kind == DEMO_SHELL || kind == DEMO_QUIT ||
+             kind == DEMO_TERMINAL_STATE) {
+    size_t length;
+    const char *text =
+        kind == DEMO_OUTPUT ? demo_bytes(p, &length) : demo_string(p);
+    if (!demo_packet_done(p) ||
+        (kind == DEMO_OUTPUT && text && memchr(text, 0, length)) ||
         (!text &&
          (kind == DEMO_PROMPT || kind == DEMO_OUTPUT || kind == DEMO_NOTE)))
       return -1;
@@ -212,6 +431,8 @@ static int socket_ready(sl_t *sl, const sl_watch_event_t *event,
     }
     demo_packet_free(&p);
   }
+  if (image_service(c) != SL_OK)
+    return lost(c);
   interest(c);
   return SL_OK;
 }
@@ -266,6 +487,8 @@ static int wake_ready(sl_t *sl, const sl_watch_event_t *event, void *context) {
   }
   if (c->connected && demo_link_flush(&c->link))
     return lost(c);
+  if (image_service(c) != SL_OK)
+    return lost(c);
   interest(c);
   return SL_OK;
 }
@@ -307,6 +530,13 @@ void demo_client_options(demo_client_t *c, unsigned int delay_us, int approvals,
   c->approvals = approvals;
   c->interval_ms = interval_ms;
   c->seed = seed;
+}
+void demo_client_results(demo_client_t *c, demo_result_fn callback,
+                         void *context) {
+  if (c) {
+    c->result = callback;
+    c->result_context = context;
+  }
 }
 int demo_client_idle(demo_client_t *c) {
   sl_queue_backend_info_t info;
@@ -369,6 +599,8 @@ int demo_client_service(demo_client_t *c, int timeout_ms) {
   }
   if (!c->connected && !c->connecting)
     return SL_ERROR_NOT_READY;
+  if (image_service(c) != SL_OK)
+    return lost(c);
   if (c->connected && demo_link_flush(&c->link)) {
     lost(c);
     return SL_ERROR_IO;

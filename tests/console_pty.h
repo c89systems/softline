@@ -96,7 +96,14 @@ static int start(struct editor *e, const char *relative, const char *arg1,
       close(slave);
     if (chdir(working_directory ? working_directory : root))
       _exit(126);
-    if (c_chat && remote_owner)
+    if (c_chat && getenv("SOFTLINE_TEST_TERMINAL_SUPERVISOR")) {
+      const char *supervisor = getenv("SOFTLINE_TEST_TERMINAL_SUPERVISOR");
+      if (remote_owner)
+        execl(supervisor, supervisor, "--", executable, "127.0.0.1",
+              remote_owner_port, (char *)NULL);
+      else
+        execl(supervisor, supervisor, "--", executable, (char *)NULL);
+    } else if (c_chat && remote_owner)
       execl(executable, executable, "127.0.0.1", remote_owner_port,
             (char *)NULL);
     else if (c_chat)

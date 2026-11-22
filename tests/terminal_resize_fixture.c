@@ -1,10 +1,12 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "softline/softline.h"
+#include "terminal_resize_protocol.h"
 #include <libmdf/mdf.h>
 
 #include <errno.h>
 #include <fcntl.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
@@ -41,7 +43,16 @@ struct fixture {
   int escape;
   int commands;
   int acknowledgments;
+  unsigned long sequence;
 };
+
+static int acknowledge(struct fixture *fixture, const unsigned char reply[6]) {
+  char marker[64];
+  int length =
+      snprintf(marker, sizeof(marker), TEST_FRAME_MARKER, ++fixture->sequence);
+  return write(STDOUT_FILENO, marker, (size_t)length) == length &&
+         write(fixture->acknowledgments, reply, 6) == 6;
+}
 
 /* Exercise the live-output API before its first editor frame. */
 static int producer_only(struct fixture *fixture, int document) {
@@ -76,8 +87,7 @@ static int producer_only(struct fixture *fixture, int document) {
     reply[3] = (unsigned char)(size.ws_row >> 8);
     reply[4] = (unsigned char)size.ws_row;
     reply[5] = 0;
-    if (write(fixture->acknowledgments, reply, sizeof(reply)) !=
-        (ssize_t)sizeof(reply))
+    if (!acknowledge(fixture, reply))
       return 2;
     do {
       received = read(fixture->commands, &command, 1);
@@ -171,9 +181,7 @@ static int ready(sl_t *sl, const sl_watch_event_t *event, void *userdata) {
   acknowledgment[3] = (unsigned char)(size.ws_row >> 8);
   acknowledgment[4] = (unsigned char)size.ws_row;
   acknowledgment[5] = (unsigned char)fixture->line_open;
-  if (result != SL_OK ||
-      write(fixture->acknowledgments, acknowledgment, sizeof(acknowledgment)) !=
-          (ssize_t)sizeof(acknowledgment))
+  if (result != SL_OK || !acknowledge(fixture, acknowledgment))
     return SL_ERROR_IO;
   if (pause && (read(fixture->commands, &command, 1) != 1 || command != 'b'))
     return SL_ERROR_IO;
@@ -202,6 +210,7 @@ int main(int argc, char **argv) {
   sl_config_init(&config);
   config.prompt_theme = SL_PROMPT_THEME_PLAIN;
   config.prompt_queue = 1;
+  config.prompt_queue_display_delay_ms = 0;
   config.statusline = argc == 4;
   fixture.sl = sl_create_with_config(&config);
   if (argc == 5) {

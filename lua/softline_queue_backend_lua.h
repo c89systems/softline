@@ -186,7 +186,6 @@ static int softline_lua_queue_backend_request(lua_State *L) {
   sl_queue_request_t request;
   sl_queue_request_id_t id;
   int status;
-  lua_State *previous;
   luaL_checktype(L, 2, LUA_TTABLE);
   if (!lua_checkstack(L, 16))
     return luaL_error(L, "backend request stack allocation failed");
@@ -203,10 +202,7 @@ static int softline_lua_queue_backend_request(lua_State *L) {
   request.queue_revision = backend_string(L, 2, "queue_revision", 1);
   request.edit_token = backend_string(L, 2, "edit_token", 1);
   request.text = backend_string(L, 2, "text", 1);
-  previous = handle->L;
-  handle->L = L;
   status = sl_queue_backend_request(handle->sl, &request, &id);
-  handle->L = previous;
   if (status != SL_OK)
     return softline_lua_status(L, status);
   lua_pushinteger(L, (lua_Integer)id);

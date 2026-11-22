@@ -168,6 +168,34 @@ cleanup:
   close_editor(&e);
   return failed;
 }
+static int libmdf_stream(void) {
+  struct editor e;
+  char modules[4096];
+  const char *slash = strrchr(executable, '/');
+  int failed = 0;
+  memset(&e, 0, sizeof(e));
+  e.master = -1;
+  REQUIRE(slash && snprintf(modules, sizeof(modules), "%.*s/libmdf",
+                            (int)(slash - executable),
+                            executable) < (int)sizeof(modules));
+  test_rows = 24;
+  test_columns = 80;
+  REQUIRE(start(&e, "tests/lua_libmdf_stream.lua", modules, NULL) == 0);
+  REQUIRE(wait_for(&e, "MDF-LUA-FIRST", 0) == 0);
+  REQUIRE(!contains(&e, "MDF-LUA-LAST", 0));
+  REQUIRE(send_bytes(&e, "draft") == 0);
+  REQUIRE(wait_for(&e, "MDF-LUA-LAST", 0) == 0);
+  REQUIRE(contains(&e, "Build", 0) && contains(&e, "Review", 0));
+  REQUIRE(!contains(&e, "mdf-bar-chart", 0) &&
+          !contains(&e, "mdf-tile-chart", 0));
+  REQUIRE(wait_for(&e, "MDF-LUA-EOF", 0) == 0);
+  REQUIRE(send_bytes(&e, "\r") == 0);
+  REQUIRE(wait_for(&e, "Lua libmdf streaming passed:", 0) == 0);
+  REQUIRE(finish(&e) == 0);
+cleanup:
+  close_editor(&e);
+  return failed;
+}
 static int watch(void) {
   struct editor e;
   int failed = 0, scenario;
@@ -195,8 +223,8 @@ static int watch(void) {
       REQUIRE(wait_for(&e, "[operation] processing input.", offset) == 0);
       offset = e.length;
       REQUIRE(send_bytes(&e, "steer\033\r") == 0);
-      REQUIRE(wait_for(&e, "S 1. ", offset) == 0);
       REQUIRE(wait_for(&e, "[active operation] consumed: steer", offset) == 0);
+      REQUIRE(!contains(&e, "S 1. ", offset));
       offset = e.length;
       REQUIRE(send_bytes(&e, "\033") == 0);
       REQUIRE(wait_for(&e, "[operation] cancelled", offset) == 0);
@@ -212,7 +240,6 @@ static int watch(void) {
       REQUIRE(wait_for(&e, "[queued] followup", offset) == 0);
     } else if (scenario == 2) {
       REQUIRE(send_bytes(&e, "/quit\033\r") == 0);
-      REQUIRE(wait_for(&e, "S 1. ", offset) == 0);
     } else if (scenario == 3) {
       REQUIRE(send_bytes(&e, "/quit\r") == 0);
       REQUIRE(wait_for(&e, "Q 1. ", offset) == 0);
@@ -228,6 +255,8 @@ static int watch(void) {
       REQUIRE(send_bytes(&e, "\004") == 0);
     }
     REQUIRE(finish(&e) == 0);
+    if (scenario == 2)
+      REQUIRE(!contains(&e, "S 1. ", offset));
     if (scenario == 4)
       REQUIRE(!contains(&e, "[queued] followup", offset));
     close_editor(&e);
@@ -619,8 +648,20 @@ static int backend_coroutines(void) {
           0);
   REQUIRE(wait_for(&e, "backend-ready-readline", 0) == 0);
   REQUIRE(send_bytes(&e, "\024\r") == 0);
+  if (getenv("SOFTLINE_TEST_IMAGE_ERRORS")) {
+    REQUIRE(wait_for(&e, "image-ready-readline", 0) == 0);
+    REQUIRE(send_bytes(&e, "\026") == 0);
+    REQUIRE(wait_for(&e, "image-retry-readline", 0) == 0);
+    REQUIRE(send_bytes(&e, "\026") == 0);
+  }
   REQUIRE(wait_for(&e, "backend-ready-next_prompt", 0) == 0);
   REQUIRE(send_bytes(&e, "\024\r") == 0);
+  if (getenv("SOFTLINE_TEST_IMAGE_ERRORS")) {
+    REQUIRE(wait_for(&e, "image-ready-next_prompt", 0) == 0);
+    REQUIRE(send_bytes(&e, "\026") == 0);
+    REQUIRE(wait_for(&e, "image-retry-next_prompt", 0) == 0);
+    REQUIRE(send_bytes(&e, "\026") == 0);
+  }
   REQUIRE(wait_for(&e, "lua backend coroutine dispatch passed", 0) == 0);
   REQUIRE(finish(&e) == 0);
 cleanup:
@@ -691,6 +732,8 @@ int main(int argc, char **argv) {
     return history();
   if (!strcmp(argv[1], "live"))
     return live();
+  if (!strcmp(argv[1], "libmdf"))
+    return libmdf_stream();
   if (!strcmp(argv[1], "cancel"))
     return cancel();
   if (!strcmp(argv[1], "watch"))

@@ -12,6 +12,7 @@ option(SL_BUILD_STATIC "Build softline as a static library" ON)
 option(SL_BUILD_SHARED "Build softline as a shared library" ON)
 option(SL_BUILD_EXAMPLES "Build softline examples" ON)
 option(SL_BUILD_TESTS "Build softline tests" ON)
+option(SL_ENABLE_CBOR_TCP "Build TCP chat demos with the optional C89Cbor SDK" OFF)
 option(SL_INSTALL "Generate install rules" ON)
 option(SL_ENABLE_COVERAGE "Enable code coverage" OFF)
 option(SL_BUILD_FUZZERS "Build native AFL++ fuzz targets" OFF)
@@ -30,7 +31,7 @@ set(SL_TARGET_ID "" CACHE STRING "Release target identifier")
 # The shared-library ABI belongs to the source, not to build configuration.
 # Discard cache entries left by older configurations before selecting it.
 unset(SOFTLINE_ABI_VERSION CACHE)
-set(SOFTLINE_ABI_VERSION "4")
+set(SOFTLINE_ABI_VERSION "5")
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
@@ -130,21 +131,39 @@ endif()
 add_library(sl_lib_obj OBJECT src/softline.c src/softline_surface.c
   src/softline_clipboard.c src/softline_history.c src/softline_edit.c
   src/softline_queue_backend.c src/softline_terminal.c src/softline_pty.c
-  src/softline_completion.c)
+  src/softline_terminal_session.c
+  src/softline_tty_guard.c
+  src/softline_completion.c src/softline_image.c src/softline_www.c)
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+set(_sl_web_assets "${CMAKE_CURRENT_BINARY_DIR}/softline_www_assets.h")
+add_custom_command(OUTPUT "${_sl_web_assets}"
+  COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/scripts/embed-web-assets.py"
+    "${CMAKE_CURRENT_SOURCE_DIR}" "${_sl_web_assets}"
+  DEPENDS scripts/embed-web-assets.py web/index.html web/softline.css web/softline.js
+          web/motion.css web/motion.js
+          web/completion.js web/prompt.js web/images.js web/image-viewer.js web/transcripts.js
+          web/terminal.html web/terminal.js web/terminal-panel.js web/pane-divider.js web/terminal.css vendor/xterm/xterm.mjs
+          vendor/xterm/addon-fit.mjs vendor/xterm/xterm.css vendor/xterm/LICENSE vendor/xterm/LICENSE.addon-fit
+    web/markdown.js vendor/streaming-markdown/smd.js vendor/streaming-markdown/LICENSE
+    vendor/jetbrains-mono/JetBrainsMono-Regular.woff2 vendor/jetbrains-mono/OFL.txt
+  VERBATIM)
+add_custom_target(sl_web_assets DEPENDS "${_sl_web_assets}")
+add_dependencies(sl_lib_obj sl_web_assets)
 set_target_properties(sl_lib_obj PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(sl_lib_obj
-  PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
+  PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_BINARY_DIR}
   PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 )
 softline_apply_warnings(sl_lib_obj)
 include(cmake/softline_resolver.cmake)
+include(cmake/softline_vterm.cmake)
 
 if(SL_BUILD_STATIC)
   add_library(softline_static STATIC)
   target_sources(softline_static PRIVATE $<TARGET_OBJECTS:sl_lib_obj>
-    ${SL_PRIVATE_RESOLVER_OBJECTS})
+    ${SL_PRIVATE_RESOLVER_OBJECTS} ${SL_PRIVATE_TRANSCRIPT_OBJECTS})
   target_include_directories(softline_static
     PUBLIC
       $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -195,7 +214,7 @@ if(SL_BUILD_SHARED)
 
   add_library(softline_shared SHARED)
   target_sources(softline_shared PRIVATE $<TARGET_OBJECTS:sl_lib_obj>
-    ${SL_PRIVATE_RESOLVER_OBJECTS})
+    ${SL_PRIVATE_RESOLVER_OBJECTS} ${SL_PRIVATE_TRANSCRIPT_OBJECTS})
   target_include_directories(softline_shared
     PUBLIC
       $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -330,6 +349,17 @@ if(SL_INSTALL)
     install(FILES LICENSE README.md
       DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/doc/softline
     )
+    install(DIRECTORY docs/
+      DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/doc/softline/docs
+      FILES_MATCHING PATTERN "*.md")
+    install(FILES lua/README.md
+      DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/doc/softline/lua)
+    install(FILES vendor/streaming-markdown/LICENSE vendor/streaming-markdown/README.softline
+      DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/doc/softline/streaming-markdown)
+    install(FILES vendor/jetbrains-mono/OFL.txt vendor/jetbrains-mono/README.softline
+      DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/doc/softline/jetbrains-mono)
+    install(FILES vendor/xterm/LICENSE vendor/xterm/LICENSE.addon-fit vendor/xterm/README.softline
+      DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/doc/softline/xterm)
 
     install(FILES
       ${CMAKE_CURRENT_BINARY_DIR}/softline-package-metadata.json

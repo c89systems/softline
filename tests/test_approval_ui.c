@@ -1,4 +1,5 @@
 #define _DEFAULT_SOURCE
+#include "silent_cursor_probe.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <pty.h>

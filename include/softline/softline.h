@@ -1,6 +1,12 @@
 #ifndef SOFTLINE_H
 #define SOFTLINE_H
 
+/** @file
+ * C89 editor, queue, completion, image handover and output APIs.
+ * The thread that owns an editor drives its methods and receives callbacks
+ * synchronously. Descriptors and callback contexts supplied by the host are
+ * borrowed under the lifetime rules of each registration. */
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -12,6 +18,98 @@ typedef struct sl sl_t;
 
 /** Opaque per-handle identifier for an external event watch. */
 typedef unsigned long sl_watch_id_t;
+
+/** Image transfer identity; nonzero and never reused during a handle's life. */
+typedef unsigned long sl_image_paste_id_t;
+
+/** Notification delivered to the constructor's image-paste callback. */
+typedef enum sl_image_paste_operation {
+  /** Admit the chosen PNG/JPEG representation before reading image content. */
+  SL_IMAGE_PASTE_BEGIN = 1,
+  /** Consume all length bytes, or return SL_ERROR_NOT_READY consuming none. */
+  SL_IMAGE_PASTE_DATA,
+  /** Clean acquisition EOF; backend storage has not yet been acknowledged. */
+  SL_IMAGE_PASTE_END,
+  /** Terminal failure/cancellation; abort backend work. Exactly once. */
+  SL_IMAGE_PASTE_ABORT,
+  /** Terminal success: acknowledged path was inserted. Exactly once. */
+  SL_IMAGE_PASTE_DONE
+} sl_image_paste_operation_t;
+
+/** Borrowed callback-scoped image metadata and binary chunk. */
+typedef struct sl_image_paste_event {
+  /** Notification kind. */
+  sl_image_paste_operation_t operation;
+  /** Stable transfer identity. */
+  sl_image_paste_id_t id;
+  /** Selected image/png or image/jpeg; NULL before negotiation succeeds. */
+  const char *media_type;
+  /** Suggested display filename, image.png or image.jpeg; never a path. */
+  const char *filename;
+  /** DATA bytes; may contain NUL. Borrowed only until the callback returns. */
+  const unsigned char *data;
+  /** DATA byte length; zero for other operations. */
+  size_t length;
+  /** DATA offset, or actual accepted byte count for END/ABORT/DONE. */
+  size_t offset;
+  /** Bounded failure reason for ABORT; NULL otherwise. */
+  const char *reason;
+} sl_image_paste_event_t;
+
+/** Owner-thread callback: return SL_OK, or reject with an SL_ERROR_* status.
+ * Only DATA permits SL_ERROR_NOT_READY. Consume/copy the entire chunk before
+ * SL_OK; NOT_READY consumes none. Never block, yield, or reenter Softline.
+ * The application context is borrowed until destruction's final ABORT returns.
+ * Installing this callback transfers storage responsibility to the application;
+ * failures never fall back to local image saving. ABORT/DONE return values
+ * are ignored; each transfer has exactly one terminal notification. */
+typedef int (*sl_image_paste_callback_t)(void *context,
+                                         const sl_image_paste_event_t *event);
+
+/** Maximum number of readiness descriptors used by image acquisition. */
+#define SL_IMAGE_PASTE_MAX_FDS 16
+/** Maximum DATA bytes delivered by one image-source pump. */
+#define SL_IMAGE_PASTE_CHUNK_MAX 16384u
+
+/** One borrowed descriptor to watch; its acquisition source owns it. */
+typedef struct sl_image_paste_fd {
+  /** Descriptor; external wait loops must neither close nor consume it. */
+  int fd;
+  /** SL_WATCH_READ/WRITE interests. */
+  unsigned int events;
+} sl_image_paste_fd_t;
+
+/** Readiness snapshot for an application's loop outside readline. */
+typedef struct sl_image_paste_wait {
+  /** Bounded descriptor array, valid until the next image-paste operation. */
+  sl_image_paste_fd_t fds[SL_IMAGE_PASTE_MAX_FDS];
+  /** Number of valid descriptors. */
+  size_t count;
+  /** Maximum wait in milliseconds; -1 when no transfer is pending. */
+  int timeout_ms;
+} sl_image_paste_wait_t;
+
+/** Nonblocking image acquisition supplied by a host (for example browser
+ * upload chunks). It uses the same handover, limits, timeouts, backpressure,
+ * completion insertion and cancellation as native clipboard acquisition.
+ * next returns 1 for BEGIN/DATA/END, 0 for no work, or -1 for source failure.
+ * Event bytes/metadata remain valid until the next next/close call. prepare
+ * fills readiness and returns SL_OK. close runs exactly once after successful
+ * adoption, before the terminal callback. No callback may reenter Softline.
+ * The source validates its PNG/JPEG bytes; no file is staged by this API. */
+typedef struct sl_image_paste_source {
+  /** Borrowed context, retained until close returns. */
+  void *context;
+  /** Return one BEGIN/DATA/END event; DATA is at most SL_IMAGE_PASTE_CHUNK_MAX.
+   */
+  int (*next)(void *, sl_image_paste_event_t *);
+  /** Fill a bounded readiness snapshot and return SL_OK. */
+  int (*prepare)(void *, sl_image_paste_wait_t *);
+  /** Optional borrowed diagnostic after a failed next call. */
+  const char *(*error)(void *);
+  /** Release source resources exactly once after successful adoption. */
+  void (*close)(void *);
+} sl_image_paste_source_t;
 
 /** Opaque nonzero queue identity, unique for the lifetime of one handle.
  * Zero denotes a direct draft without a queued origin. IDs are never reused. */
@@ -266,7 +364,8 @@ typedef enum sl_key {
    * the displayed match to normal editing; Escape or Ctrl-G restores the draft.
    * An explicit Enter binding may request SL_KEY_ACTION_SUBMIT instead. */
   SL_KEY_CTRL_R = 18,
-  /** Ctrl-T, transpose adjacent UTF-8 clusters. */
+  /** Ctrl-T, cycle registered transcript viewers or transpose adjacent UTF-8
+   * clusters when no viewer is registered. */
   SL_KEY_CTRL_T = 20,
   /** Ctrl-U, delete from the current line's beginning to the cursor,
    * or at line start delete only the preceding newline. Soft wraps are not
@@ -410,13 +509,13 @@ typedef enum sl_status {
   SL_ERROR_NOMEM = -3,
   /** Terminal, file, or descriptor I/O failed. */
   SL_ERROR_IO = -4,
-  /** A bounded prompt queue has no room for another entry. */
+  /** A configured capacity or size limit was reached. */
   SL_ERROR_FULL = -5,
-  /** The selected backend does not support this operation. */
+  /** The selected platform, frontend, or backend lacks the operation. */
   SL_ERROR_UNSUPPORTED = -6,
   /** An expected queue/item revision no longer matches. */
   SL_ERROR_CONFLICT = -7,
-  /** The backend is disconnected, unsynchronized or awaiting a result. */
+  /** The operation cannot proceed in its current state or would block. */
   SL_ERROR_NOT_READY = -8
 } sl_status_t;
 
@@ -468,6 +567,21 @@ typedef enum sl_prompt_queue_mode {
   /** A host-selected turn to deliver at a safe seam. */
   SL_PROMPT_QUEUE_MODE_STEER = 1
 } sl_prompt_queue_mode_t;
+
+/** Maximum delay in milliseconds, matching the browser's timer interval. */
+#define SL_PROMPT_SIMULATION_DELAY_MAX_MS 2147483647UL
+/** Controls one scheduled prompt. Zero initialization selects immediate
+ * insertion and submission with ordinary queued intent. */
+typedef struct sl_prompt_simulation_options {
+  /** Milliseconds to wait before inserting the first character. */
+  unsigned long start_delay_ms;
+  /** Milliseconds between visible characters. Zero inserts the full prompt. */
+  unsigned long character_delay_ms;
+  /** Milliseconds to wait after insertion before submitting. */
+  unsigned long submit_delay_ms;
+  /** Use ordinary submission or the editor's configured steer action. */
+  sl_prompt_queue_mode_t mode;
+} sl_prompt_simulation_options_t;
 
 /** Optional host policy for a deliberate editor submission. All fields are
  * booleans. Zero enqueue retains the selected profile's normal behavior. */
@@ -880,6 +994,11 @@ typedef struct sl_config {
   int prompt_queue_max_entries;
   /** Maximum FIFO previews shown above the active editor; default is 3. */
   int prompt_queue_preview_entries;
+  /** Queue/steer preview and pending-send display delay in milliseconds;
+   * default is 500. Zero and arrivals into a visible queue display immediately.
+   * Delivery and API views are immediate; approvals, active edits and errors
+   * are never delayed. */
+  int prompt_queue_display_delay_ms;
   /** Built-in visual treatment for the complete interactive prompt UI;
    * defaults to SL_PROMPT_THEME_DEFAULT. */
   sl_prompt_theme_t prompt_theme;
@@ -919,6 +1038,19 @@ typedef struct sl_config {
    * `/tmp/softline/` + `*` + `/image` produces
    * `/tmp/softline/{xid}/image.png`. */
   const char *image_paste_path_template;
+  /** Optional PNG/JPEG streaming handover; NULL retains local image saving. */
+  sl_image_paste_callback_t image_paste_callback;
+  /** Borrowed image-paste callback context. */
+  void *image_paste_context;
+  /** Per-image byte limit; zero selects 33,554,432 bytes (32 MiB). */
+  size_t image_paste_max_bytes;
+  /** Source inactivity deadline; zero selects 10,000 ms. Pauses are excluded.
+   */
+  int image_paste_source_timeout_ms;
+  /** Pause/backend acknowledgement deadline; zero selects 30,000 ms. */
+  int image_paste_host_timeout_ms;
+  /** Whole-operation deadline, including pauses; zero selects 120,000 ms. */
+  int image_paste_total_timeout_ms;
   /** NULL keeps the native local queue. A backend requires prompt_queue=1 and
    * selects external authority for this handle's entire lifetime. */
   const sl_queue_backend_t *queue_backend;
@@ -936,23 +1068,26 @@ typedef struct sl_config {
  * state; callers must not read, write, copy, or free it.
  */
 struct sl {
+  /** Adopt a host-owned nonblocking PNG/JPEG source instead of X11. */
+  int (*image_paste_start_source)(sl_t *, const sl_image_paste_source_t *,
+                                  sl_image_paste_id_t *);
+  /** Start PNG/JPEG clipboard handover at the current draft cursor. */
+  int (*image_paste_start)(sl_t *, sl_image_paste_id_t *);
+  /** Obtain nonblocking acquisition readiness and its next deadline. */
+  int (*image_paste_prepare)(sl_t *, sl_image_paste_wait_t *);
+  /** Advance bounded work without waiting; also used by native editing. */
+  int (*image_paste_pump)(sl_t *);
+  /** Permit retry of a previously unconsumed DATA chunk. */
+  int (*image_paste_resume)(sl_t *, sl_image_paste_id_t);
+  /** Acknowledge backend storage with an absolute path, or fail with reason. */
+  int (*image_paste_complete)(sl_t *, sl_image_paste_id_t, const char *,
+                              const char *);
+  /** Abort acquisition/backend wait without cancelling the draft. */
+  int (*image_paste_cancel)(sl_t *, sl_image_paste_id_t);
   /**
-   * Read one submitted line.
-   *
-   * Returns a softline-allocated string on submitted input, or NULL for EOF,
-   * cancellation, interrupt, suspension, or error. Use last_readline_status()
-   * before the next readline() call to classify a NULL return. While raw mode
-   * is owned, kernel tab expansion (TAB3/OXTABS) is disabled; OPOST/ONLCR are
-   * preserved and original flags are restored on release. Optional
-   * ordinary-readline scroll-region ownership is acquired at startup and
-   * retried between producer callbacks as output advances the prompt. Multiple
-   * feeds in one callback stay immediate; ownership is refreshed at the next
-   * input-owned boundary. Ctrl-C restores terminal state before raising SIGINT.
-   * If the handler returns, an existing native output session remains
-   * available. SL_KEY_ACTION_SUSPEND retains the draft, cursor and editing
-   * context for the next readline()/next_prompt(), ahead of queued delivery. It
-   * does not pause producers. The application owns exclusive terminal handoff
-   * between calls.
+   * Read a submitted prompt, or NULL for the outcome reported by
+   * last_readline_status(). Release returned text with free_string().
+   * @see sl_readline
    */
   char *(*readline)(sl_t *self, const char *prompt);
   /** Destroy the handle; NULL-safe through sl_destroy(). */
@@ -1012,15 +1147,11 @@ struct sl {
   /** Suspend the active editor from an owner-thread callback, preserving the
    * draft/undo and returning SL_READLINE_SUSPENDED without stopping backlog. */
   int (*suspend)(sl_t *self);
-  /** Stream callback output above the active prompt. Ordinary readline clears
-   * and redraws by default, or uses an enabled live scroll region after
-   * reaching the terminal bottom. Native chat retains its prompt frame and
-   * reconciles physical resize before writing each callback-produced chunk.
-   * Feed calls have no intentional delay and never wait for cursor replies.
-   * The unobserved-resize limits documented for output_stream_write() also
-   * apply when resize occurs inside this producer callback.
-   * Finite output cannot overlap an open live session. Failed native finite
-   * output discards partial ANSI/UTF-8 bytes; later calls start cleanly. */
+  /**
+   * Stream finite callback-produced output above the active prompt.
+   * An open persistent session must be closed first.
+   * @see sl_print_above
+   */
   int (*print_above)(sl_t *self, sl_stream_callback_t callback, void *userdata);
   /** Return the most recent readline() status for this handle. */
   sl_readline_status_t (*last_readline_status)(const sl_t *self);
@@ -1028,16 +1159,19 @@ struct sl {
   const char *(*last_error)(const sl_t *self);
   /** Private implementation pointer; callers must not read or modify it. */
   void *impl;
-  /** Auto-deliver the next queued prompt FIFO, or read a direct/promotion
-   * result. Manual delivery always opens the editor. On interactive handles,
-   * this retains terminal input ownership between results; destroy() restores
-   * the terminal. source may be NULL. */
+  /**
+   * Receive an eligible queued turn or enter the editor. Set the optional
+   * source output and release returned text with free_string().
+   * @see sl_next_prompt
+   */
   char *(*next_prompt)(sl_t *self, const char *prompt,
                        sl_prompt_source_t *source);
   /** Enable/configure Tab queueing; reducing capacity below queued work
    * fails. */
   int (*set_prompt_queue)(sl_t *self, int enabled, int max_entries,
                           int preview_entries);
+  /** Set the queue preview delay in milliseconds; zero displays immediately. */
+  int (*set_prompt_queue_display_delay)(sl_t *self, int delay_ms);
   /** Select one of the built-in themes for the complete interactive prompt
    * UI. */
   int (*set_prompt_theme)(sl_t *self, sl_prompt_theme_t theme);
@@ -1157,6 +1291,8 @@ struct sl {
   /** Explicitly resume the retained backlog without changing manual delivery,
    * approval, execution readiness or editing state. */
   int (*prompt_queue_resume)(sl_t *self);
+  /** Pause queued delivery without changing the editor draft. */
+  int (*prompt_queue_stop)(sl_t *self);
   /** Register an application-owned descriptor to wake active TTY editing;
    * non-TTY handles reject watches. */
   int (*watch_add)(sl_t *self, int fd, unsigned int events,
@@ -1168,87 +1304,27 @@ struct sl {
   int (*watch_remove)(sl_t *self, sl_watch_id_t id);
   /** Remove every registered watch from this handle. */
   int (*watch_clear)(sl_t *self);
-  /** Begin one owner-thread, renderer-agnostic live output session. Only one
-   * session may be open per handle. Output occupies terminal rows above the
-   * prompt. A full-terminal transcript starts at the current cursor and the
-   * editable prompt starts at the bottom. Physical resize preserves the
-   * terminal's position for an unchanged frame; only prompt layout changes
-   * update cells. Before that frame, output uses the full terminal and leaves
-   * the producer cursor in place between writes. Native output bytes pass
-   * through unchanged; wrapping and scrollback are preserved. The output
-   * margin follows actual prompt
-   * height. At least three terminal rows are required: two output rows and one
-   * prompt row. An unfinished line clipped into scrollback continues at the
-   * first visible output row without replay. A clipped hard line boundary
-   * resumes next to the prompt; existing scrollback cells and spacing are
-   * preserved. Rapid tmux resizes can leave its grid ahead of the reported
-   * PTY size while output is emitted; exact output during that interval is
-   * not guaranteed. With either descriptor off-TTY, output is validated and
-   * forwarded without terminal controls. Reopening a closed native session
-   * probes the cursor again. A nonzero column restarts quote separation for
-   * an unfinished externally written line; otherwise known spacing remains.
-   * A session retained by an active editor keeps its continuation. */
+  /**
+   * Open one live output session on this editor's owner thread.
+   * @see sl_output_stream_begin
+   */
   int (*output_stream_begin)(sl_t *self);
-  /** Reconcile a settled resize before resuming synchronous producer writes.
-   * Call on the owner thread, outside a feed/callback producer. Repaint only
-   * owned prompt cells, preserving draft, cursor, queue, history, status,
-   * queued input and incremental producer parsing. No transcript is retained
-   * or replayed. A needed cursor report may wait up to 100 ms; failure returns
-   * SL_ERROR_IO, and the caller must not resume output assuming reconciliation.
-   * An open stream is required (otherwise SL_ERROR_INVALID). Redirected
-   * sessions are a no-op. Terminal modes are restored before return. */
+  /**
+   * Observe a settled resize before resuming synchronous output.
+   * @see sl_output_stream_reconcile
+   */
   int (*output_stream_reconcile)(sl_t *self);
-  /** Forward exactly length bytes into the open session. Complete parsed
-   * input is visible before return; a write boundary adds no newline or
-   * document boundary. bytes may be NULL only when
-   * length is zero. Input must be printable UTF-8, LF/CR/Tab, ANSI SGR, or
-   * OSC 8 when enabled by set_osc8_mode();
-   * unsupported terminal controls fail with SL_ERROR_INVALID. Malformed UTF-8
-   * also fails. Native LF positioning follows the output TTY's OPOST/ONLCR
-   * settings without altering producer bytes. Kernel tab expansion (TAB3 or
-   * OXTABS) is temporarily disabled while Softline owns raw mode and restored
-   * on exit; tabs reach the terminal unchanged. Native writes after raw-mode
-   * release disable expansion for the write and restore it before returning,
-   * without flushing pending input. Feed calls add no intentional delay and
-   * never request or wait for terminal cursor replies, including on resize.
-   * Cursor advances use local scalar cell widths shared with prompt layout;
-   * no producer transcript, glyph spans or grapheme tail is buffered.
-   * Terminal Unicode versions and cluster shaping can differ from the
-   * Unicode 16.0 scalar accounting.
-   * A physical resize can race a VT write and misplace even ASCII output;
-   * this accepted limit cannot be made atomic without a terminal protocol.
-   * A retained frame resized without an input-owned observation (including
-   * after readline returns) uses a delta estimate. Earlier hard-ended ASCII
-   * reflow and unknown terminal history can misplace continuation even after
-   * resize settles. The active input loop observes resize before dispatching
-   * producer watches. Between synchronous writes, use output_stream_reconcile()
-   * after resize settles and before feeding again; feeds never observe input.
-   * Wrapping remains producer/terminal-owned. Width reflow of a Unicode/tab
-   * line can misplace continuation, including CR tails; its tracked column is
-   * retained and clamped only if offscreen. No grapheme buffering or
-   * renderer-specific wrapping is used. With an active prompt, continuing after
-   * a known ASCII write at the right edge advances a hard row; width growth may
-   * leave it split and a divided Unicode cluster may lose its attachment.
-   * Bottom-margin reflow can likewise leave a continuation split. Transcript
-   * bytes are not replayed to repair either boundary. A last-column report
-   * cannot distinguish Unicode pending wrap from a cursor before the final
-   * cell; continuation can overwrite that cell. These are intentional
-   * opaque-feed limits; transcript cells are never reconstructed or cleared to
-   * compensate. */
+  /**
+   * Write one chunk of validated output. A visible transcript defers it
+   * to the bounded chat backlog. Complete units otherwise appear immediately.
+   * @see sl_output_stream_write
+   */
   int (*output_stream_write)(sl_t *self, const char *bytes, size_t length);
-  /** End the open session without finishing an external renderer document.
-   * An active editor keeps its native prompt and scroll region for later
-   * finite output or another stream. Otherwise native chat closes: input rows
-   * are cleared, queue and status rows remain, and the cursor stays at column
-   * zero on the current input row without a newline. clear_prompt_on_exit
-   * selects clearing the whole prompt area and returning below the transcript.
-   * Closing outside an active editor releases terminal input ownership. A
-   * foreground child may run before output_stream_begin() probes a fresh
-   * cursor and builds a new prompt; handle history and settings are retained.
-   * Run this handoff between editor calls, outside active editor callbacks;
-   * the application owns child execution.
-   * Incomplete ANSI/UTF-8 leaves it open and returns SL_ERROR_INVALID so the
-   * caller may supply the missing bytes. */
+  /**
+   * Close a live output session after the renderer finishes. Incomplete
+   * ANSI/UTF-8 leaves the session open with SL_ERROR_INVALID.
+   * @see sl_output_stream_end
+   */
   int (*output_stream_end)(sl_t *self);
   /** Set, replace, or clear the italic message above the status line.
    * The default prefix is "! "; long text wraps at words with continuation
@@ -1301,11 +1377,10 @@ struct sl {
    * recorded. Programmatic queue insert/replace requires explicit history_add.
    * Empty and consecutive duplicate entries are suppressed. */
   int (*history_set_auto_add)(sl_t *self, int enabled);
-  /** Return nonzero while reverse history search is active, including a
-   * failed match. Zero after selection, cancellation or editor exit. Key
-   * callbacks run before built-in handling: return SL_KEY_ACTION_PASS during
-   * search to let Enter select an editable match before submission guards run.
-   * Read-only; call on the editor-owner thread. */
+  /**
+   * Return nonzero during reverse history search, including a failed match.
+   * @see sl_history_search_active
+   */
   int (*history_search_active)(const sl_t *self);
   /** Hand off a typed backend request; see sl_queue_backend_request(). */
   int (*queue_backend_request)(sl_t *self, const sl_queue_request_t *request,
@@ -1334,6 +1409,11 @@ struct sl {
   int (*set_osc8_mode)(sl_t *self, sl_osc8_mode_t mode);
   /** Read cached hyperlink policy/detection; see sl_get_osc8_info(). */
   int (*get_osc8_info)(const sl_t *self, sl_osc8_info_t *info);
+  /** Schedule one simulated input turn; see sl_simulate_prompt(). */
+  int (*simulate_prompt)(sl_t *self, const char *text,
+                         const sl_prompt_simulation_options_t *options);
+  /** Cancel a pending simulation, preserving the visible draft. */
+  int (*cancel_prompt_simulation)(sl_t *self);
 };
 
 /**
@@ -1510,6 +1590,17 @@ int sl_set_image_paste_path_template(sl_t *self, const char *path_template);
 int sl_set_prompt_queue(sl_t *self, int enabled, int max_entries,
                         int preview_entries);
 
+/** Set the display delay for queue/steer previews and pending-send notices.
+ * Default is 500 ms; zero displays immediately, negatives are invalid. Each
+ * entry added while the queue is hidden ages independently using monotonic
+ * elapsed time. Arrivals into a visible queue appear immediately, even if
+ * older entries are consumed. An empty queue frame rearms the delay. Existing
+ * identities retain their age across backend updates. Does not delay dispatch
+ * or change API queue contents. Approvals, active edits, errors and connection
+ * notices remain immediate. Applies to both native local and backend handles.
+ */
+int sl_set_prompt_queue_display_delay(sl_t *self, int delay_ms);
+
 /** Return the number of oldest-first entries currently queued on self. */
 size_t sl_prompt_queue_count(const sl_t *self);
 
@@ -1639,6 +1730,8 @@ int sl_get_prompt_queue_stopped(const sl_t *self, int *out);
 
 /** Resume the backlog explicitly; all other delivery gates still apply. */
 int sl_prompt_queue_resume(sl_t *self);
+/** Pause queued delivery without changing any editor draft. */
+int sl_prompt_queue_stop(sl_t *self);
 
 /** Select a built-in theme for the complete interactive prompt UI. */
 int sl_set_prompt_theme(sl_t *self, sl_prompt_theme_t theme);
@@ -1707,6 +1800,47 @@ int sl_watch_remove(sl_t *self, sl_watch_id_t id);
 /** Remove every registered watch from this handle. */
 int sl_watch_clear(sl_t *self);
 
+/** Start Linux X11 image handover at the draft cursor. One transfer per
+ * handle. A fresh readline that replaces the draft cancels the transfer.
+ * @param self Editor configured with a handover callback.
+ * @param id Required destination for the assigned transfer identity.
+ * @return SL_OK after scheduling, or an SL_ERROR_* status. */
+int sl_image_paste_start(sl_t *self, sl_image_paste_id_t *id);
+/** Adopt a streaming source at the draft cursor. A successful adoption
+ * delegates source cleanup to its close callback. The caller owns cleanup
+ * after a failed adoption.
+ * @param self Editor configured with a handover callback.
+ * @param source Copied callback table with a borrowed source context.
+ * @param id Required destination for the assigned transfer identity.
+ * @return SL_OK after adoption, or an SL_ERROR_* status. */
+int sl_image_paste_start_source(sl_t *self,
+                                const sl_image_paste_source_t *source,
+                                sl_image_paste_id_t *id);
+/** Snapshot readiness outside readline. Call pump on readiness/deadline, then
+ * prepare again. Native editing drives the same mechanism automatically. */
+int sl_image_paste_prepare(sl_t *self, sl_image_paste_wait_t *wait);
+/** Perform bounded nonblocking work. Completion insertion is deferred while
+ * suspended; resume the original draft to reconcile it. */
+int sl_image_paste_pump(sl_t *self);
+/** Resume paused DATA. Wrong or stale IDs, and invalid ordering, return
+ * SL_ERROR_INVALID. */
+int sl_image_paste_resume(sl_t *self, sl_image_paste_id_t id);
+/** After END, supply a nonempty absolute path without control characters,
+ * at most 4095 bytes, or NULL and a printable failure reason. Insertion is
+ * atomic and deferred until pump/native dispatch. Duplicate/stale results
+ * return SL_ERROR_INVALID. Undo removes only the inserted draft bytes.
+ * @param self Editor receiving the acknowledgement.
+ * @param id Identity supplied to the handover callback.
+ * @param path Published storage path, or NULL on failure.
+ * @param reason Optional diagnostic for a failed transfer.
+ * @return SL_OK when the result is recorded, or an SL_ERROR_* status. */
+int sl_image_paste_complete(sl_t *self, sl_image_paste_id_t id,
+                            const char *path, const char *reason);
+/** Cancel one pending transfer, preserving draft text. Duplicate/stale IDs
+ * return SL_ERROR_INVALID. Ctrl-C performs this operation while a transfer
+ * is pending and raises SIGINT during ordinary editing. */
+int sl_image_paste_cancel(sl_t *self, sl_image_paste_id_t id);
+
 /** Bind key to callback for this handle; NULL callback removes the binding.
  * Bind SL_KEY_ENTER with SL_KEY_ACTION_SUBMIT to submit a reverse-search match
  * immediately instead of accepting it into the editable prompt. */
@@ -1738,6 +1872,24 @@ int sl_set_cursor(sl_t *self, size_t cursor);
  */
 int sl_submit(sl_t *self);
 
+/** Copy and schedule one nonempty UTF-8 prompt on a TTY editor's owner
+ * thread. Requires an empty ordinary draft and no active simulation.
+ * The editor advances it during readline/next_prompt and submits via the
+ * normal admission path. Steer requires the editor's steer key to be
+ * configured. Real input takes over the draft. Escape cancels and clears
+ * the simulated text. Paced input follows normal completion-trigger removal.
+ * @param self Native editor on its owner thread.
+ * @param text UTF-8 prompt copied during this call.
+ * @param options Timing and queue intent, or NULL for immediate queued intent.
+ * @return SL_OK after scheduling, SL_ERROR_NOT_READY if the draft is occupied
+ * or editing is unavailable, or another SL_ERROR_* status. */
+int sl_simulate_prompt(sl_t *self, const char *text,
+                       const sl_prompt_simulation_options_t *options);
+/** Cancel automation on this editor, leaving the visible text editable.
+ * @return SL_OK even when no simulation is pending, or SL_ERROR_INVALID for
+ * an invalid editor. */
+int sl_cancel_prompt_simulation(sl_t *self);
+
 /** Cancel the active readline() operation from inside a callback. */
 int sl_cancel(sl_t *self);
 
@@ -1764,7 +1916,8 @@ int sl_print_above(sl_t *self, sl_stream_callback_t callback, void *userdata);
  * initially at the bottom. Physical resize preserves the terminal's prompt
  * position; unchanged cells and the cursor remain untouched. Before that frame,
  * output uses the full terminal and leaves the producer cursor in place
- * between writes.
+ * between writes. Redirected streams validate and forward producer bytes
+ * without terminal layout controls.
  * Output feeds preserve unchanged prompt cells; prompt updates patch only
  * changed cells. The output margin follows the current prompt frame height;
  * growth scrolls existing output cells
@@ -1790,12 +1943,17 @@ int sl_output_stream_begin(sl_t *self);
  * and split UTF-8/SGR parsing. Never retains or replays transcript bytes.
  * A required cursor report waits at most 100 ms; failure returns SL_ERROR_IO.
  * Do not resume output assuming reconciliation after failure. No-op off-TTY.
+ * With a read-only transcript selected, return immediately and reconcile the
+ * terminal when chat returns, before displaying the backlog.
  * Call before the first write after resize; feeds remain observation-free. */
 int sl_output_stream_reconcile(sl_t *self);
 
-/** Forward length bytes immediately to the live output session. Zero length
- * is a no-op; no newline or response boundary is implied. Valid bytes are
- * printable UTF-8, LF/CR/Tab, ANSI SGR, and opt-in OSC 8; malformed or
+/** Forward length bytes to the live output session. While a read-only
+ * transcript is selected, keep the newest 1,000 logical lines or 256 KiB for
+ * replay on return to chat. Otherwise forward output immediately. A zero
+ * length is a no-op and is the only case where bytes may be NULL. Each
+ * write continues the same stream without inserting a separator. Valid bytes
+ * are printable UTF-8, LF/CR/Tab, ANSI SGR, and opt-in OSC 8; malformed or
  * unsupported control sequences report SL_ERROR_INVALID. A failed write may
  * have emitted a prefix, while a successful write has emitted all complete
  * input units. Native LF positioning follows the output TTY's OPOST/ONLCR
@@ -1922,6 +2080,18 @@ const char *sl_last_error(const sl_t *self);
  * ABORT_EDIT require the owned edit hold in the accepted mirror. */
 int sl_queue_backend_request(sl_t *self, const sl_queue_request_t *request,
                              sl_queue_request_id_t *out_request_id);
+
+/** Opaque lease on a backend request's retained text fields. */
+typedef struct sl_queue_request_lease sl_queue_request_lease_t;
+
+/** Pin the text fields of the request passed to the active backend callback.
+ * Copy the request's scalar fields before returning from the callback. The
+ * lease keeps its strings valid across partial writes without another copy.
+ * Owner-thread only. Release all adapter leases by backend detach. */
+int sl_queue_backend_pin_request(sl_t *self, const sl_queue_request_t *request,
+                                 sl_queue_request_lease_t **lease);
+/** Release one successful pin. NULL is allowed. */
+void sl_queue_backend_unpin_request(sl_queue_request_lease_t *lease);
 
 /** Apply one deferred response without delivering/echoing model text. Duplicate
  * completed responses are harmless. Results never mutate the accepted mirror

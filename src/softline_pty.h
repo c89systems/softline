@@ -8,6 +8,9 @@ typedef struct sl_pty {
   size_t drain_remaining;
   pid_t pid;
   const char *shell;
+  const char *directory;
+  char *const *arguments;
+  char *const *environment;
   struct sl_pty *next;
 } sl_pty_t;
 int sl_pty_callback(void *context, sl_terminal_event_t *event);

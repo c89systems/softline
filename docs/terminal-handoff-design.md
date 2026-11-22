@@ -4,6 +4,59 @@ Status: implemented by `sl_terminal_handoff()` and the local PTY adapter
 `sl_terminal_local()`. Local C/Lua chat uses the local adapter. Remote C chat
 uses a backend PTY over the demo transport, independently of frontend rendering.
 
+`<softline/terminal.h>` exposes the server PTY as an independent receiver.
+The remote example uses this public API; it neither includes private PTY headers
+nor compiles a second PTY implementation. The client uses its existing terminal
+in raw mode; only the server needs to create a PTY.
+
+## Server session API
+
+Initialize `sl_terminal_session_config_t`, then create a receiver with
+`sl_terminal_session_create()`. Creation copies host-owned executable, argv,
+directory and environment policy without spawning. NULL argv selects an
+interactive shell; NULL environment inherits the host's environment. An optional
+terminal type overrides TERM. Explicit environment lists replace the inherited
+environment. Paths are executable paths, never shell command strings.
+
+`session->dispatch()` and `sl_terminal_session_dispatch()` implement the same
+OPEN/STEP/READ/WRITE/RESIZE/CLOSE event contract as the TUI relay. They require
+neither an editor nor terminal stdin/stdout. STEP exposes a borrowed readiness
+descriptor/deadline for the host loop. Dispatch at most 4096 bytes per READ or
+WRITE, retain unconsumed input on partial writes, and stop reading output when
+the transport or frontend has no capacity. OPEN validates rows/columns and is
+single-use; create another receiver for a new session. READ returning zero is
+output EOF; `status()` separately reports the child exit status.
+An exec/setup failure is reported as soon as its status is known, even if the
+failed child has not yet been reaped. It must never become a successful exit
+merely because process teardown is still pending.
+The example wire adapter preserves an unavailable exit status as -1 in the C
+API (wire value 256), rather than inventing exit code zero.
+
+CLOSE is idempotent, terminates the shell and foreground group, and never waits
+for peer acknowledgment or child exit. `destroy()` performs nonblocking cleanup:
+SL_ERROR_NOT_READY retains ownership with the caller, who must retry from the
+event loop until SL_OK. There is no worker or hidden child reaper. Server
+sessions install no process signal handlers and do not change host terminal
+attributes. They may run on a headless host.
+The built-in receiver owns child reaping. A host SIGCHLD handler should wake the
+owner loop and leave this child to the receiver; a process-wide waitpid(-1)
+reaper must not consume its status. Hosts requiring centralized child ownership
+can supply their own PTY adapter through the generic terminal callback contract.
+
+The transport maps these logical operations onto its own ordered messages.
+Softline supplies no socket, authentication policy or mandatory wire encoding.
+Session ownership is per frontend view; closing or losing that attachment
+terminates its session, without shell persistence or automatic reattachment.
+
+## Browser and Kore integration boundary
+
+The browser assets include an xterm.js terminal. A Kore route or another
+host-owned WebSocket endpoint can create one PTY session per authorized
+connection and drive it from the host event loop. The host selects the shell,
+arguments, environment and working directory. See the
+[browser terminal guide](web-terminal.md) for routes, input and output flow
+control, and the mock listener used by the examples.
+
 ## Behavior
 
 Alt-S requests a new terminal session without submitting the draft. The host
@@ -101,6 +154,86 @@ escape. If the terminal cannot accept the required controls, return
 the editor continuation; the host may reopen the output session when writable.
 Do not wait for terminal drainage. Cancelling a local PTY terminates its current
 foreground job group as well as the shell group before closing the master.
+
+## Raw-mode recovery
+
+### Independent launcher
+
+The C example Make targets launch the whole TUI application through
+`build/debug/examples/softline_terminal_supervisor -- PROGRAM [ARG ...]`.
+This is a host-side launcher, outside libsoftline. It creates one recovery parent
+and executes the application in its own foreground process group on the existing
+terminal. It creates no client PTY and never reads, writes, parses or buffers the
+application's terminal stream. Stdin/stdout/stderr, terminal identity, geometry,
+environment, working directory and arguments pass directly to the application.
+Kernel terminal input and window-change signals reach its foreground group.
+Softline, Lua and transport callbacks remain together in that application.
+
+Before starting the application, the parent saves terminal attributes and file
+flags using close-on-exec duplicate descriptors. It restores them and returns
+foreground ownership when the application exits, including `_exit()`, an exec
+replacement, SIGKILL or a crash in the application. Closing/reusing the
+application's descriptors cannot remove the parent's recovery descriptors.
+When the application stops, the parent saves its active modes, restores the
+original terminal and stops its own shell job. Foreground continuation restores
+the active modes and resumes the application. Supervisor HUP/TERM/INT/QUIT requests
+are forwarded to the application group, with SIGKILL after a one-second grace
+period if it does not exit. Other application control signals are forwarded
+without imposing termination. Exit codes pass through; signal termination uses
+128 plus the signal number. Launcher/setup/restoration failures return 125,
+and exec failures return 126/127.
+
+Already handled and kernel-queued termination requests take priority over a host
+stop observed in the same event-loop turn. The recovery parent forwards watched
+signals even when ignored or blocked at launch, so the application may install
+its own handlers or unblock them later. The application inherits the original
+dispositions and mask unchanged; the parent owns a separate forwarding policy.
+
+The launcher requires foreground startup and continuation when stdin and stdout
+are terminals. A background continuation is rejected without taking foreground
+ownership or changing the current owner's terminal settings. With non-TTY stdin
+or stdout it execs directly without supervision;
+Softline uses its existing noninteractive path. Web-only and queue-server Make
+targets run directly. Other hosts can explicitly use this launcher; merely
+linking libsoftline does not fork a process. The launcher is example/host source,
+not an installed SDK executable or an implicit runtime inside the library.
+
+Recovery still requires the parent to survive and the terminal to accept
+restoration. Killing/stopping the supervisor itself without a catchable signal,
+crashing both processes, or losing the terminal defeats this protection.
+This recovery concerns terminal attributes, descriptor flags and foreground
+ownership; it does not reconstruct terminal screen contents after a crash.
+
+### In-process library guards
+
+Native editing and handoff protect the original terminal attributes and file
+flags before changing them. Close-on-exec duplicate descriptors keep restoration
+attached to the original terminals even if application descriptors are closed or
+reused. Restoration retries EINTR, uses TCSANOW without waiting for output to
+drain, and also runs at normal process exit. Setup and callback failures take the
+same cleanup path.
+
+While a TUI owns terminal input, temporary signal guards restore the terminal
+before default termination or job-control suspension and before invoking an
+existing application handler. Returning handlers and foreground job resumption
+reacquire the prior modes. Signal information, application masks, restart
+flags and alternate signal stacks are preserved. The guard restores
+dispositions when ownership ends and honors one-shot handlers where
+`sigaction()` reports `SA_RESETHAND`. On macOS, `sigaction()` omits that
+flag on readback, so the guard treats an existing one-shot handler as
+persistent. [XNU signal implementation](https://github.com/apple-oss-distributions/xnu/blob/xnu-11417.121.6/bsd/kern/kern_sig.c)
+
+Register application handlers before acquiring TUI input. Ignored signals
+retain their disposition. Replacing a guarded disposition during ownership
+opts that signal out of the guard, and the replacement is preserved on release.
+
+TUI acquisition/release and signal policy belong to one process owner thread.
+Multithreaded hosts must route these signals to that thread. Independent server
+PTY receivers impose no such process-wide TUI ownership. Application callbacks
+and signal handlers must not reenter Softline. SIGKILL and SIGSTOP cannot be
+caught; fatal crashes, `_exit()`, and an unusable/removed terminal can also
+prevent restoration. An OS restoration failure is reported; recovery is never
+claimed for a terminal that cannot accept its saved attributes.
 
 ## Escape from a hung session
 
