@@ -2,6 +2,7 @@
 #define _DARWIN_C_SOURCE 1
 #endif
 #define _XOPEN_SOURCE 700
+#include "termios_snapshot.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
@@ -35,14 +36,14 @@ typedef struct ready {
   int foreground;
 } ready_t;
 typedef struct fixture {
-  pid_t supervisor;
-  int master, slave, output_master, output_slave, notice, control;
+  pid_t session, supervisor;
+  int master, slave, output_master, output_slave, notice, control, states;
   int input_flags, output_flags;
   struct termios input, output;
   ready_t host;
 } fixture_t;
 static const char *launcher, *self;
-static pid_t active_supervisor, active_host;
+static pid_t active_session, active_supervisor, active_host;
 static int resize_notice;
 static int stop_signal, kernel_pending;
 static volatile sig_atomic_t continued;
@@ -62,10 +63,13 @@ static void cleanup(void) {
     kill(active_host, SIGKILL);
   }
   if (active_supervisor > 0) {
-    int status;
     kill(-active_supervisor, SIGKILL);
     kill(active_supervisor, SIGKILL);
-    while (waitpid(active_supervisor, &status, 0) < 0 && errno == EINTR) {
+  }
+  if (active_session > 0) {
+    int status;
+    kill(active_session, SIGKILL);
+    while (waitpid(active_session, &status, 0) < 0 && errno == EINTR) {
     }
   }
 }
@@ -92,17 +96,6 @@ static int exact(int fd, void *value, size_t length, int writing) {
       return 1;
   }
   return length != 0;
-}
-static int equal(const struct termios *a, const struct termios *b) {
-  size_t i;
-  if (a->c_iflag != b->c_iflag || a->c_oflag != b->c_oflag ||
-      a->c_cflag != b->c_cflag || a->c_lflag != b->c_lflag ||
-      cfgetispeed(a) != cfgetospeed(b) || cfgetospeed(a) != cfgetospeed(b))
-    return 0;
-  for (i = 0; i < NCCS; ++i)
-    if (a->c_cc[i] != b->c_cc[i])
-      return 0;
-  return 1;
 }
 static int host(int argc, char **argv) {
   struct termios raw;
@@ -268,7 +261,7 @@ static int nested_wait(pid_t wrapper, int background) {
       CHECK(!kill(wrapper, SIGCONT));
       CHECK(!wait_state(wrapper, &status, 0));
       CHECK(tcgetpgrp(0) == other);
-      CHECK(!tcgetattr(0, &actual) && equal(&actual, &owned));
+      CHECK(!tcgetattr(0, &actual) && test_termios_equal(&actual, &owned));
       CHECK(!kill(other, SIGKILL));
       CHECK(!wait_state(other, &ignored, 0));
       CHECK(!tcsetpgrp(0, getpgrp()));
@@ -279,8 +272,49 @@ static int nested_wait(pid_t wrapper, int background) {
   CHECK(WIFEXITED(status));
   return WEXITSTATUS(status);
 }
+/* A shell owns the controlling terminal beyond the lifetime of a launched
+ * job. Model that here too: Darwin revokes the slave when its leader exits. */
+static void session_job(int tty, int states, int control) {
+  int gate[2], status;
+  pid_t job, got;
+  char byte;
+  ssize_t n;
+  if (setsid() < 0 || ioctl(tty, TIOCSCTTY, 0) || pipe(gate))
+    _exit(124);
+  job = fork();
+  if (job < 0)
+    _exit(124);
+  if (!job) {
+    close(gate[1]);
+    close(states);
+    if (read(gate[0], &byte, 1) != 1)
+      _exit(124);
+    close(gate[0]);
+    return;
+  }
+  close(gate[0]);
+  if (setpgid(job, job) || tcsetpgrp(tty, job) ||
+      exact(states, &job, sizeof(job), 1) || write(gate[1], "R", 1) != 1) {
+    kill(job, SIGKILL);
+    _exit(124);
+  }
+  close(gate[1]);
+  do {
+    do {
+      got = waitpid(job, &status, WUNTRACED);
+    } while (got < 0 && errno == EINTR);
+    if (got != job || exact(states, &status, sizeof(status), 1))
+      _exit(124);
+  } while (WIFSTOPPED(status));
+  close(states);
+  /* Keep the slave valid while the caller checks restoration. */
+  do {
+    n = read(control, &byte, 1);
+  } while (n > 0 || (n < 0 && errno == EINTR));
+  _exit(n < 0 ? 124 : 0);
+}
 static int launch(fixture_t *f, const char *mode, int split, int missing) {
-  int notices[2], commands[2];
+  int notices[2], commands[2], states[2];
   struct winsize size = {24, 80, 0, 0};
   struct stat input, output;
   memset(f, 0, sizeof(*f));
@@ -297,18 +331,19 @@ static int launch(fixture_t *f, const char *mode, int split, int missing) {
   CHECK(!fstat(split ? f->output_slave : f->slave, &output));
   f->input_flags = fcntl(f->slave, F_GETFL);
   f->output_flags = fcntl(split ? f->output_slave : f->slave, F_GETFL);
-  CHECK(!pipe(notices) && !pipe(commands));
-  f->supervisor = fork();
-  CHECK(f->supervisor >= 0);
-  if (!f->supervisor) {
+  CHECK(!pipe(notices) && !pipe(commands) && !pipe(states));
+  f->session = fork();
+  CHECK(f->session >= 0);
+  if (!f->session) {
     char notify[32], control[32];
     close(notices[0]);
     close(commands[1]);
+    close(states[0]);
     close(f->master);
     if (split)
       close(f->output_master);
-    if (setsid() < 0 || ioctl(f->slave, TIOCSCTTY, 0) ||
-        dup2(f->slave, 0) < 0 ||
+    session_job(f->slave, states[1], commands[0]);
+    if (dup2(f->slave, 0) < 0 ||
         dup2(split ? f->output_slave : f->slave, 1) < 0 || dup2(1, 2) < 0)
       _exit(124);
     close(f->slave);
@@ -347,6 +382,10 @@ static int launch(fixture_t *f, const char *mode, int split, int missing) {
   }
   close(notices[1]);
   close(commands[0]);
+  close(states[1]);
+  active_session = f->session;
+  f->states = states[0];
+  CHECK(!exact(f->states, &f->supervisor, sizeof(f->supervisor), 0));
   active_supervisor = f->supervisor;
   f->notice = notices[0];
   f->control = commands[1];
@@ -363,16 +402,17 @@ static int launch(fixture_t *f, const char *mode, int split, int missing) {
 }
 static int restored(fixture_t *f) {
   struct termios input, output;
-  CHECK(!tcgetattr(f->slave, &input) && equal(&input, &f->input));
+  CHECK(!tcgetattr(f->slave, &input) && test_termios_equal(&input, &f->input));
   CHECK(
       !tcgetattr(f->output_slave >= 0 ? f->output_slave : f->slave, &output) &&
-      equal(&output, &f->output));
+      test_termios_equal(&output, &f->output));
   CHECK(fcntl(f->slave, F_GETFL) == f->input_flags);
   CHECK(fcntl(f->output_slave >= 0 ? f->output_slave : f->slave, F_GETFL) ==
         f->output_flags);
   return 0;
 }
 static int finish_status(fixture_t *f, int status, int code) {
+  int session_status;
   active_supervisor = 0;
   CHECK(WIFEXITED(status) && WEXITSTATUS(status) == code);
   CHECK(!restored(f));
@@ -380,10 +420,14 @@ static int finish_status(fixture_t *f, int status, int code) {
     CHECK(kill(f->host.pid, 0) < 0 && errno == ESRCH);
   }
   active_host = 0;
-  close(f->master);
-  close(f->slave);
   close(f->notice);
   close(f->control);
+  close(f->states);
+  CHECK(!wait_state(f->session, &session_status, 0));
+  active_session = 0;
+  CHECK(WIFEXITED(session_status) && WEXITSTATUS(session_status) == 0);
+  close(f->slave);
+  close(f->master);
   if (f->output_slave >= 0) {
     close(f->output_slave);
     close(f->output_master);
@@ -392,7 +436,7 @@ static int finish_status(fixture_t *f, int status, int code) {
 }
 static int finish(fixture_t *f, int code) {
   int status;
-  CHECK(!wait_state(f->supervisor, &status, 0));
+  CHECK(!exact(f->states, &status, sizeof(status), 0));
   return finish_status(f, status, code);
 }
 static int shutdown_races(void) {
@@ -405,7 +449,7 @@ static int shutdown_races(void) {
       stop_signal = termination[i];
       CHECK(!launch(&f, "idle", 0, 0));
       CHECK(!kill(f.host.pid, SIGSTOP));
-      CHECK(!wait_state(f.supervisor, &status, WUNTRACED));
+      CHECK(!exact(f.states, &status, sizeof(status), 0));
       CHECK(!WIFSTOPPED(status));
       CHECK(!finish_status(&f, status, 128 + stop_signal));
     }
@@ -416,7 +460,7 @@ static int shutdown_races(void) {
     int status;
     CHECK(!launch(&f, "ignore", 0, 0));
     CHECK(!kill(f.host.pid, SIGSTOP));
-    CHECK(!wait_state(f.supervisor, &status, WUNTRACED));
+    CHECK(!exact(f.states, &status, sizeof(status), 0));
     CHECK(!WIFSTOPPED(status));
     CHECK(!finish_status(&f, status, 128 + SIGTERM));
   }
@@ -450,7 +494,7 @@ static int stopped(int directed) {
                 0, 0));
   CHECK(!kill(directed == 1 ? f.supervisor : f.host.pid,
               directed == 1 ? SIGTSTP : SIGSTOP));
-  CHECK(!wait_state(f.supervisor, &status, WUNTRACED));
+  CHECK(!exact(f.states, &status, sizeof(status), 0));
   CHECK(WIFSTOPPED(status));
   CHECK(!restored(&f));
   CHECK(tcgetpgrp(f.master) == f.supervisor);

@@ -8,6 +8,7 @@
 #include <pty.h>
 #endif
 #include "softline/transcript.h"
+#include "termios_snapshot.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
@@ -369,7 +370,7 @@ int main(void) {
   sl_free_string(sl, line);
   CHECK(sl_output_stream_end(sl) == SL_OK);
   sl_destroy(sl);
-  CHECK(!tcgetattr(slave, &after) && before.c_lflag == after.c_lflag);
+  CHECK(!tcgetattr(slave, &after) && test_termios_equal(&before, &after));
   for (i = 0; i < 2; ++i) {
     f.handoff = i;
     f.phase = 0;
@@ -383,7 +384,7 @@ int main(void) {
     CHECK(line && !strcmp(line, "done") && f.phase == 3);
     sl_free_string(sl, line);
     sl_destroy(sl);
-    CHECK(!tcgetattr(slave, &after) && before.c_lflag == after.c_lflag);
+    CHECK(!tcgetattr(slave, &after) && test_termios_equal(&before, &after));
   }
   close(f.stop[1]);
   CHECK(!pthread_join(f.reader, NULL));

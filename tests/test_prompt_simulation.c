@@ -7,9 +7,11 @@
 #else
 #include <pty.h>
 #endif
+#include <errno.h>
 #include <softline/softline.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -24,7 +26,7 @@
 static const char text[] = "e\314\201x";
 typedef struct {
   double start, first, full;
-  int steered;
+  int steered, master, send_manual;
 } probe_t;
 
 static double milliseconds(void) {
@@ -40,6 +42,8 @@ static void observe(sl_t *sl, void *userdata) {
     probe->first = milliseconds();
   if (!probe->full && !strcmp(draft, text))
     probe->full = milliseconds();
+  if (probe->send_manual == 1)
+    probe->send_manual = write(probe->master, "manual\r", 7) == 7 ? 0 : -1;
 }
 
 static int admit(sl_t *sl, const char *draft, sl_prompt_queue_mode_t mode,
@@ -53,17 +57,15 @@ static int admit(sl_t *sl, const char *draft, sl_prompt_queue_mode_t mode,
   return SL_OK;
 }
 
-int main(void) {
+static int simulate(int master, int slave) {
   sl_config_t config;
   sl_prompt_simulation_options_t options = {40, 30, 50,
                                             SL_PROMPT_QUEUE_MODE_QUEUED};
   sl_t *sl;
   char *line;
-  int master, slave;
   probe_t probe = {0};
   sl_prompt_source_t source;
-  struct winsize size = {24, 80, 0, 0};
-  CHECK(!openpty(&master, &slave, NULL, NULL, &size));
+  probe.master = master;
   sl_config_init(&config);
   config.input_fd = config.output_fd = slave;
   config.prompt_queue = 1;
@@ -96,13 +98,34 @@ int main(void) {
   options.start_delay_ms = 10000;
   options.mode = SL_PROMPT_QUEUE_MODE_QUEUED;
   CHECK(sl_simulate_prompt(sl, "cancel when typing", &options) == SL_OK);
-  CHECK(write(master, "manual\r", 7) == 7);
+  probe.send_manual = 1;
   line = sl->readline(sl, "> ");
-  CHECK(line && !strcmp(line, "manual"));
+  CHECK(!probe.send_manual && line && !strcmp(line, "manual"));
   sl_free_string(sl, line);
   CHECK(sl_cancel_prompt_simulation(sl) == SL_OK);
   sl_destroy(sl);
+  return 0;
+}
+
+int main(void) {
+  int master, slave, status;
+  struct winsize size = {24, 80, 0, 0};
+  char bytes[4096];
+  ssize_t n;
+  pid_t process;
+  CHECK(!openpty(&master, &slave, NULL, NULL, &size));
+  process = fork();
+  CHECK(process >= 0);
+  if (!process)
+    _exit(simulate(master, slave));
   close(slave);
+  /* Keep the terminal writable through every render and mode transition. */
+  do {
+    n = read(master, bytes, sizeof(bytes));
+  } while (n > 0 || (n < 0 && errno == EINTR));
+  CHECK(n == 0 || errno == EIO);
+  CHECK(waitpid(process, &status, 0) == process);
+  CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
   close(master);
   return 0;
 }

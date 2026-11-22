@@ -2,6 +2,7 @@
 #define _DARWIN_C_SOURCE 1
 #endif
 #define _XOPEN_SOURCE 700
+#include "termios_snapshot.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
@@ -73,23 +74,12 @@ static double now(void) {
   clock_gettime(CLOCK_MONOTONIC, &t);
   return t.tv_sec + t.tv_nsec / 1e9;
 }
-static int equal(const struct termios *a, const struct termios *b) {
-  size_t i;
-  if (a->c_iflag != b->c_iflag || a->c_oflag != b->c_oflag ||
-      a->c_cflag != b->c_cflag || a->c_lflag != b->c_lflag ||
-      cfgetispeed(a) != cfgetispeed(b) || cfgetospeed(a) != cfgetospeed(b))
-    return 0;
-  for (i = 0; i < NCCS; ++i)
-    if (a->c_cc[i] != b->c_cc[i])
-      return 0;
-  return 1;
-}
 static void secondary(int signo) {
   struct termios t;
-  char byte =
-      signo == SIGUSR1 && !tcgetattr(slave_fd, &t) && equal(&t, &baseline)
-          ? 'N'
-          : 'F';
+  char byte = signo == SIGUSR1 && !tcgetattr(slave_fd, &t) &&
+                      test_termios_equal(&t, &baseline)
+                  ? 'N'
+                  : 'F';
   (void)write(notice, &byte, 1);
 }
 static void custom(int signo, siginfo_t *info, void *context) {
@@ -108,7 +98,7 @@ static void custom(int signo, siginfo_t *info, void *context) {
   }
   (void)context;
   byte = signo == SIGTERM && info->si_pid == getppid() &&
-                 !tcgetattr(slave_fd, &t) && equal(&t, &baseline)
+                 !tcgetattr(slave_fd, &t) && test_termios_equal(&t, &baseline)
              ? 'C'
              : 'F';
   (void)write(notice, &byte, 1);
@@ -320,7 +310,7 @@ static int run(int signo, int kind, int readline_mode) {
     if (signo == SIGTSTP) {
       double due;
       CHECK(!wait_child(pid, &status, WUNTRACED) && WIFSTOPPED(status));
-      CHECK(!tcgetattr(slave, &after) && equal(&before, &after) &&
+      CHECK(!tcgetattr(slave, &after) && test_termios_equal(&before, &after) &&
             fcntl(slave, F_GETFL) == flags);
       CHECK(!kill(pid, SIGCONT));
       due = now() + 2;
@@ -334,9 +324,10 @@ static int run(int signo, int kind, int readline_mode) {
     }
   }
   CHECK(!wait_child(pid, &status, 0));
-  CHECK(!tcgetattr(slave, &after) && equal(&before, &after) &&
+  CHECK(!tcgetattr(slave, &after) && test_termios_equal(&before, &after) &&
         fcntl(slave, F_GETFL) == flags);
-  CHECK(!tcgetattr(output, &after) && equal(&before_output, &after) &&
+  CHECK(!tcgetattr(output, &after) &&
+        test_termios_equal(&before_output, &after) &&
         fcntl(output, F_GETFL) == output_flags);
   if (kind == 3)
     CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 42);

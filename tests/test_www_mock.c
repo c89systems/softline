@@ -277,27 +277,31 @@ static int write_all(int fd, const void *data, size_t n) {
   }
   return 0;
 }
-static int read_all(int fd, void *data, size_t n) {
-  unsigned char *p = data;
+static double read_clock_ms(void) {
   struct timespec time;
-  double deadline;
   clock_gettime(CLOCK_MONOTONIC, &time);
-  deadline = time.tv_sec * 1000.0 + time.tv_nsec / 1000000.0 + 3000;
-  while (n) {
+  return time.tv_sec * 1000.0 + time.tv_nsec / 1000000.0;
+}
+static ssize_t read_with_pty(int fd, void *data, size_t n, double deadline) {
+  for (;;) {
     struct pollfd waits[2];
     ssize_t k;
-    double left;
-    clock_gettime(CLOCK_MONOTONIC, &time);
-    left = deadline - time.tv_sec * 1000.0 - time.tv_nsec / 1000000.0;
-    if (left <= 0)
+    int ready;
+    double left = deadline - read_clock_ms();
+    if (left <= 0) {
+      errno = ETIMEDOUT;
       return -1;
+    }
     waits[0].fd = fd;
     waits[0].events = POLLIN;
     waits[0].revents = 0;
     waits[1].fd = terminal_fd;
     waits[1].events = POLLIN;
     waits[1].revents = 0;
-    if (poll(waits, 2, (int)left + 1) <= 0)
+    ready = poll(waits, 2, (int)left + 1);
+    if (ready < 0 && errno == EINTR)
+      continue;
+    if (ready < 0)
       return -1;
     if (waits[1].revents & POLLIN) {
       char discard[4096];
@@ -305,9 +309,16 @@ static int read_all(int fd, void *data, size_t n) {
     }
     if (!waits[0].revents)
       continue;
-    k = read(fd, p, n);
-    if (k < 0 && errno == EINTR)
-      continue;
+    k = read(fd, data, n);
+    if (k >= 0 || errno != EINTR)
+      return k;
+  }
+}
+static int read_all(int fd, void *data, size_t n) {
+  unsigned char *p = data;
+  double deadline = read_clock_ms() + 3000;
+  while (n) {
+    ssize_t k = read_with_pty(fd, p, n, deadline);
     if (k <= 0)
       return -1;
     p += k;
@@ -903,8 +914,10 @@ int main(int argc, char **argv) {
     pipes[0] = -1;
     CHECK(pipe(pipes) == 0);
   }
-  if (dual)
-    CHECK(openpty(&terminal_fd, &slave, NULL, NULL, NULL) == 0);
+  if (dual) {
+    struct winsize size = {24, 80, 0, 0};
+    CHECK(openpty(&terminal_fd, &slave, NULL, NULL, &size) == 0);
+  }
   if (dual) {
     sl_config_t config;
     sl_t *seed;
@@ -1034,15 +1047,17 @@ int main(int argc, char **argv) {
   CHECK(fd >= 0);
   CHECK(write_all(fd, "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n", 35) == 0);
   used = 0;
-  for (;;) {
-    ssize_t n = read(fd, http + used, 512 * 1024 - used - 1);
-    if (n < 0 && errno == EINTR)
-      continue;
-    CHECK(n >= 0);
-    if (!n)
-      break;
-    used += (size_t)n;
-    CHECK(used < 512 * 1024 - 1);
+  {
+    double deadline = read_clock_ms() + 3000;
+    for (;;) {
+      ssize_t n =
+          read_with_pty(fd, http + used, 512 * 1024 - used - 1, deadline);
+      CHECK(n >= 0);
+      if (!n)
+        break;
+      used += (size_t)n;
+      CHECK(used < 512 * 1024 - 1);
+    }
   }
   http[used] = 0;
   CHECK(strstr(http, "200 OK") && strstr(http, "Welcome to softline") &&

@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/wait.h>
 #include <termios.h>
 #include <time.h>
@@ -56,12 +57,14 @@ static int write_all(int fd, const char *p, size_t n) {
 }
 static int child(void) {
   struct termios raw;
+  struct winsize size;
   char cwd[128], bytes[4096];
   size_t received = 0;
   if (!isatty(0) || !isatty(1) || !getcwd(cwd, sizeof(cwd)) ||
       strcmp(cwd, "/") || !getenv("SOFTLINE_SESSION_TEST") ||
       strcmp(getenv("SOFTLINE_SESSION_TEST"), "selected") || !getenv("TERM") ||
-      strcmp(getenv("TERM"), "softline-test") || tcgetattr(0, &raw))
+      strcmp(getenv("TERM"), "softline-test") || tcgetattr(0, &raw) ||
+      ioctl(0, TIOCGWINSZ, &size) || size.ws_row != 19 || size.ws_col != 73)
     return 100;
   raw.c_iflag = 0;
   raw.c_oflag = 0;
@@ -140,6 +143,10 @@ static int stream(const char *program, int receiver) {
   CHECK((receiver ? s->dispatch(s, &e) : sl_terminal_session_dispatch(s, &e)) ==
         SL_OK);
   CHECK(s->dispatch(s, &e) == SL_ERROR_INVALID);
+  if (receiver) {
+    e.operation = SL_TERMINAL_RESIZE;
+    CHECK(s->dispatch(s, &e) == SL_OK);
+  }
   while (ready_bytes < sizeof(ready) && now() < due) {
     step(s);
     memset(&e, 0, sizeof(e));
