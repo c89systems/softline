@@ -1,8 +1,18 @@
 #ifndef SOFTLINE_TEST_TERMIOS_SNAPSHOT_H
 #define SOFTLINE_TEST_TERMIOS_SNAPSHOT_H
 
+#include <fcntl.h>
 #include <stddef.h>
 #include <termios.h>
+
+#if defined(__APPLE__)
+/* XNU also reports its internal "has been written" bit in F_GETFL.
+ * Compare the access mode and all flags that F_SETFL can restore. */
+#define TEST_TTY_FILE_FLAGS                                                    \
+  (O_ACCMODE | O_APPEND | O_ASYNC | O_SYNC | O_DSYNC | O_NONBLOCK)
+#else
+#define TEST_TTY_FILE_FLAGS (~0)
+#endif
 
 static int test_termios_equal(const struct termios *a,
                               const struct termios *b) {

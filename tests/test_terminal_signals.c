@@ -177,8 +177,8 @@ static int read_notice(int fd, char expected) {
   return poll(&p, 1, 3000) != 1 || read(fd, &byte, 1) != 1 || byte != expected;
 }
 static int run(int signo, int kind, int readline_mode) {
-  int master, slave, pipefd[2], status, flags, output, output_master = -1,
-                                                       output_flags;
+  int master, slave, pipefd[2], status, flags, output,
+      output_master = -1, output_flags, after_flags;
   pid_t pid;
   struct termios before, after = {0}, before_output;
   struct winsize size;
@@ -310,8 +310,9 @@ static int run(int signo, int kind, int readline_mode) {
     if (signo == SIGTSTP) {
       double due;
       CHECK(!wait_child(pid, &status, WUNTRACED) && WIFSTOPPED(status));
-      CHECK(!tcgetattr(slave, &after) && test_termios_equal(&before, &after) &&
-            fcntl(slave, F_GETFL) == flags);
+      after_flags = fcntl(slave, F_GETFL);
+      CHECK(after_flags >= 0 && !((after_flags ^ flags) & TEST_TTY_FILE_FLAGS));
+      CHECK(!tcgetattr(slave, &after) && test_termios_equal(&before, &after));
       CHECK(!kill(pid, SIGCONT));
       due = now() + 2;
       do {
@@ -324,8 +325,9 @@ static int run(int signo, int kind, int readline_mode) {
     }
   }
   CHECK(!wait_child(pid, &status, 0));
+  after_flags = fcntl(slave, F_GETFL);
   if (tcgetattr(slave, &after) || !test_termios_equal(&before, &after) ||
-      fcntl(slave, F_GETFL) != flags) {
+      after_flags < 0 || ((after_flags ^ flags) & TEST_TTY_FILE_FLAGS)) {
     fprintf(stderr,
             "signal %d case %d readline %d status %d\n"
             "before iflag=%lx oflag=%lx cflag=%lx lflag=%lx ispeed=%lu "
@@ -339,13 +341,14 @@ static int run(int signo, int kind, int readline_mode) {
             (unsigned long)after.c_iflag, (unsigned long)after.c_oflag,
             (unsigned long)after.c_cflag, (unsigned long)after.c_lflag,
             (unsigned long)cfgetispeed(&after),
-            (unsigned long)cfgetospeed(&after), fcntl(slave, F_GETFL));
+            (unsigned long)cfgetospeed(&after), after_flags);
+    return 1;
   }
-  CHECK(!tcgetattr(slave, &after) && test_termios_equal(&before, &after) &&
-        fcntl(slave, F_GETFL) == flags);
+  after_flags = fcntl(output, F_GETFL);
+  CHECK(after_flags >= 0 &&
+        !((after_flags ^ output_flags) & TEST_TTY_FILE_FLAGS));
   CHECK(!tcgetattr(output, &after) &&
-        test_termios_equal(&before_output, &after) &&
-        fcntl(output, F_GETFL) == output_flags);
+        test_termios_equal(&before_output, &after));
   if (kind == 3)
     CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 42);
   else if (kind == 1 || kind == 2 || kind == 4 || kind == 5 || kind == 6 ||

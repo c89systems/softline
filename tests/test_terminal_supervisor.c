@@ -408,12 +408,12 @@ static int restored(fixture_t *f) {
       !tcgetattr(f->output_slave >= 0 ? f->output_slave : f->slave, &output) &&
       test_termios_equal(&output, &f->output));
   flags = fcntl(f->slave, F_GETFL);
-  if (flags != f->input_flags)
+  if (flags < 0 || ((flags ^ f->input_flags) & TEST_TTY_FILE_FLAGS))
     fprintf(stderr, "supervisor input flags expected %x, got %x\n",
             f->input_flags, flags);
-  CHECK(flags == f->input_flags);
-  CHECK(fcntl(f->output_slave >= 0 ? f->output_slave : f->slave, F_GETFL) ==
-        f->output_flags);
+  CHECK(flags >= 0 && !((flags ^ f->input_flags) & TEST_TTY_FILE_FLAGS));
+  flags = fcntl(f->output_slave >= 0 ? f->output_slave : f->slave, F_GETFL);
+  CHECK(flags >= 0 && !((flags ^ f->output_flags) & TEST_TTY_FILE_FLAGS));
   return 0;
 }
 static void drain_output(int fd) {
