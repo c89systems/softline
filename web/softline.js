@@ -164,7 +164,9 @@ function actionItems() {
     { id: 'edit', label: 'Edit queued message', description: 'Ctrl+Shift+Enter', disabled: !state.online || !state.canEdit || ![...state.queue.values()].some(item => item.mode !== 'pending') },
     { id: 'approvals', label: 'Focus approvals', description: 'Ctrl+Shift+1', disabled: !oldest },
     { id: 'approve', label: 'Approve focused request', description: 'Ctrl+Shift+2', disabled: !state.online || !focused },
-    { id: 'reject', label: 'Reject focused request', description: 'Ctrl+Shift+3', disabled: !state.online || !focused }
+    { id: 'reject', label: 'Reject focused request', description: 'Ctrl+Shift+3', disabled: !state.online || !focused },
+    { id: 'stash', label: 'Stash draft', description: 'Ctrl+Shift+7', disabled: !editor.canStashDraft },
+    { id: 'append-stash', label: 'Append stashed draft', description: 'Ctrl+Shift+8', disabled: !editor.stashedDraft }
   ];
 }
 function promptAction(action) {
@@ -183,6 +185,13 @@ function promptAction(action) {
     decide(action, state.approval && state.queue.get(state.approval.id));
   } else if (action === 'edit') {
     editQueue(state.approval ? state.queue.get(state.approval.id) : [...state.queue.values()].filter(item => item.mode !== 'pending').at(-1));
+  } else if (action === 'stash' || action === 'append-stash') {
+    editor.enqueue(() => {
+      if (!editor.focus()) return;
+      if (state.approval) { state.approval = null; queue(); }
+      if (action === 'stash') editor.stashDraft();
+      else editor.appendStashedDraft();
+    });
   } else if (action === 'terminal') {
     if (terminalPanel.frame) terminalPanel.close();
     else if (state.online && state.terminal) terminalPanel.open(state.terminal);

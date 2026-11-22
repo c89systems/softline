@@ -472,8 +472,8 @@ export async function runWebCompletionTests(source, completionSource, promptSour
     assert(ui.get('queue').children.length === 1 && ui.get('queue').children[0].dataset.id === 'approval', 'approval was delayed');
     assert(!ui.get('toast').hidden && ui.get('toast').textContent === 'Connection failed', 'connection error was delayed');
   });
-  const shortcut = (ui, action, extra = {}) => ui.key({ approvals: '!', approve: '@', reject: '#', edit: 'Enter', terminal: '`' }[action],
-    { ctrlKey: true, shiftKey: action !== 'terminal', code: { approvals: 'Digit1', approve: 'Digit2', reject: 'Digit3', edit: 'Enter', terminal: 'Backquote' }[action], ...extra });
+  const shortcut = (ui, action, extra = {}) => ui.key({ approvals: '!', approve: '@', reject: '#', edit: 'Enter', terminal: '`', stash: '&', append: '*' }[action],
+    { ctrlKey: true, shiftKey: action !== 'terminal', code: { approvals: 'Digit1', approve: 'Digit2', reject: 'Digit3', edit: 'Enter', terminal: 'Backquote', stash: 'Digit7', append: 'Digit8' }[action], ...extra });
   await check('startup focuses the prompt before configuration or connection finishes', async ui => {
     assert(ui.document.activeElement === ui.prompt && ui.prompt.focusOptions.preventScroll, 'startup did not focus the prompt without scrolling');
   }, { beforeConfig(document) { assert(document.activeElement === document.getElementById('prompt'), 'startup focus waited for configuration'); } });
@@ -1345,6 +1345,74 @@ export async function runWebCompletionTests(source, completionSource, promptSour
     ui.get('completions').children.find(item => item.textContent.includes('Edit queued message')).click();
     assert(ui.get('queue-editor').open, '+ action and keyboard binding differ');
   });
+  await check('draft stash shortcuts keep exact text and append at the end', async ui => {
+    const saved = ' first line\nβeta  ';
+    ui.input(saved, 'insertFromPaste');
+    ui.prompt.setSelectionRange(1, 4);
+    assert(!shortcut(ui, 'stash', { isComposing: true }).defaultPrevented && ui.prompt.value === saved, 'stash interrupted composition');
+    assert(shortcut(ui, 'stash').defaultPrevented && ui.prompt.value === '', 'stash did not cut the entire draft');
+    const whitespace = ' \t\n';
+    ui.input(whitespace, 'insertFromPaste');
+    ui.prompt.setSelectionRange(1, 2);
+    shortcut(ui, 'stash');
+    assert(ui.prompt.value === whitespace && ui.prompt.selectionStart === 1 && ui.prompt.selectionEnd === 2, 'whitespace stash changed the draft or selection');
+    assert(shortcut(ui, 'append').defaultPrevented && ui.prompt.value === whitespace + saved &&
+      ui.prompt.selectionStart === ui.prompt.value.length && ui.prompt.selectionEnd === ui.prompt.value.length, 'append replaced the selection or changed the saved text');
+    shortcut(ui, 'append', { repeat: true });
+    assert(ui.prompt.value === whitespace + saved, 'held shortcut appended again');
+    shortcut(ui, 'append');
+    assert(ui.prompt.value === whitespace + saved + saved, 'append consumed the stash');
+    shortcut(ui, 'stash');
+    ui.input('another prompt');
+    ui.key('Enter'); await ui.idle();
+    shortcut(ui, 'append');
+    assert(ui.sent() === 'another prompt' && ui.prompt.value === whitespace + saved + saved, 'sending cleared the most recent stash');
+  });
+  await check('draft stash menu works offline and respects the host prompt lock', async ui => {
+    const item = label => ui.get('completions').children.find(candidate => candidate.textContent.includes(label));
+    const menu = () => ui.get('plus').click();
+    ui.socket.close();
+    shortcut(ui, 'append');
+    assert(ui.prompt.value === '', 'empty stash inserted text');
+    menu();
+    assert(item('Stash draft')?.disabled && item('Append stashed draft')?.disabled, 'unavailable stash actions were enabled');
+    ui.input('offline draft', 'insertFromPaste');
+    menu();
+    assert(item('Stash draft')?.textContent.includes('Ctrl+Shift+7'), 'stash shortcut is undiscoverable');
+    item('Stash draft').click();
+    menu();
+    assert(item('Append stashed draft')?.textContent.includes('Ctrl+Shift+8'), 'append shortcut is undiscoverable');
+    item('Append stashed draft').click();
+    assert(ui.prompt.value === 'offline draft' && ui.document.activeElement === ui.prompt, 'menu did not restore the draft and focus');
+    ui.event({ type: 'prompt_state', disabled: '1' });
+    shortcut(ui, 'stash'); shortcut(ui, 'append');
+    assert(ui.prompt.readOnly && ui.prompt.value === 'offline draft', 'stash shortcut changed a locked draft');
+  }, { noProviders: true });
+  await check('oversized stash operations preserve the draft and saved text', async ui => {
+    ui.input('saved'); shortcut(ui, 'stash');
+    const full = 'é'.repeat(64 * 1024);
+    ui.input(full, 'insertFromPaste');
+    shortcut(ui, 'append');
+    assert(ui.prompt.value === full && ui.get('toast').textContent.includes('128 KiB'), 'oversized append lost draft or feedback');
+    ui.input('x');
+    shortcut(ui, 'stash');
+    assert(ui.prompt.value === full + 'x', 'unrestorable oversized draft was cleared');
+    ui.prompt.setSelectionRange(0, ui.prompt.value.length);
+    ui.input('new ', 'insertFromPaste');
+    shortcut(ui, 'append');
+    assert(ui.prompt.value === 'new saved', 'failed operation lost the stash');
+  }, { noProviders: true });
+  await check('draft stash follows pending completion edits and stays in its own tab', async ui => {
+    ui.input('@l'); ui.key('Tab'); shortcut(ui, 'stash'); ui.input('X');
+    assert(ui.prompt.value === '@l', 'stash raced pending completion acceptance');
+    ui.reply(ui.queries()[0]); await ui.idle();
+    assert(ui.prompt.value === 'X', 'stash captured the subsequent keystroke');
+    shortcut(ui, 'append');
+    assert(ui.prompt.value === 'X@lua/', 'stash did not retain the accepted completion');
+    const other = await boot({ noProviders: true });
+    shortcut(other, 'append');
+    assert(other.prompt.value === '', 'draft stash leaked into another tab');
+  }, { manual: true });
   await check('approval menu actions and reject shortcut use the same focused identity', async ui => {
     queueState(ui, [{ id: 'a', revision: '1' }]);
     ui.get('plus').click(); await ui.idle();

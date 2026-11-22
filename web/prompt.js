@@ -1,6 +1,9 @@
 import { Completion } from './completion.js';
 
 const space = c => /[ \t\n\r\v\f]/u.test(c);
+function checkDraftSize(text) {
+  if (new TextEncoder().encode(text).length > 128 * 1024) throw new Error('The prompt exceeds 128 KiB.');
+}
 function boundary(text, at, forward) {
   if (typeof Intl !== 'undefined' && Intl.Segmenter) {
     const parts = [...new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(text)].map(part => part.index);
@@ -16,7 +19,7 @@ export class Prompt {
     this.input = get('prompt'); this.menu = get('completions'); this.composer = get('composer');
     this.requests = new Map(); this.serial = 0; this.menuOpen = false;
     this.menuItems = []; this.menuActive = 0; this.jobs = []; this.busy = false;
-    this.before = this.input.value; this.literalInput = false;
+    this.before = this.input.value; this.literalInput = false; this.stashedDraft = '';
     this.model = new Completion(() => this.current(), (text, cursor, edit) => this.apply(text, cursor, edit),
       (prefix, session) => this.resolve(prefix, session), () => this.render(),
       () => this.composer.dataset.simulating !== '1');
@@ -63,9 +66,25 @@ export class Prompt {
     return true;
   }
   current() { return { text: this.input.value, cursor: this.input.selectionStart, end: this.input.selectionEnd }; }
+  get canStashDraft() { return !!this.input.value.trim(); }
+  stashDraft() {
+    if (this.input.readOnly || !this.canStashDraft) return;
+    const text = this.input.value;
+    checkDraftSize(text);
+    this.apply('', 0);
+    this.stashedDraft = text;
+    this.reset();
+  }
+  appendStashedDraft() {
+    if (this.input.readOnly || !this.stashedDraft) return;
+    const before = this.input.value, text = before + this.stashedDraft;
+    this.apply(text, text.length);
+    this.literalInput = true;
+    this.model.input(before, text, text.length, true);
+  }
   apply(text, cursor, edit = {}) {
     if (this.input.readOnly) return;
-    if (new TextEncoder().encode(text).length > 128 * 1024) throw new Error('The prompt exceeds 128 KiB.');
+    checkDraftSize(text);
     const before = this.input.value, oldEnd = this.input.selectionEnd;
     this.input.value = text;
     this.input.setSelectionRange(cursor, edit.syntax === undefined ? cursor : oldEnd > edit.syntax ? oldEnd - 1 : oldEnd);
@@ -234,7 +253,10 @@ export class Prompt {
     if (event.isComposing) return;
     const control = event.ctrlKey && !event.altKey, key = event.key;
     const shortcut = !event.altKey && !event.metaKey && event.ctrlKey &&
-      (event.shiftKey ? { Enter: 'edit', Digit1: 'approvals', Digit2: 'approve', Digit3: 'reject' }[event.code || key] : key === '`' || event.code === 'Backquote' ? 'terminal' : null);
+      (event.shiftKey ? {
+        Enter: 'edit', Digit1: 'approvals', Digit2: 'approve', Digit3: 'reject',
+        Digit7: 'stash', Digit8: 'append-stash'
+      }[event.code || key] : key === '`' || event.code === 'Backquote' ? 'terminal' : null);
     if (shortcut && this.options.action) {
       event.preventDefault();
       this.hideMenu();

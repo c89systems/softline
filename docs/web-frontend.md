@@ -260,7 +260,7 @@ typing filters cached provider snapshots without another request. Tab resolves
 known directory ancestors lazily for a partial path such as `@examples/ch`.
 Only the explicit `+` button opens a menu, for completions, images and recovery.
 
-The `+` menu also exposes queue and approval actions with shortcut hints:
+The `+` menu also exposes actions with shortcut hints.
 
 | Action | Browser shortcut (Control on every platform) |
 | --- | --- |
@@ -270,9 +270,13 @@ The `+` menu also exposes queue and approval actions with shortcut hints:
 | Focus the oldest pending approval | Ctrl+Shift+1 |
 | Approve the focused request | Ctrl+Shift+2 |
 | Reject the focused request | Ctrl+Shift+3 |
+| Stash the entire draft | Ctrl+Shift+7 |
+| Append the stashed draft | Ctrl+Shift+8 |
 
-Queue and terminal shortcuts apply in the prompt and focused approval row and avoid Chrome/Chromium's
-Alt menu bindings and tab-search shortcut.
+These shortcuts apply in the prompt and focused approval row. Stashing clears a
+draft with content and replaces the saved text in this browser tab. A
+whitespace-only draft leaves the stash intact. Appending adds the saved text
+directly to the end of the current draft and keeps it available for reuse.
 
 The prompt focuses on startup, before configuration or connection completes,
 and after sending. Returning to the window restores prompt focus only when
