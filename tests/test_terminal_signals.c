@@ -209,7 +209,7 @@ static int run(int signo, int kind, int readline_mode) {
     sl_config_t c;
     struct rlimit core = {0, 0};
     struct sigaction a;
-    int result;
+    int result, reset_handler = 0;
     close(master);
     if (output_master >= 0)
       close(output_master);
@@ -246,6 +246,17 @@ static int run(int signo, int kind, int readline_mode) {
     }
     if (signo && sigaction(signo, &a, NULL))
       _exit(10);
+    if (kind == 2) {
+      if (sigaction(signo, NULL, &a))
+        _exit(13);
+      /* Darwin installs SA_RESETHAND but omits it when reading an action.
+       * Softline can preserve only the policy it can read. */
+      reset_handler = (a.sa_flags & SA_RESETHAND) != 0;
+#if !defined(__APPLE__)
+      if (!reset_handler)
+        _exit(24);
+#endif
+    }
     if (nested && (signal(SIGUSR1, secondary) == SIG_ERR))
       _exit(18);
     sl_config_init(&c);
@@ -279,7 +290,8 @@ static int run(int signo, int kind, int readline_mode) {
         _exit(13);
       if ((kind == 1 || kind == 5 || kind == 6) && a.sa_sigaction != custom)
         _exit(14);
-      if (kind == 2 && a.sa_handler != SIG_DFL)
+      if (kind == 2 &&
+          (reset_handler ? a.sa_handler != SIG_DFL : a.sa_sigaction != custom))
         _exit(15);
       if (kind == 7 && a.sa_handler != SIG_IGN)
         _exit(23);
@@ -352,9 +364,12 @@ static int run(int signo, int kind, int readline_mode) {
   if (kind == 3)
     CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 42);
   else if (kind == 1 || kind == 2 || kind == 4 || kind == 5 || kind == 6 ||
-           kind == 7 || kind == 8 || kind >= 9)
+           kind == 7 || kind == 8 || kind >= 9) {
+    if (!WIFEXITED(status) || WEXITSTATUS(status))
+      fprintf(stderr, "signal %d case %d readline %d child status %d\n", signo,
+              kind, readline_mode, status);
     CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
-  else
+  } else
     CHECK(WIFSIGNALED(status) &&
           WTERMSIG(status) == (signo == SIGTSTP ? SIGTERM : signo));
   close(master);

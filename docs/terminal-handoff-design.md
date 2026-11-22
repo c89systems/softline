@@ -230,12 +230,16 @@ same cleanup path.
 While a TUI owns terminal input, temporary signal guards restore the terminal
 before default termination or job-control suspension and before invoking an
 existing application handler. Returning handlers and foreground job resumption
-reacquire the prior modes. Signal information, application masks, one-shot
-handlers, restart flags and alternate signal stacks are preserved; original
-dispositions are restored when ownership ends. Register application handlers
-before acquiring TUI input; ignored signals remain untouched. Replacing a
-guarded disposition during ownership opts that signal out of the guard; its
-replacement is preserved on release.
+reacquire the prior modes. Signal information, application masks, restart
+flags and alternate signal stacks are preserved. The guard restores
+dispositions when ownership ends and honors one-shot handlers where
+`sigaction()` reports `SA_RESETHAND`. On macOS, `sigaction()` omits that
+flag on readback, so the guard treats an existing one-shot handler as
+persistent. [XNU signal implementation](https://github.com/apple-oss-distributions/xnu/blob/xnu-11417.121.6/bsd/kern/kern_sig.c)
+
+Register application handlers before acquiring TUI input. Ignored signals
+retain their disposition. Replacing a guarded disposition during ownership
+opts that signal out of the guard, and the replacement is preserved on release.
 
 TUI acquisition/release and signal policy belong to one process owner thread.
 Multithreaded hosts must route these signals to that thread. Independent server
