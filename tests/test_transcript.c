@@ -10,6 +10,8 @@
 #include "softline/transcript.h"
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -31,14 +33,19 @@
   sl_transcript_write(sl, id, SL_TRANSCRIPT_VT, text, sizeof(text) - 1)
 #define CHAT(sl, text) sl_output_stream_write(sl, text, sizeof(text) - 1)
 
-enum { CHAT_BACKLOG_LIMIT = 256 * 1024 };
+enum { CHAT_BACKLOG_LIMIT = 256 * 1024, CAPTURE_LIMIT = 16384 };
 
 typedef struct fixture {
   sl_transcript_id_t log, worker;
   int master, phase, handoff, viewer_idle_ticks;
   double queue_started;
   size_t length;
-  char output[16384];
+  char output[CAPTURE_LIMIT];
+  pthread_mutex_t capture_lock;
+  pthread_t reader;
+  int stop[2];
+  size_t pending_length;
+  char pending[CAPTURE_LIMIT];
 } fixture_t;
 
 static volatile sig_atomic_t restored;
@@ -52,13 +59,50 @@ static void keys(fixture_t *f, const char *keys) {
   CHECK(write(f->master, keys, strlen(keys)) == (ssize_t)strlen(keys));
 }
 
-static void capture(fixture_t *f) {
+static void read_output(fixture_t *f) {
   ssize_t n;
-  while ((n = read(f->master, f->output + f->length,
-                   sizeof(f->output) - f->length - 1)) > 0)
-    f->length += (size_t)n;
+  do {
+    CHECK(f->pending_length < sizeof(f->pending));
+    n = read(f->master, f->pending + f->pending_length,
+             sizeof(f->pending) - f->pending_length);
+    if (n > 0)
+      f->pending_length += (size_t)n;
+  } while (n > 0 || (n < 0 && errno == EINTR));
   CHECK(n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK));
+}
+
+/* A synchronous transcript replay can exceed the PTY's output buffer.
+ * Drain it even while the editor is inside the replay call. */
+static void *read_output_thread(void *userdata) {
+  fixture_t *f = userdata;
+  struct pollfd fds[2];
+  fds[0].fd = f->master;
+  fds[0].events = POLLIN;
+  fds[1].fd = f->stop[0];
+  fds[1].events = POLLIN;
+  for (;;) {
+    int ready = poll(fds, 2, -1);
+    if (ready < 0 && errno == EINTR)
+      continue;
+    CHECK(ready > 0);
+    if (fds[1].revents)
+      return NULL;
+    CHECK(fds[0].revents & POLLIN);
+    CHECK(!pthread_mutex_lock(&f->capture_lock));
+    read_output(f);
+    CHECK(!pthread_mutex_unlock(&f->capture_lock));
+  }
+}
+
+static void capture(fixture_t *f) {
+  CHECK(!pthread_mutex_lock(&f->capture_lock));
+  read_output(f);
+  CHECK(f->pending_length < sizeof(f->output) - f->length);
+  memcpy(f->output + f->length, f->pending, f->pending_length);
+  f->length += f->pending_length;
+  f->pending_length = 0;
   f->output[f->length] = 0;
+  CHECK(!pthread_mutex_unlock(&f->capture_lock));
 }
 
 static void advance(fixture_t *f, const char *input) {
@@ -282,6 +326,9 @@ int main(void) {
   CHECK(signal(SIGUSR1, returning_handler) != SIG_ERR);
   CHECK(!openpty(&f.master, &slave, NULL, NULL, &size));
   CHECK(!fcntl(f.master, F_SETFL, O_NONBLOCK));
+  CHECK(!pipe(f.stop));
+  CHECK(!pthread_mutex_init(&f.capture_lock, NULL));
+  CHECK(!pthread_create(&f.reader, NULL, read_output_thread, &f));
   CHECK(!tcgetattr(slave, &before));
   sl_config_init(&config);
   config.input_fd = config.output_fd = slave;
@@ -338,6 +385,10 @@ int main(void) {
     sl_destroy(sl);
     CHECK(!tcgetattr(slave, &after) && before.c_lflag == after.c_lflag);
   }
+  close(f.stop[1]);
+  CHECK(!pthread_join(f.reader, NULL));
+  CHECK(!pthread_mutex_destroy(&f.capture_lock));
+  close(f.stop[0]);
   close(slave);
   close(f.master);
   return 0;
