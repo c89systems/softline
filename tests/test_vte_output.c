@@ -1,4 +1,4 @@
-#include "vte_test.h"
+#include "vte_output_sync.h"
 static int render(const char *fixture, const char *source, int chunk,
                   int handoff, int grow, int tabs, const char *initial,
                   struct snapshot *result) {
@@ -12,7 +12,10 @@ static int render(const char *fixture, const char *source, int chunk,
   double deadline;
   if (initial) {
     v.feed(s.terminal, initial, (long)strlen(initial));
-    pump();
+    if (output_parsed(&s, -1)) {
+      failed = 1;
+      goto cleanup;
+    }
   }
   if (chunk == 0) {
     for (i = 0; source[i] && used + 4 < sizeof(direct); ++i) {
@@ -25,7 +28,10 @@ static int render(const char *fixture, const char *source, int chunk,
     direct[used++] = '\r';
     direct[used++] = '\n';
     v.feed(s.terminal, direct, (long)used);
-    pump();
+    if (output_parsed(&s, -1)) {
+      failed = 1;
+      goto cleanup;
+    }
   } else {
     void *pty;
     int sent = 0;
@@ -68,12 +74,13 @@ static int render(const char *fixture, const char *source, int chunk,
     slave = -1;
     deadline = now() + 5;
     while (waitpid(child, &status, WNOHANG) == 0) {
-      struct snapshot current;
-      pump();
-      current = snapshot(&s, 0);
-      if (handoff && !sent && strstr(current.text, "> ")) {
-        v.send(s.terminal, "\r", 1);
-        sent = 1;
+      pump_once();
+      if (handoff && !sent) {
+        struct snapshot current = snapshot(&s, 0);
+        if (strstr(current.text, "> ")) {
+          v.send(s.terminal, "\r", 1);
+          sent = 1;
+        }
       }
       if (now() >= deadline) {
         fprintf(stderr, "Native VTE fixture timed out\n");
@@ -82,11 +89,11 @@ static int render(const char *fixture, const char *source, int chunk,
       }
     }
     child = -1;
-    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0 ||
+        output_closed(&s, deadline)) {
       failed = 1;
       goto cleanup;
     }
-    pump();
     if (handoff) {
       long row, column;
       v.cursor(s.terminal, &column, &row);
@@ -109,7 +116,6 @@ cleanup:
     close(slave);
   /* VTE owns master after vte_pty_new_foreign_sync. */
   v.destroy(s.window);
-  pump();
   return failed;
 }
 static int compare_expected(const char *fixture, const char *source,
@@ -179,7 +185,8 @@ static int unicode_render(const char *fixture, const char *trace,
       used += (size_t)snprintf(prior + used, sizeof(prior) - used,
                                "existing row %03d\r\n", index);
     v.feed(s.terminal, prior, (long)used);
-    pump();
+    if (output_parsed(&s, -1))
+      goto cleanup;
   }
   memset(&size, 0, sizeof(size));
   size.ws_row = 8;
@@ -211,15 +218,16 @@ static int unicode_render(const char *fixture, const char *trace,
   slave = -1;
   deadline = now() + 8;
   while ((waited = waitpid(child, &status, WNOHANG)) == 0) {
-    struct snapshot current;
-    pump();
-    current = transcript(&s);
-    if (!strcmp(mode, "interrupted") && !sent &&
-        (!strncmp(current.text, "> ", 2) || strstr(current.text, "\n> "))) {
-      v.send(s.terminal, "\003", 1);
-      sent = 1;
+    pump_once();
+    if (!sent && !strcmp(mode, "interrupted")) {
+      struct snapshot current = transcript(&s);
+      if (!strncmp(current.text, "> ", 2) || strstr(current.text, "\n> ")) {
+        v.send(s.terminal, "\003", 1);
+        sent = 1;
+      }
     }
     if (now() >= deadline) {
+      struct snapshot current = transcript(&s);
       fprintf(stderr, "Unicode fixture timed out: %s\n%s\n", mode,
               current.text);
       goto cleanup;
@@ -229,9 +237,8 @@ static int unicode_render(const char *fixture, const char *trace,
     goto cleanup;
   child = -1;
   if (!WIFEXITED(status) || WEXITSTATUS(status) != 0 ||
-      (!strcmp(mode, "interrupted") && !sent))
+      (!strcmp(mode, "interrupted") && !sent) || output_closed(&s, deadline))
     goto cleanup;
-  pump();
   result->before = transcript(&s);
   resize(&s, 80, 12);
   result->after = transcript(&s);
@@ -249,7 +256,6 @@ cleanup:
   if (slave >= 0)
     close(slave);
   v.destroy(s.window);
-  pump();
   return failed;
 }
 static int unicode_case(const char *fixture, const char *trace,
@@ -476,7 +482,7 @@ static int interrupted(const char *fixture, const char *disposition) {
     goto cleanup;
   deadline = now() + 5;
   while ((waited = waitpid(child, &status, WNOHANG)) == 0) {
-    pump();
+    pump_once();
     current = transcript(&s);
     if (!sent &&
         (!strncmp(current.text, "> ", 2) || strstr(current.text, "\n> "))) {
@@ -489,7 +495,8 @@ static int interrupted(const char *fixture, const char *disposition) {
   if (waited < 0)
     goto cleanup;
   child = -1;
-  pump();
+  if (output_closed(&s, deadline))
+    goto cleanup;
   current = transcript(&s);
   failed = !sent || !WIFEXITED(status) || WEXITSTATUS(status) != 0 ||
            strcmp(current.text, "AFTER INTERRUPT\n") || current.row != 1 ||

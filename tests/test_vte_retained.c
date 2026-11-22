@@ -1,11 +1,11 @@
-#include "vte_test.h"
+#include "vte_output_sync.h"
 #include <fcntl.h>
 #include <sys/stat.h>
 
 struct session {
   struct screen actual, direct;
   pid_t child;
-  int commands, replies;
+  int commands, replies, slave;
   char work[4096], command_path[4096], reply_path[4096];
 };
 #define REQUIRE(c)                                                             \
@@ -28,6 +28,8 @@ static void close_session(struct session *g) {
     close(g->commands);
   if (g->replies >= 0)
     close(g->replies);
+  if (g->slave >= 0)
+    close(g->slave);
   if (g->actual.window)
     v.destroy(g->actual.window);
   if (g->direct.window)
@@ -35,7 +37,6 @@ static void close_session(struct session *g) {
   unlink(g->command_path);
   unlink(g->reply_path);
   rmdir(g->work);
-  pump();
 }
 static int start_session(struct session *g, const char *fixture,
                          const char *build, const char *mode,
@@ -49,7 +50,7 @@ static int start_session(struct session *g, const char *fixture,
   void *pty;
   memset(g, 0, sizeof(*g));
   g->child = -1;
-  g->commands = g->replies = -1;
+  g->commands = g->replies = g->slave = -1;
   g->actual = create();
   g->direct = create();
   if (rows != 8) {
@@ -66,7 +67,8 @@ static int start_session(struct session *g, const char *fixture,
     }
     v.feed(g->actual.terminal, prior, (long)used);
     v.feed(g->direct.terminal, prior, (long)used);
-    pump();
+    if (output_parsed(&g->actual, -1) || output_parsed(&g->direct, -1))
+      return 1;
   }
   if (snprintf(g->work, sizeof(g->work), "%s/vte-retained.XXXXXX", build) >=
           (int)sizeof(g->work) ||
@@ -119,7 +121,7 @@ static int start_session(struct session *g, const char *fixture,
             (char *)NULL);
     _exit(127);
   }
-  close(slave);
+  g->slave = slave;
   return g->child < 0;
 }
 static int ack(struct session *g, int columns, int rows) {
@@ -128,26 +130,27 @@ static int ack(struct session *g, int columns, int rows) {
   ssize_t count;
   double deadline = now() + 4;
   while (used < sizeof(geometry) && now() < deadline) {
-    pump();
     count = read(g->replies, (char *)geometry + used, sizeof(geometry) - used);
     if (count > 0)
       used += (size_t)count;
     else if (count < 0 && errno != EAGAIN && errno != EINTR)
       return 1;
+    else
+      pump_once();
   }
   if (used != sizeof(geometry)) {
     fprintf(stderr, "Fixture acknowledgement timed out\n");
     return 1;
   }
-  pump();
-  return columns && (geometry[0] != columns || geometry[1] != rows);
+  return (columns && (geometry[0] != columns || geometry[1] != rows)) ||
+         output_parsed(&g->actual, g->slave);
 }
 static int command(struct session *g, char byte, int columns, int rows) {
   return write(g->commands, &byte, 1) != 1 || ack(g, columns, rows);
 }
 static void feed(struct screen *s, const char *bytes) {
   v.feed(s->terminal, bytes, (long)strlen(bytes));
-  pump();
+  errors += output_parsed(s, -1);
 }
 static void source_feed(struct screen *s, const char *source) {
   char bytes[16384];
@@ -162,7 +165,7 @@ static void source_feed(struct screen *s, const char *source) {
     return;
   }
   v.feed(s->terminal, bytes, (long)used);
-  pump();
+  errors += output_parsed(s, -1);
 }
 static int same(struct session *g, int retained, int finite) {
   struct snapshot observed = transcript(&g->actual),
@@ -203,7 +206,7 @@ static int wait_text(struct session *g, const char *needle) {
     struct snapshot current = transcript(&g->actual);
     if (strstr(current.text, needle))
       return 0;
-    pump();
+    pump_once();
   } while (now() < deadline);
   fprintf(stderr, "Missing VTE marker: %s\n", needle);
   return 1;
@@ -215,13 +218,15 @@ static int finish(struct session *g) {
   char byte = 'x';
   if (write(g->commands, &byte, 1) != 1)
     return 1;
+  close(g->slave);
+  g->slave = -1;
   do {
-    pump();
+    pump_once();
     waited = waitpid(g->child, &status, WNOHANG);
     if (waited == g->child) {
       g->child = -1;
-      pump();
-      return !WIFEXITED(status) || WEXITSTATUS(status) != 0;
+      return !WIFEXITED(status) || WEXITSTATUS(status) != 0 ||
+             output_closed(&g->actual, deadline);
     }
     if (waited < 0)
       return 1;

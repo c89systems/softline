@@ -42,6 +42,7 @@ struct api {
   void (*feed)(void *, const char *, long);
   void (*send)(void *, const char *, long);
   void *(*pty)(int, void *, void *);
+  void *(*get_pty)(void *);
   void (*set_pty)(void *, void *);
   void (*cursor)(void *, long *, long *);
   char *(*text)(void *, long, long, long, long, void *, void *, void *);
@@ -122,6 +123,7 @@ static int load(void) {
   BIND(vte, feed, "vte_terminal_feed");
   BIND(vte, send, "vte_terminal_feed_child");
   BIND(vte, pty, "vte_pty_new_foreign_sync");
+  BIND(vte, get_pty, "vte_terminal_get_pty");
   BIND(vte, set_pty, "vte_terminal_set_pty");
   BIND(vte, cursor, "vte_terminal_get_cursor_position");
   BIND(vte, text, "vte_terminal_get_text_range");
@@ -141,12 +143,20 @@ struct snapshot {
 };
 static struct screen create(void) {
   struct screen s;
+  double deadline = now() + 2;
   s.terminal = v.terminal();
   s.window = v.window(0);
   v.add(s.window, s.terminal);
   v.size(s.terminal, 40, 8);
   v.show(s.window);
-  pump();
+  while (v.width(s.terminal) <= 1 || v.height(s.terminal) <= 1) {
+    if (now() >= deadline) {
+      fprintf(stderr, "VTE window did not receive its initial allocation\n");
+      ++errors;
+      break;
+    }
+    pump_once();
+  }
   return s;
 }
 static void resize_geometry(struct screen *s, int columns, int rows) {
