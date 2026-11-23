@@ -664,7 +664,7 @@ static int softline_lua_new(lua_State *L) {
   sl_config_init(&config);
   softline_lua_config(L, 1, &config, &rooted_template, &backend,
                       &backend_context);
-  handle = (softline_lua_handle_t *)lua_newuserdatauv(L, sizeof(*handle), 6);
+  handle = (softline_lua_handle_t *)lua_newuserdatauv(L, sizeof(*handle), 7);
   memset(handle, 0, sizeof(*handle));
   handle->L = L;
   handle->history_callback_active = 0;
@@ -765,6 +765,8 @@ static int softline_lua_gc(lua_State *L) {
   lua_setiuservalue(L, 1, 2);
   lua_pushnil(L);
   lua_setiuservalue(L, 1, 3);
+  lua_pushnil(L);
+  lua_setiuservalue(L, 1, 7);
   return 0;
 }
 
@@ -1233,6 +1235,47 @@ static int softline_lua_expand(sl_t *sl, const char *completed,
                                void *userdata) {
   return softline_lua_completion(sl, completed, "expand", emit, context,
                                  userdata);
+}
+
+static int softline_lua_completion_allowed(sl_t *sl, char trigger,
+                                           void *userdata) {
+  softline_lua_handle_t *handle = userdata;
+  lua_State *L = handle->history_caller ? handle->history_caller : handle->L;
+  int top = lua_gettop(L), allowed;
+  (void)sl;
+  lua_getiuservalue(L, 1, 7);
+  lua_pushlstring(L, &trigger, 1);
+  handle->completion_callback_active = 1;
+  allowed = lua_pcall(L, 1, 1, 0) == LUA_OK && lua_isboolean(L, -1) &&
+            lua_toboolean(L, -1);
+  handle->completion_callback_active = 0;
+  lua_settop(L, top);
+  return allowed;
+}
+
+/** Lua editor:set_completion_predicate(callback) allows a new activation only
+ * on a boolean true from callback(trigger). Other results and errors decline
+ * silently. Treat the editor as read-only and return without yielding.
+ * Pass nil to clear it. Changing it clears the preview and preserves the draft.
+ */
+static int softline_lua_set_completion_predicate(lua_State *L) {
+  softline_lua_handle_t *handle = softline_lua_check(L, 1);
+  int enabled = !lua_isnoneornil(L, 2);
+  int status;
+  if (handle->completion_callback_active)
+    return softline_lua_status(L, SL_ERROR_NOT_READY);
+  if (enabled)
+    luaL_checktype(L, 2, LUA_TFUNCTION);
+  status = sl_set_completion_predicate(
+      handle->sl, enabled ? softline_lua_completion_allowed : NULL, handle);
+  if (status == SL_OK || status == SL_ERROR_IO) {
+    if (enabled)
+      lua_pushvalue(L, 2);
+    else
+      lua_pushnil(L);
+    lua_setiuservalue(L, 1, 7);
+  }
+  return softline_lua_status(L, status);
 }
 
 /** Lua editor:set_completion_providers(registrations): replace trigger/scope/
@@ -2439,6 +2482,7 @@ static const luaL_Reg softline_lua_methods[] = {
     {"history_set_auto_add", softline_lua_history_set_auto_add},
     {"set_screen_width", softline_lua_set_screen_width},
     {"set_completion_providers", softline_lua_set_completion_providers},
+    {"set_completion_predicate", softline_lua_set_completion_predicate},
     {"set_osc8_mode", softline_lua_set_osc8_mode},
     {"get_osc8_info", softline_lua_get_osc8_info},
     {"set_live_scroll_region", softline_lua_set_live_scroll_region},

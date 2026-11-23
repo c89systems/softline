@@ -42,6 +42,8 @@ typedef struct sl_completion_level {
 typedef struct sl_completion_state {
   sl_completion_provider_t *providers;
   size_t provider_count;
+  sl_completion_predicate_t allow;
+  void *predicate_data;
   sl_completion_list_t list;
   sl_completion_level_t *levels;
   sl_completion_cycle_t cycle;
@@ -60,6 +62,8 @@ size_t sl_completion_expand_prefix(const sl_completion_state_t *state,
 void sl_completion_reset(sl_completion_state_t *state);
 int sl_completion_find(const sl_completion_state_t *state, const char *text,
                        size_t cursor, sl_completion_match_t *match);
+int sl_completion_exact(const sl_completion_state_t *state, const char *text,
+                        size_t length);
 int sl_completion_space(unsigned char ch);
 void sl_completion_cycle_clear(sl_completion_cycle_t *cycle);
 

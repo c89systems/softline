@@ -991,11 +991,22 @@ int demo_www_publish(demo_www_t *w, const char *type,
                !strcmp(type, "terminal_state"));
   return sl_www_emit(save_record, w, type, seq, fields, count);
 }
-void demo_www_begin(demo_www_t *w, const char *id, const char *role) {
-  sl_www_field_t f[2] = {{"id", NULL, 0}, {"role", NULL, 0}};
+void demo_www_begin(demo_www_t *w, const char *id, const char *role,
+                    const char *format, const char *timestamp) {
+  sl_www_field_t f[] = {
+      {"id", NULL, 0}, {"role", NULL, 0}, {NULL, NULL, 0}, {NULL, NULL, 0}};
+  size_t count = 2;
   f[0].value = id;
   f[1].value = role;
-  (void)demo_www_publish(w, "begin", f, 2);
+  if (format) {
+    f[count].name = "format";
+    f[count++].value = format;
+  }
+  if (timestamp) {
+    f[count].name = "timestamp";
+    f[count++].value = timestamp;
+  }
+  (void)demo_www_publish(w, "begin", f, count);
 }
 void demo_www_end(demo_www_t *w, const char *id) {
   sl_www_field_t f = {"id", NULL, 0};
@@ -1003,13 +1014,14 @@ void demo_www_end(demo_www_t *w, const char *id) {
   (void)demo_www_publish(w, "end", &f, 1);
 }
 void demo_www_text(demo_www_t *w, const char *id, const char *role,
-                   const void *bytes, size_t length) {
+                   const char *timestamp, const void *bytes, size_t length) {
   const unsigned char *p = bytes;
   char *encoded;
-  sl_www_field_t f[4] = {{"id", NULL, 0},
-                         {"role", NULL, 0},
-                         {"data", NULL, 0},
-                         {"encoding", "base64", 0}};
+  sl_www_field_t f[] = {{"id", NULL, 0},
+                        {"role", NULL, 0},
+                        {"data", NULL, 0},
+                        {"encoding", "base64", 0},
+                        {"timestamp", NULL, 0}};
   if (!w)
     return;
   encoded = malloc(5500);
@@ -1018,10 +1030,11 @@ void demo_www_text(demo_www_t *w, const char *id, const char *role,
   f[0].value = id;
   f[1].value = role;
   f[2].value = encoded;
+  f[4].value = timestamp;
   while (length) {
     size_t n = length > 4096 ? 4096 : length;
     f[2].length = demo_www_base64(p, n, encoded);
-    if (demo_www_publish(w, "delta", f, 4) != SL_OK)
+    if (demo_www_publish(w, "delta", f, timestamp ? 5 : 4) != SL_OK)
       break;
     p += n;
     length -= n;

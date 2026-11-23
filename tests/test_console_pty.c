@@ -534,6 +534,10 @@ static int completion(void) {
       REQUIRE(send_bytes(&e, "@l\t\006\177\177\177\177\t\t\r") == 0);
     }
   }
+  REQUIRE(wait_for(&e, "predicate-1> ", 0) == 0);
+  REQUIRE(send_bytes(&e, "!echo @alpha\r") == 0);
+  REQUIRE(wait_for(&e, "predicate-2> ", 0) == 0);
+  REQUIRE(send_bytes(&e, "@alpha\r") == 0);
   {
     int mode;
     for (mode = 0; mode <= 1; ++mode) {
@@ -594,7 +598,7 @@ static int example_completion(int chat) {
   } else {
     REQUIRE(wait_for(&e, "submitted: hello world\r\nsay verification\r\n",
                      mark) == 0);
-    REQUIRE(wait_for(&e, "softline> ", mark) == 0);
+    REQUIRE(wait_for(&e, "\033[?2004h", mark) == 0);
   }
   mark = e.length;
   REQUIRE(send_bytes(&e, "@REA") == 0);
@@ -611,7 +615,7 @@ static int example_completion(int chat) {
             contains(&e, "[queued] README.md ", mark));
   } else {
     REQUIRE(wait_for(&e, "submitted: README.md ", mark) == 0);
-    REQUIRE(wait_for(&e, "softline> ", mark) == 0);
+    REQUIRE(wait_for(&e, "\033[?2004h", mark) == 0);
   }
   mark = e.length;
   REQUIRE(send_bytes(&e, "@tree/ne\t") == 0);
@@ -629,7 +633,7 @@ static int example_completion(int chat) {
             contains(&e, "[queued] tree/nested/source.c", mark));
   } else {
     REQUIRE(wait_for(&e, "submitted: tree/nested/source.c", mark) == 0);
-    REQUIRE(wait_for(&e, "softline> ", mark) == 0);
+    REQUIRE(wait_for(&e, "\033[?2004h", mark) == 0);
   }
   mark = e.length;
   REQUIRE(send_bytes(&e, "/q") == 0);

@@ -84,25 +84,78 @@ const followResize = new ResizeObserver(entries => {
 });
 followResize.observe(messages); followResize.observe(scroll); followResize.observe(prompt);
 function started() { $('chat').classList.remove('welcome-state'); }
-function message(id, role = 'assistant') {
+function feedTimestamp(text) {
+  const stamp = document.createElement('div');
+  stamp.className = 'feed-timestamp'; stamp.textContent = text;
+  return stamp;
+}
+function message({ id, role = 'assistant', format, copy: copyPolicy, timestamp, label, tone }) {
   if (state.messages.has(id)) return state.messages.get(id);
-  if (role !== 'note') started();
+  if (format === undefined) format = role === 'user' ? null : 'markdown';
+  else if (!['markdown', 'diff'].includes(format)) format = 'text';
+  const labeled = role !== 'user' && typeof label === 'string' && !!label;
+  if (role !== 'note' || labeled) started();
   const article = document.createElement('article'), body = document.createElement('div');
   article.className = `message ${['user', 'assistant', 'note'].includes(role) ? role : 'assistant'}`;
-  article.dataset.message = id; body.className = 'body'; article.append(body);
-  const result = { article, body, role, raw: [], decoder: new TextDecoder(), stream: role === 'user' ? null : new MarkdownStream(body) };
+  article.dataset.message = id; body.className = 'body';
+  if (role !== 'user' && typeof timestamp === 'string' && timestamp) article.append(feedTimestamp(timestamp));
+  let content = article;
+  if (labeled) {
+    const card = document.createElement('div'), header = document.createElement('header');
+    card.className = 'feed-card'; header.className = 'feed-label'; header.textContent = label;
+    if (['info', 'success', 'warning', 'error'].includes(tone)) card.dataset.tone = tone;
+    card.append(header); article.append(card); content = card;
+  }
+  content.append(body);
+  const responseCopy = role === 'assistant' && format === 'markdown';
+  const canCopy = copyPolicy === '1' || (copyPolicy !== '0' && responseCopy);
+  const result = {
+    body, format, raw: canCopy ? [] : null, decoder: new TextDecoder(),
+    stream: format === 'markdown' ? new MarkdownStream(body) : null
+  };
+  if (format === 'text' || format === 'diff') {
+    result.block = document.createElement('pre');
+    result.block.className = `feed-${format}`;
+    body.append(result.block);
+  }
   state.messages.set(id, result); messages.append(article);
-  if (role !== 'user') {
+  if (canCopy) {
     const tools = document.createElement('div'), copy = document.createElement('button');
+    const copyLabel = responseCopy ? 'Copy response' : 'Copy output';
     tools.className = 'message-tools'; copy.type = 'button'; copy.className = 'copy';
-    copy.title = 'Copy response'; copy.setAttribute('aria-label', 'Copy response'); copy.append(icon());
+    copy.title = copyLabel; copy.setAttribute('aria-label', copyLabel); copy.append(icon());
     copy.addEventListener('click', async () => {
-      try { await navigator.clipboard.writeText(result.raw.join('')); copy.classList.add('copied'); copy.title = 'Copied'; setTimeout(() => { copy.classList.remove('copied'); copy.title = 'Copy response'; }, 1500); }
-      catch { toast('Copy was unavailable. Use HTTPS or a loopback address to copy the original Markdown.'); }
+      try { await navigator.clipboard.writeText(result.raw.join('')); copy.classList.add('copied'); copy.title = 'Copied'; setTimeout(() => { copy.classList.remove('copied'); copy.title = copyLabel; }, 1500); }
+      catch { toast('Copy was unavailable. Use HTTPS or a loopback address to enable clipboard access.'); }
     });
-    tools.append(copy); article.append(tools);
+    tools.append(copy); content.append(tools);
   }
   follow(); return result;
+}
+function appendDiff(m, text, kind) {
+  if (kind !== undefined) m.diffKind = ['added', 'removed', 'header'].includes(kind) ? kind : 'context';
+  for (let at = 0; at < text.length;) {
+    if (!m.diffRow) {
+      m.diffRow = document.createElement('span');
+      m.diffRow.className = `diff-row ${m.diffKind || 'context'}`;
+      m.block.append(m.diffRow);
+    }
+    const newline = text.indexOf('\n', at);
+    if (newline < 0) { m.diffRow.append(text.slice(at)); break; }
+    m.diffRow.append(text.slice(at, newline));
+    m.diffRow = null;
+    at = newline + 1;
+  }
+}
+function appendMessage(m, text, kind, final = false) {
+  if (text) m.raw?.push(text);
+  if (m.stream) {
+    if (text) m.stream.write(text);
+    if (final) m.stream.end();
+  } else if (m.format === 'diff') appendDiff(m, text, kind);
+  else if (m.block) {
+    if (text) m.block.append(text);
+  } else previews.append(m.body, text, m, final);
 }
 function queue() {
   clearTimeout(state.queueTimer);
@@ -568,24 +621,18 @@ function receive(event) {
     case 'reset':
       clearConversation();
       if (e.text) toast(e.text); break;
-    case 'begin': message(e.id, e.role); break;
+    case 'begin': message(e); break;
     case 'delta': {
-      const m = message(e.id, e.role);
+      const m = message(e);
       const text = e.encoding === 'base64'
         ? m.decoder.decode(Uint8Array.from(atob(e.data || ''), c => c.charCodeAt(0)), { stream: true })
         : e.text || '';
-      m.raw.push(text);
-      if (m.stream) m.stream.write(text); else previews.append(m.body, text, m);
+      appendMessage(m, text, e.kind);
       follow(); break;
     }
     case 'end': {
       const m = state.messages.get(e.id);
-      if (m) {
-        const tail = m.decoder.decode();
-        if (tail) m.raw.push(tail);
-        if (m.stream) { m.stream.write(tail); m.stream.end(); }
-        else previews.append(m.body, tail, m, true);
-      }
+      if (m) appendMessage(m, m.decoder.decode(), undefined, true);
       follow(); break;
     }
     case 'queue_begin': state.stagingQueue = new Map(); break;

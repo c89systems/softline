@@ -27,6 +27,9 @@ Every third simulated response contains a randomized libmdf chart fence.
 Horizontal bars, vertical bars and pies appear in shuffled groups, so nine
 responses show all three kinds. ANSI and every attached browser receive the
 same chart source and data. The plain-text Lua queue example remains separate.
+The C web demos also show a command start, a busy warning, a reply, resumed
+output, a completion receipt, and a diff on replies 1, 4, 7, and so on. See
+[feed labels and timestamps](#feed-labels-and-timestamps) for the event format.
 
 `SOFTLINE_WEB_TITLE`, `SOFTLINE_WEB_WELCOME` (Markdown), and
 `SOFTLINE_WEB_BANNER` (trusted host HTML/SVG in the welcome area) customize the
@@ -106,15 +109,6 @@ The write callback sends one bounded JSON event through
 response for an HTTP response. The host owns origin/authentication checks,
 connection lifetime, routing, scheduling, backpressure, history, and replay.
 Softline never calls Kore or assumes a particular server or HTTP version.
-The browser Clipboard API needs HTTPS or loopback for the copy action.
-Copy returns the original agent Markdown, including whitespace and fences.
-The browser adds the action when it creates a response from a `begin` event
-or receives its first `delta`. An `end` event finishes that message's decoder
-and Markdown parser.
-Incoming source chunks are retained alongside the rendered response; they are
-joined only when Copy is clicked. Copy during generation returns the complete
-UTF-8 prefix received so far. Other chat actions also work
-over ordinary HTTP, using browser-generated random request identities.
 
 Configuration strings are copied at construction. Custom asset descriptors,
 paths, MIME types, bytes, and callback contexts are borrowed until destruction.
@@ -193,9 +187,9 @@ Replies may omit `seq`.
 | `session` | `id`: host epoch. `disable_auto_resend=1` disables automatic retries on same-epoch reconnects. The field defaults to `0`. |
 | `capabilities` | `edit=1` enables revision-checked queue edits. Optional `terminal` is a same-origin absolute path to a terminal page. Optional `terminal_unlock_command` is a single-line host command. During an automatic terminal lock, the `+` menu displays that text and submits it verbatim through the normal prompt handler, preserving the draft. |
 | `reset` | Optional `text`; clear the retained transcript and queue before replay |
-| `begin` | `id`, `role` (`user`, `assistant`, `note`) |
-| `delta` | `id`, `role`, `text`, or `encoding=base64` plus `data`; append incrementally |
-| `end` | `id`; finish the Markdown parser/UTF-8 decoder |
+| `begin` | `id`, `role` (`user`, `assistant`, `note`), optional `format`, `copy=0/1`, `timestamp`, `label`, and `tone` |
+| `delta` | `id`, `role`, `text` or `encoding=base64` plus `data`; append incrementally. Diff messages can set the row `kind`. Carry the message settings when a delta can open a message during replay. |
+| `end` | `id`; finish the content renderer and UTF-8 decoder |
 | `queue_begin`, `queue_end` | Atomic queue projection boundaries |
 | `queue_item` | `id`, `revision`, `mode=queued/steer/pending`, `held=0/1` |
 | `queue_text` | `id`, `encoding=base64`, `data`; bounded text chunks |
@@ -204,7 +198,7 @@ Replies may omit `seq`.
 | `terminal_state` | Atomic host snapshot: `active` is the conversation-wide active/initializing handoff count, `disable_prompt=0/1` selects automatic prompt locking (default `0`). Count both TUI and browser sessions; publish on lifecycle or policy changes and replay current state |
 | `completion_provider` | Host registration: one-character `trigger`, `scope=start/word`, `strip=0/1`, `expand=0/1`. Send the current registrations after `session` on each connection. |
 | `complete` | `request`, raw full `candidate` including trigger; explicit `+` menu also uses canonical `value`, `label`, `description`, UTF-8 byte `start`/`end`, optional `continue=1` |
-| `complete_end` | `request`, `status=ok/error`; completes one provider snapshot, including empty results |
+| `complete_end` | `request`, `status=ok/declined/error`; ends a provider request with its candidates, a silent decline, or an error |
 | `simulate_begin`, `simulate_text`, `simulate_end` | Timing, text chunks, and commit boundary for a prompt simulation. Tracked requests carry the same `id` on all three events. |
 | `simulate_cancel` | `id` identifies the pending or active tracked simulation to stop. |
 | `accepted`, `error` | `request`, optional `text`; optional `view` targets one draft owner |
@@ -237,7 +231,9 @@ Browser text frames are URL-encoded actions:
   completion supplies UTF-8 byte `start`/`end` and `resolve`: initially the
   registered trigger, then an explicitly requested continuation prefix. Return
   the entire inventory for that prefix followed by `complete_end`, even when
-  current typed text matches only a subset. For the explicit `+` menu, answer
+  current typed text matches only a subset. To veto a trigger in the supplied
+  draft context, return `complete_end` with `status=declined` and no candidates.
+  For the explicit `+` menu, answer
   `all=1` by enumerating candidates from the same registrations used by the TUI.
   A lazy provider can offer its root with `continue=1` and resolve children when
   selected, as the examples do for filename completion.
@@ -249,8 +245,10 @@ Browser text frames are URL-encoded actions:
   exact `size`; wait for credit, send bounded binary chunks, then `image_end`.
   `image_cancel` carries the same `id` and is valid before BEGIN is delivered.
 
-Hosts register all completion triggers and candidates, including slash commands
-and filename completion. The chat examples register `/` and `@`.
+### Completion and prompt actions
+
+Hosts register all completion triggers and candidates. The C examples share
+registrations for `/`, `h`, `v`, `n`, and `@` between the web and native editors.
 Typing uses the same completion interaction as the TUI: a dim inline ghost
 leaves the draft untouched. Tab accepts and cycles the original matching subset;
 Right/Ctrl-F at the token endpoint accepts or commits the selected candidate,
@@ -259,6 +257,14 @@ the send button and Alt-Enter submit actual draft text, never a ghost. Ordinary
 typing filters cached provider snapshots without another request. Tab resolves
 known directory ancestors lazily for a partial path such as `@examples/ch`.
 Only the explicit `+` button opens a menu, for completions, images and recovery.
+
+With stripping enabled, exit removes the introductory character only when the
+whole token matches a resolved candidate. Partial, declined, and failed
+completions preserve that character. Space and submission proceed with literal
+text when only an initial lookup is pending. Explicit Tab or Right acceptance
+waits for the provider and preserves the order of subsequent input. Inline
+requests time out after three seconds. Late replies cannot change a submitted
+draft or accept text after the user moves away.
 
 The `+` menu also exposes actions with shortcut hints.
 
@@ -325,14 +331,7 @@ leave this endpoint disabled. A host can advertise its own mounted terminal page
 with `SOFTLINE_WEB_TERMINAL_URL=/terminal`. The host owns its authentication and
 WebSocket transport; the library supplies assets and terminal-session APIs.
 
-The C examples share one registration table between native and web editors
-(`/`, `h`, `v`, `n`, `@`), including scope and trigger stripping. Exiting an
-active filename completion removes only its introductory `@`; email addresses,
-pasted literal text and at-signs in filenames remain intact. Stale replies cannot
-reactivate a submitted draft or accept text after the user moves away.
-Provider acquisition has a three-second timeout; a failed initial provider keeps
-its trigger literal. Pending acceptance preserves subsequent editor input order
-while conversation events and host actions remain responsive.
+### Shared conversation and images
 
 All tabs and ANSI share the accepted conversation and queue. Drafts live in
 their originating views. Browser image sources use `sl_image_paste_start_source`
@@ -390,6 +389,49 @@ projection; historical approval prompts and status changes are skipped.
 
 ## Rendering and verification
 
+Choose a message format independently of its role. `format=markdown` uses the
+streaming Markdown renderer. `format=text` shows literal text in monospace and
+preserves indentation, tabs, and line breaks. `format=diff` shows preformatted
+rows with colors from the active theme. With no format, assistant and note
+messages use Markdown and user messages use the ordinary prompt bubble.
+Unknown explicit formats render as literal text.
+
+For diffs, set `kind=header`, `context`, `added`, or `removed` on a delta.
+The kind applies to new rows started by that delta and carries forward until
+the host changes it. Rows end at LF and can span multiple chunks. Start each
+kind change at a row boundary for a uniform line style. The default kind is
+context, and the host supplies any line numbers and markers in the row text.
+
+Copy defaults to assistant Markdown. The host can enable or suppress it for
+any message with `copy=1` or `copy=0`. Copy returns the original streamed
+text, including whitespace and Markdown fences. Set the policy and format on
+the first event for the message. The browser retains source chunks only for
+entries with a copy action and joins them when the user clicks Copy. During
+streaming, Copy returns the complete UTF-8 prefix received so far. Clipboard
+access requires HTTPS or loopback.
+
+### Feed labels and timestamps
+
+An assistant or note message can carry a display-ready `label` and an optional
+`tone=neutral`, `info`, `success`, `warning`, or `error`. A label appears in the
+header of that message's card. A `begin` with a label followed by `end` also
+works for a receipt consisting only of a header.
+
+Supply `timestamp` as display-ready text on assistant or note messages. The
+browser displays it in small monospace directly above the message. The host
+chooses the format and timezone. An omitted or empty timestamp takes up no
+space. Copy actions return the message content alone.
+
+The first `begin` or `delta` places the message in the feed. Send deltas with
+that ID as bytes arrive. `end` flushes the UTF-8 decoder and finishes the
+renderer. When command output yields to another entry, end the open message
+before emitting that entry. Give resumed output a new message ID so it appears
+at the current position. Emit a completion receipt as its own entry. If replay
+can begin with a delta, repeat the role, format, copy policy, label, tone, and
+timestamp on that delta as applicable.
+
+### Markdown streaming
+
 The vendored MIT `streaming-markdown` parser is pinned, with provenance and its
 local text-node patch in `vendor/streaming-markdown/README.softline`. It appends
 to the DOM incrementally rather than reparsing accumulated source. The adapter
@@ -398,9 +440,9 @@ libmdf `mdf-bar-chart`/`mdf-horizontal-bar-chart`, `mdf-vertical-bar-chart`, and
 `mdf-tile-chart` CSV fences. Tile charts become real SVG pies. Sorting, color,
 percentage aliases, quoted CSV, zero totals, and invalid-data fallback are
 supported. Chart state is bounded to 64 Ki characters/256 rows and drawings are
-coalesced to animation frames. Completed text remains in the DOM; raw source
-chunks remain available for Markdown copying. JetBrains Mono is vendored under
-OFL 1.1.
+coalesced to animation frames. JetBrains Mono is vendored under OFL 1.1.
+
+### Verification
 
 Native tests cover handler validation, exact embedded assets, source-level
 HTML/CSS/control contracts, custom-source lifecycle/backpressure/timeouts,
@@ -425,6 +467,8 @@ installed by this project:
    immediate FIFO admission with delayed visibility only while initially empty.
 3. Slash/`@`/`+` completion, keyboard selection, response copy, reconnect/replay,
    backend rejection recovery, and host restart with an unconfirmed prompt.
+   Check that resumed command output and its receipt follow the intervening
+   entry after replay, and timestamps appear only where supplied for output.
 4. PNG/JPEG select/drop/paste, multi-image separators, typing during transfer,
    Escape/Ctrl-C during a pending file read or credit wait, immediate typing/send
    after cancellation, limits/timeouts, remote paths, and disconnect cleanup.

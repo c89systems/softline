@@ -37,11 +37,12 @@ int demo_www_simulate_prompt(demo_www_peer_t *, const char *,
  * in libsoftline. Live production does not wait for a slow browser. */
 int demo_www_publish(demo_www_t *, const char *, const sl_www_field_t *,
                      size_t);
-void demo_www_text(demo_www_t *, const char *id, const char *role, const void *,
-                   size_t);
-void demo_www_begin(demo_www_t *, const char *id, const char *role);
+void demo_www_text(demo_www_t *, const char *id, const char *role,
+                   const char *timestamp, const void *, size_t);
+void demo_www_begin(demo_www_t *, const char *id, const char *role,
+                    const char *format, const char *timestamp);
 void demo_www_end(demo_www_t *, const char *id);
-/* Base64 is used only for bounded Markdown byte chunks so split UTF-8 remains
+/* Base64 is used for bounded message byte chunks so split UTF-8 remains
  * valid JSON. Browser image frames carry raw binary bytes in the other
  * direction. */
 size_t demo_www_base64(const unsigned char *, size_t, char *);

@@ -255,8 +255,15 @@ static int run(int native, const char *initial, size_t cursor, const char *keys,
 
 struct provider_data {
   struct driver driver;
-  int calls, generation, kind;
+  int calls, generation, kind, predicates;
 };
+static int allow_completion(sl_t *sl, char trigger, void *userdata) {
+  struct provider_data *data = userdata;
+  const char *draft = sl_buffer(sl);
+  if ((trigger == '@' || trigger == '$') && sl_cursor(sl) > 0)
+    ++data->predicates;
+  return draft[0] != '!';
+}
 static int dynamic_provider(sl_t *sl, char trigger, sl_completion_emit_t emit,
                             void *context, void *userdata) {
   struct provider_data *data = userdata;
@@ -276,7 +283,7 @@ static int dynamic_provider(sl_t *sl, char trigger, sl_completion_emit_t emit,
     (void)emit("@\300\257", context);
     return SL_OK;
   }
-  if (data->kind >= 16 && !data->generation) {
+  if (data->kind >= 16 && data->kind <= 18 && !data->generation) {
     snprintf(value, sizeof(value), "%cnext stop", trigger);
     if (emit(value, context) != SL_OK)
       return SL_ERROR;
@@ -311,7 +318,7 @@ static int update_provider(sl_t *sl, sl_key_t key, void *userdata,
   struct provider_data *data = userdata;
   (void)sl;
   (void)key;
-  if (data->kind == 6 && strcmp(sl_buffer(sl), "@al")) {
+  if (data->kind == 6 && strcmp(sl_buffer(sl), "@alpha.txt")) {
     fprintf(stderr, "strip undo restored <%s>\n", sl_buffer(sl));
     return SL_ERROR;
   }
@@ -322,7 +329,7 @@ static int update_provider(sl_t *sl, sl_key_t key, void *userdata,
     return SL_ERROR;
   if (data->kind == 11 && sl_insert(sl, " ") != SL_OK)
     return SL_ERROR;
-  if (data->kind == 11 && strcmp(sl_buffer(sl), "a "))
+  if (data->kind == 11 && strcmp(sl_buffer(sl), "@a "))
     return SL_ERROR;
   if (data->kind == 15 && sl_set_buffer(sl, "/") != SL_OK)
     return SL_ERROR;
@@ -342,31 +349,42 @@ static int provider_cases(int native) {
       {'/', 0, 0, 0, 1, 0, "say /\t\r", "say /#"},
       {'/', 0, 0, 1, 0, 1, "say\n/\t\r", "say\n/command1"},
       {'/', 0, 4, 1, 1, 0, "/\t\t\r", "/command1#"},
-      {'@', 1, 0, 1, 0, 1, "@al\r", "al"},
+      {'@', 1, 0, 1, 0, 1, "@al\r", "@al"},
       {'@', 1, 0, 1, 0, 1, "@a\t\r", "alpha.txt"},
       {'@', 1, 0, 2, 0, 1, "say @a\t @b\t\r", "say alpha.txt beta.txt"},
-      {'@', 1, 0, 1, 0, 1, "@al \r", "al "},
-      {'@', 1, 0, 1, 0, 1, "@al\001X\r", "Xal"},
-      {'@', 1, 0, 1, 0, 1, "@al\033e\r", "al"},
+      {'@', 1, 0, 1, 0, 1, "@al \r", "@al "},
+      {'@', 1, 0, 1, 0, 1, "@al\001X\r", "X@al"},
+      {'@', 1, 0, 2, 0, 1, "@al\033e\r", "@al"},
       {'@', 1, 0, 2, 0, 1, "@\177@b\t\r", "beta.txt"},
       {'@', 0, 0, 1, 0, 1, "@a\t\r", "@alpha.txt"},
-      {'@', 1, 1, 1, 1, 1, "@abc\177d\024\t\r", "abd#"},
+      {'@', 1, 1, 1, 1, 1, "@abc\177d\024\t\r", "@abd#"},
       {'@', 1, 2, 1, 1, 1, "@abc\t\r", "@abc#"},
       {'@', 1, 3, 1, 1, 1, "@abc\t\r", "@abc#"},
       {'@', 1, 5, 1, 1, 1, "@abc\t\r", "@abc#"},
-      {'@', 1, 6, 2, 0, 1, "@al \037\024\r", "al"},
+      {'@', 1, 6, 2, 0, 1, "@alpha.txt \037\024\r", "alpha.txt"},
       {'@', 1, 7, 1, 0, 1, "\033e\t\r\033s", "alpha.txt"},
       {'@', 1, 8, 1, 1, 1, "@a\t\024\t\r", "#"},
       {'@', 1, 9, 1, 1, 1, "@a\t\r", "@a#"},
-      {'@', 1, 10, 1, 0, 1, "@al\024\r", "Xal"},
-      {'@', 1, 11, 2, 0, 1, "@a\024@b\t\r", "a beta.txt"},
+      {'@', 1, 10, 1, 0, 1, "@al\024\r", "X@al"},
+      {'@', 1, 11, 2, 0, 1, "@a\024@b\t\r", "@a beta.txt"},
       {'/', 0, 12, 1, 0, 1, "/c\177\024\037\t\r", "/command1"},
-      {'@', 1, 13, 2, 0, 1, " \001\013@a\031@b\t\r", "a beta.txt"},
+      {'@', 1, 13, 2, 0, 1, " \001\013@a\031@b\t\r", "@a beta.txt"},
       {'/', 0, 14, 1, 0, 1, "/\t\024\037\t\r", "/command1"},
       {'/', 0, 15, 2, 0, 0, "/\024\t\r", "/fresh1"},
       {'/', 0, 16, 1, 0, 0, "\t\t\t\024\037\t\r", "/next stop steps later"},
       {'@', 1, 17, 1, 0, 1, "\t\t\t\024\037\t\r", "next stop steps later"},
-      {'/', 0, 18, 1, 1, 0, "\t\t\t\024\037\005\t\r", "/next steps later#"}};
+      {'/', 0, 18, 1, 1, 0, "\t\t\t\024\037\005\t\r", "/next steps later#"},
+      {'$', 1, 0, 3, 0, 1, "!echo $$ $HOME $5\r", "!echo $$ $HOME $5"},
+      {'$', 1, 19, 0, 0, 1, "!echo $command1\r", "!echo $command1"},
+      {'@', 1, 20, 0, 0, 1, "\033e\r\033s", "!echo @alpha.txt"},
+      {'$', 1, 19, 1, 0, 1, "$command1 \r", "command1 "},
+      {'@', 1, 0, 1, 0, 1, "@a\t\177X\r", "@alpha.txX"},
+      {'@', 1, 0, 1, 0, 1, "@a\t\033[200~X\033[201~\r", "@alpha.txtX"},
+      {'@', 1, 0, 1, 0, 1, "@a\t\033[200~ tail\033[201~\r", "alpha.txt tail"},
+      {'@', 1, 6, 2, 0, 1, "@a\t\033[200~ tail\033[201~\037\024\r",
+       "alpha.txt"},
+      {'@', 1, 0, 2, 0, 1, "@a\t\033[200~ tail\033[201~\037\037\r", "@a"},
+      {'@', 1, 0, 1, 0, 1, "@a\006\r", "alpha.txt"}};
   size_t i;
   for (i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
     int master, slave, wake[2];
@@ -384,7 +402,7 @@ static int provider_cases(int native) {
     data.kind = cases[i].kind;
     data.driver.master = master;
     data.driver.initial = "";
-    if (data.kind >= 16) {
+    if (data.kind >= 16 && data.kind <= 18) {
       data.driver.initial =
           cases[i].trigger == '@' ? "@next steps later" : "/next steps later";
       data.driver.cursor = 3;
@@ -399,8 +417,10 @@ static int provider_cases(int native) {
     CHECK(sl_set_prompt_queue_delivery(sl, SL_PROMPT_QUEUE_DELIVERY_MANUAL) ==
           SL_OK);
     CHECK(sl_bind_key(sl, SL_KEY_ALT_BASE + 's', suspend_key, NULL) == SL_OK);
-    if (data.kind == 7)
-      CHECK(sl_prompt_queue_append(sl, "@a", 1, &id) == SL_OK);
+    if (data.kind == 7 || data.kind == 20)
+      CHECK(sl_prompt_queue_append(sl,
+                                   data.kind == 7 ? "@a" : "!echo @alpha.txt",
+                                   1, &id) == SL_OK);
     provider.trigger = cases[i].trigger;
     provider.scope = cases[i].word ? SL_COMPLETION_WORD : SL_COMPLETION_START;
     provider.strip_trigger = cases[i].strip;
@@ -408,6 +428,8 @@ static int provider_cases(int native) {
     provider.userdata = &data;
     provider.expand = NULL;
     CHECK(sl->set_completion_providers(sl, &provider, 1) == SL_OK);
+    if (data.kind == 19 || data.kind == 20)
+      CHECK(sl->set_completion_predicate(sl, allow_completion, &data) == SL_OK);
     memset(&provider, 0, sizeof(provider));
     CHECK(sl_bind_key(sl, SL_KEY_TAB, host_tab, &data.driver) == SL_OK);
     CHECK(sl_bind_key(sl, SL_KEY_CTRL_T, update_provider, &data) == SL_OK);
@@ -419,11 +441,23 @@ static int provider_cases(int native) {
       CHECK(sl_output_stream_begin(sl) == SL_OK);
     }
     line = sl_readline(sl, "> ");
-    if (data.kind == 7) {
+    if (data.kind == 7 || data.kind == 20) {
       CHECK(!line && sl_last_readline_status(sl) == SL_READLINE_SUSPENDED);
       CHECK(sl_prompt_queue_info(sl, 0, &info) == SL_OK && info.id == id &&
             info.held);
       CHECK(sl_prompt_queue_peek(sl, 0, &line) == SL_OK);
+    }
+    if (data.kind == 19 || data.kind == 20) {
+      CHECK(data.predicates > 0 && !sl_last_error(sl));
+      if (!native) {
+        struct pollfd output = {0, POLLIN, 0};
+        char bytes[256];
+        output.fd = master;
+        while (poll(&output, 1, 0) > 0 && (output.revents & POLLIN)) {
+          ssize_t count = read(master, bytes, sizeof(bytes));
+          CHECK(count > 0 && !memchr(bytes, '\a', (size_t)count));
+        }
+      }
     }
     if (!line || strcmp(line, cases[i].expected) ||
         data.calls != cases[i].calls ||
@@ -541,8 +575,8 @@ static int expansion_cases(int native) {
       {0, 1, 0, "", 0, "@l\006\t\r", "lua/source.c"},
       {0, 1, 0, "", 0, "@l\t\006\r", "lua/"},
       {0, 1, 0, "", 0, "@lua/\006\r", "lua/"},
-      {0, 1, 0, "", 0, "@l\t\006\037\r", "l"},
-      {0, 1, 0, "say @l later", 6, "\t\006!\r", "say lua/! later"},
+      {0, 1, 0, "", 0, "@l\t\006\037\r", "@l"},
+      {0, 1, 0, "say @l later", 6, "\t\006!\r", "say @lua/! later"},
       {0, 0, 0, "", 0, "@l\t\r", "lua/"},
       {0, 1, 0, "", 0, "@l\t\006\t\r", "lua/source.c"},
       {0, 1, 0, "", 0, "@lua/\t\r", "lua/source.c"},
@@ -559,11 +593,11 @@ static int expansion_cases(int native) {
       {3, 1, 0, "", 0, "@l\t\006\177\177\177\177\t\t\r", "lib/"},
       {4, 1, 0, "", 0, "@l\t\006\177\177\177\177\t\t\r", "lib/"},
       {5, 1, 0, "", 0, "@l\t\006\177\177\177\177\t\t\r", "lib/"},
-      {3, 1, 1, "", 0, "@l\t\006\t\r", "lua/#"},
-      {2, 1, 1, "", 0, "@l\t\006\t\r", "lua/#"},
+      {3, 1, 1, "", 0, "@l\t\006\t\r", "@lua/#"},
+      {2, 1, 1, "", 0, "@l\t\006\t\r", "@lua/#"},
       {6, 0, 0, "", 0, "@l\t\t\r", "lib/"},
-      {7, 0, 1, "", 0, "@l\t\t\r", "lua/#"},
-      {9, 1, 1, "", 0, "@l\t\006\t\r", "lua/#"},
+      {7, 0, 1, "", 0, "@l\t\t\r", "@lua/#"},
+      {9, 1, 1, "", 0, "@l\t\006\t\r", "@lua/#"},
       {0, 1, 0, "say @luX later", 7, "\t\006\t\r", "say lua/source.c later"},
       {8, 1, 0, "", 0, "/app\t\006\t\t\r", "/approve off"},
       {8, 1, 0, "", 0, "/app\t\006\t\177\177\177 of\t\r", "/approve off"},
@@ -793,7 +827,7 @@ static int whitespace_cases(void) {
                {"", "hello \t\t\177\t\r", "hello there", 0, 0},
                {"", "hello world \t\r", "hello world #", 0, 1},
                {"", "end \t\r", "end #", 0, 1},
-               {"", "@end \t\r", "end #", 0, 1},
+               {"", "@end \t\r", "@end #", 0, 1},
                {"", "hello x \t\r", "hello x #", 0, 1},
                {"", "hello  \t\r", "hello  world", 0, 0},
                {"", "hello\n\t\r", "hello\nworld", 0, 0},
@@ -804,7 +838,7 @@ static int whitespace_cases(void) {
                {"", "@hello \t\r", "hello world", 0, 0},
                {"", "@hello \t\t\r", "hello there", 0, 0},
                {"", "@hello w\t \t\r", "hello world #", 0, 1},
-               {"", "@hello x \t\r", "hello x #", 0, 1},
+               {"", "@hello x \t\r", "@hello x #", 0, 1},
                {"", "hello\024\t\r", "hello world", 0, 0},
                {"", "@hello\024\t\r", "hello world", 0, 0},
                {" ", "\001\013hello\031\t\r", "hello world", 1, 0},
@@ -816,7 +850,7 @@ static int whitespace_cases(void) {
                PHRASE_TRIGGER));
     CHECK(!run(native, "", 0, "hello\n@\t\r", "hello\nhello world", 0, 131072,
                PHRASE_TRIGGER));
-    CHECK(!run(native, "", 0, "@hello @\t\r", "hello hello world", 0, 131072,
+    CHECK(!run(native, "", 0, "@hello @\t\r", "@hello hello world", 0, 131072,
                PHRASE_TRIGGER));
     for (i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i)
       CHECK(!run(native, cases[i].initial, cases[i].cursor, cases[i].keys,

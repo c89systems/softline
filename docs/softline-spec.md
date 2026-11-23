@@ -401,13 +401,13 @@ No libmdf dependency is introduced into the library.
 
 ## Completion providers
 
-`set_completion_providers()` / `sl_set_completion_providers()` atomically copies
-an array of `sl_completion_provider_t` registrations. Each has one printable
-non-whitespace ASCII `trigger`, a `scope`, `strip_trigger`, a synchronous
+`sl_set_completion_providers()` and the receiver's `set_completion_providers`
+method copy an array of `sl_completion_provider_t` registrations. Each has a
+printable non-whitespace ASCII `trigger`, a `scope`, `strip_trigger`, a synchronous
 `sl_completion_callback_t`, optional `sl_completion_expand_callback_t` in
 `expand`, and borrowed host context. Duplicate triggers,
 invalid fields and copy failure preserve the previous registrations.
-NULL/count zero clears them. `SL_COMPLETION_START` (zero/default) anchors only
+A zero count clears them. `SL_COMPLETION_START` (zero/default) anchors only
 at byte zero of the draft. `SL_COMPLETION_WORD` also allows a trigger after
 ASCII whitespace (space, Tab, LF, CR, vertical Tab and form feed).
 
@@ -463,11 +463,13 @@ Softline owns that snapshot while the token is active, including through typing,
 Backspace, Undo, ambiguous matches and Tab cycling. Whitespace inserted by
 ordinary editing (including yank or host insertion) continues the activation
 when it matches a candidate prefix with further characters to complete. For
-example, typing `hello ` keeps `world` visible for `hello world`; Tab accepts
+example, typing `hello ` keeps `world` visible for `hello world`. Tab accepts
 the phrase and further Tabs cycle matching phrases. Whitespace without a
-remaining matching suffix ends the activation. Bracketed paste,
-deleting the trigger, moving outside the token, submission,
-queueing, replacing the draft or replacing registrations ends the activation.
+remaining matching suffix ends the activation. Deleting the trigger, moving
+outside the token, submitting, queueing, replacing the draft or replacing
+registrations also ends it. Bracketed paste inserts literal text without
+starting new provider lookups while the paste is in progress. A separator in
+the paste can still finish an active completion.
 Accepted candidates and restored undo text may themselves contain spaces;
 those spaces do not end the activation. Other edits or movement end the Tab
 cycle and rematch the current prefix against the cached snapshot. A new trigger
@@ -516,20 +518,33 @@ changes, undo, suspension and resize. No producer
 transcript is retained.
 
 `strip_trigger` is off by default. When enabled, normal completion exit or
-submission removes the one introductory character, including from queued or
-held edited entries, without changing their identities, holds or FIFO order.
+submission removes the one introductory character if the whole token matches
+a resolved candidate. This includes exact typed matches and accepted
+continuations. Partial or unmatched text keeps its trigger, including edits
+that make an accepted token unmatched. In queued or held edited entries the
+removal preserves identity, hold and FIFO order.
 Enter submits actual text and never accepts a ghost. For example, `@REA` + Tab
 can accept `@README.md`; Space or Enter removes `@`, leaving `README.md`.
-Trigger removal is undoable. Whole-draft replacement/discard uses its existing
-editing-context rules rather than adding a second deletion. Failed providers
-never strip the trigger. Paced prompt simulation applies trigger stripping
-as part of typing and continues with the remaining text. Registration replacement ends any active completion.
+Trigger removal is undoable. When a pasted separator finishes an exact
+completion, one undo restores the draft from before that paste. Whole-draft
+replacement or discard ends the activation under the usual editing rules.
+Failed providers preserve the trigger. Paced prompt simulation treats trigger
+removal as part of typing and continues with the remaining text.
+
+Use `sl_set_completion_predicate()` or `editor->set_completion_predicate` to
+check context before a provider resolves a new token. The callback may read
+the draft and cursor. A positive result allows the provider. Zero or a negative
+result skips the provider silently and preserves the literal trigger. The
+editor can check the same token again on a later input turn. For example, a
+host can decline its filename trigger in a shell draft. Passing `NULL` clears
+the predicate. Replacing or clearing it discards cached completions while
+preserving the draft and cursor.
 
 C/Lua simple multiline and chat examples use callbacks for `/`, `h`, `v`, `n`
 and `@`. Slash callbacks provide the host's commands. `@` takes a fresh current
-directory snapshot on activation, accepts at word boundaries and removes its
-marker on exit/submission. It uses the same frontend in
-local/remote chat; the example host owns file discovery, not the Softline library.
+directory snapshot on activation. It is eligible at word boundaries and strips
+the marker when an exact match exits or is submitted. The local and remote
+example hosts share the file discovery implementation.
 Directories end in `/`; commit one with Right/Ctrl-F to preview its first child
 through the same resolver, without scanning descendants. Tab accepts/cycles
 that directory's children. The command resolver similarly extends `/approve`

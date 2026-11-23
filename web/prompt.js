@@ -196,7 +196,8 @@ export class Prompt {
       }
       if (event.type === 'complete_end') {
         clearTimeout(request.timer); this.requests.delete(event.request);
-        if (request.failed || event.status !== 'ok') request.reject(new Error('Completion provider failed.'));
+        if (event.status === 'declined') request.resolve(null);
+        else if (request.failed || event.status !== 'ok') request.reject(new Error('Completion provider failed.'));
         else request.resolve(request.items);
       }
       return;
@@ -233,7 +234,6 @@ export class Prompt {
     }
     // Native undo, word deletion and composition invalidate pending acceptance.
     // Never cancel an edit we cannot reproduce.
-    if (literal) this.finish();
     if (this.busy && !replayable) this.model.reset();
     this.literalInput = literal; this.before = this.input.value;
     this.nativeSelection = { start: this.input.selectionStart, end: this.input.selectionEnd, data };
@@ -255,14 +255,13 @@ export class Prompt {
     this.options.mutate(before, after, edit);
     this.model.input(before, after, this.input.selectionStart, literal, edit);
   }
-  async editInput(type, data, literal = false) {
+  editInput(type, data, literal = false) {
     if (this.input.readOnly) return;
     const generation = this.editGeneration || 0;
-    if (literal) this.finish();
     if (type === 'insertLineBreak' || type === 'insertParagraph') data = '\n';
     if (type.startsWith('insert')) {
       for (const character of literal ? [data] : [...data]) {
-        if (!literal && space(character)) await this.model.separator(character);
+        if (!literal && space(character)) this.model.separator(character);
         if (this.input.readOnly || generation !== (this.editGeneration || 0)) return;
         this.replaceInput(character, this.input.selectionStart, this.input.selectionEnd, literal);
       }

@@ -456,6 +456,42 @@ static int json_field(const char *data, const char *name, char *out,
   return 0;
 }
 #include "web_terminal_fixture.h"
+static int sample_entry(int fd, char *data, size_t cap, const char *label,
+                        const char *format, const char *tone,
+                        const char *needle, char *id, size_t id_cap) {
+  char value[64];
+  return until(fd, data, cap, label) || !strstr(data, "\"type\":\"begin\"") ||
+         json_field(data, "format", value, sizeof(value)) ||
+         strcmp(value, format) ||
+         json_field(data, "tone", value, sizeof(value)) ||
+         strcmp(value, tone) ||
+         json_field(data, "timestamp", value, sizeof(value)) ||
+         strlen(value) != 8 || json_field(data, "id", id, id_cap) ||
+         (needle && (until(fd, data, cap, needle) ||
+                     !strstr(data, "\"type\":\"delta\"") ||
+                     json_field(data, "id", value, sizeof(value)) ||
+                     strcmp(value, id))) ||
+         until(fd, data, cap, "\"type\":\"end\"") ||
+         json_field(data, "id", value, sizeof(value)) || strcmp(value, id);
+}
+static int replay_sample(int fd, char *data, size_t cap) {
+  char running[64], resumed[64], id[64], timestamp[16];
+  return sample_entry(fd, data, cap, "Running Check config.ini", "text", "info",
+                      "Checking config.ini", running, sizeof(running)) ||
+         sample_entry(fd, data, cap, "Busy: command not started", "markdown",
+                      "warning", "The configuration check is still running.",
+                      id, sizeof(id)) ||
+         until(fd, data, cap, "\"role\":\"assistant\"") ||
+         json_field(data, "timestamp", timestamp, sizeof(timestamp)) ||
+         strlen(timestamp) != 8 || until(fd, data, cap, "\"type\":\"end\"") ||
+         sample_entry(fd, data, cap, "Check config.ini output", "text",
+                      "neutral", "Syntax OK", resumed, sizeof(resumed)) ||
+         !strcmp(resumed, running) ||
+         sample_entry(fd, data, cap, "Ran Check config.ini (exit 0)",
+                      "markdown", "success", NULL, id, sizeof(id)) ||
+         sample_entry(fd, data, cap, "Configuration update", "diff", "neutral",
+                      "\"kind\":\"added\"", id, sizeof(id));
+}
 static int replay_cursors(unsigned short port, const char *epoch, char *data,
                           size_t cap) {
   const char *stale[] = {"2", "previous-host.2"};
@@ -468,7 +504,9 @@ static int replay_cursors(unsigned short port, const char *epoch, char *data,
       return -1;
     if (ws_read(fd, data, cap, &opcode) < 0 ||
         !strstr(data, "\"type\":\"reset\"") ||
-        until(fd, data, cap, "aGVsbG8gd29ybGQ="))
+        until(fd, data, cap, "aGVsbG8gd29ybGQ=") ||
+        strstr(data, "\"timestamp\"") ||
+        (i == 0 && replay_sample(fd, data, cap)))
       failed = 1;
     close(fd);
     if (failed)
@@ -1215,16 +1253,28 @@ int main(int argc, char **argv) {
   }
   CHECK(until(one, data, SL_WWW_FRAME_MAX + 1, "\"type\":\"accepted\"") == 0);
   {
-    int reply = 0, transcript = 0, i;
-    for (i = 0; i < 200 && (!reply || !transcript); ++i) {
+    int reply = 0, transcript = 0, running = 0, busy = 0, ran = 0, diff = 0;
+    int i;
+    for (i = 0;
+         i < 200 && !(reply && transcript && running && busy && ran && diff);
+         ++i) {
       CHECK(ws_read(two, data, SL_WWW_FRAME_MAX + 1, &opcode) >= 0);
       if (opcode != 1)
         continue;
       reply |= strstr(data, "aGVsbG8gd29ybGQ=") != NULL;
       transcript |= strstr(data, "\"type\":\"transcript_data\"") != NULL &&
                     strstr(data, "Responses received: 1") != NULL;
+      if (strstr(data, "\"type\":\"begin\"")) {
+        running |=
+            strstr(data, "\"label\":\"Running Check config.ini\"") != NULL;
+        busy |= strstr(data, "\"label\":\"Busy: command not started\"") != NULL;
+        ran |=
+            strstr(data, "\"label\":\"Ran Check config.ini (exit 0)\"") != NULL;
+      }
+      diff |= strstr(data, "\"format\":\"diff\"") != NULL &&
+              strstr(data, "\"kind\":\"added\"") != NULL;
     }
-    CHECK(reply && transcript);
+    CHECK(reply && transcript && running && busy && ran && diff);
   }
   CHECK(!replay_cursors(port, epoch, data, SL_WWW_FRAME_MAX + 1));
   CHECK(ws_send(one, 9, 1, "p", 1) == 0);

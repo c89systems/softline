@@ -1,6 +1,7 @@
 # This same inventory and these key sequences run against native readline and
 # the shipped browser editor. Tabs separate fields; key tags are literal.
 provider	@	word	1	1
+provider	$	word	1	0
 provider	/	start	0	1
 provider	h	start	0	0
 provider	v	word	0	0
@@ -12,6 +13,7 @@ candidate	@	@@literal.txt
 candidate	@	@café.c
 candidate	@	@icon@2x.png
 candidate	@	@README.md
+candidate	$	$review
 candidate	@lua/	@lua/source.c
 candidate	@lua/	@lua/sub/
 candidate	@lua/sub/	@lua/sub/deep.c
@@ -23,7 +25,7 @@ candidate	h	hello world
 candidate	h	hello there
 candidate	v	verification
 candidate	n	next steps
-case	typed partial sends actual draft	@REA<Enter>	REA
+case	typed partial sends actual draft	@REA<Enter>	@REA
 case	Enter does not accept a slash ghost	/app<Enter>	/app
 case	Tab accepts first filename	@l<Tab><Enter>	lua/
 case	Tab cycles original subset	@l<Tab><Tab><Enter>	lib/
@@ -43,15 +45,15 @@ case	start-only phrase does not activate in middle	x h<Tab><Enter>	x h
 case	word provider activates in middle	x v<Tab><Enter>	x verification
 case	word phrase cycles	hello <Tab><Tab><Enter>	hello there
 case	word phrase accepts matching whitespace	next<Space>st<Tab><Enter>	next steps
-case	unmatched separator commits trigger	@README.md<Space>next<Enter>	README.md next
+case	separator commits an exact token	@README.md<Space>next<Enter>	README.md next
 case	multiple references strip independently	@README.md<Space>@icon@2<Tab><Enter>	README.md icon@2x.png
 case	typed filename retains internal at-sign	@icon@2x.png<Enter>	icon@2x.png
 case	selected filename retains leading at-sign	@@li<Tab><Enter>	@literal.txt
 case	completion retains Unicode	@caf<Tab><Enter>	café.c
 case	selected directory retains internal spaces	@spa<Tab><Enter>	space dir/
 case	matching space continues directory	@space<Space>dir/<Enter>	space dir/
-case	deleting after activation exit edits canonical text	@REA<Home><Delete>X<Enter>	XEA
-case	leaving activation strips trigger	@REA<Home>X<Enter>	XREA
+case	deleting after activation exit edits literal text	@REA<Home><Delete>X<Enter>	XREA
+case	leaving an unmatched activation preserves its trigger	@REA<Home>X<Enter>	X@REA
 case	edit inside token replaces suffix	@lbogus<Left><Left><Left><Left><Left><Tab><Enter>	lua/
 case	normal Right within token does not accept ghost	@lua/<Left><Left><Right><Enter>	lua/
 case	backspace rematches cached root	@l<Tab><Backspace><Backspace><Backspace><Tab><Tab><Enter>	lib/
@@ -60,3 +62,6 @@ case	nonbreaking space is not a word boundary	x @REA<Enter>	x @REA
 case	new word trigger takes over unmatched phrase	hello<Space>@l<Tab><Enter>	hello lua/
 case	moving after committed leaf preserves draft	@l<Right><Tab><Right><Right><Enter>	lua/source.c
 case	reused phrase suffix is restored when cycling	hello world<Home><Right><Tab><Tab><Enter>	hello there world
+case	literal shell dollars survive activation	!echo<Space>$$<Space>$HOME<Space>$5<Enter>	!echo $$ $HOME $5
+case	editing an accepted filename to an unknown token	@REA<Tab><Backspace>X<Enter>	@README.mX
+case	space inside an exact candidate leaves an unmatched prefix	@README.md<Left><Left><Left><Left><Left><Left><Space><Enter>	@REA DME.md

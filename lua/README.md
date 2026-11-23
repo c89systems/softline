@@ -930,18 +930,28 @@ eligible trigger, that word starts a new activation: `hello @` leaves the
 embedded trigger characters. Start-only providers remain ineligible after
 whitespace. Whitespace without a matching suffix, deleting the trigger,
 leaving the token, queueing/submitting or replacing the draft ends completion.
-`strip_trigger` then removes the marker
-as an undoable edit. Enter submits actual text, never a ghost. Initial provider
-errors, invalid UTF-8/NUL/control-bearing candidates or callback exceptions
-discard that list, preserve typed text including its marker and suppress
-retries for that token.
+`strip_trigger` then removes the marker as an undoable edit if the whole token
+matches a resolved candidate. A partial or unmatched token keeps its marker.
+If a pasted separator finishes an exact completion, a single undo restores the
+draft from before the paste. Enter submits actual text. Initial provider errors,
+invalid candidates and callback exceptions discard the list and preserve typed
+text for the rest of that activation.
+
+`sl:set_completion_predicate(callback)` calls `callback(trigger)` before
+starting a new completion. The callback may inspect the draft and cursor.
+Treat the editor as read-only and return without yielding. Only the boolean
+`true` allows the provider. Other results and callback errors decline silently.
+Passing `nil` clears the predicate. Changing it discards cached completions and
+preserves the draft and cursor.
+
 No provider runs from a feed/render operation. Callback closures are owned by
 the editor userdata and remain collectable even when they capture that editor.
 The optional continuation receives the full completed string including its
 trigger, even for a unique match. It must return candidates strictly extending
 that string, or `{}` to leave ordinary completion/host Tab handling available.
 It can also resolve a completed ancestor of a partially typed child path.
-Each prefix is cached separately until activation ends; Backspace selects the parent list.
+Each prefix is cached separately until activation ends. Backspace selects the
+parent list.
 Continuations do not interrupt Tab cycling. Commit a parent again or type
 further into its prefix to reuse cached children without another callback.
 Continuation errors discard only their new list and preserve the draft and

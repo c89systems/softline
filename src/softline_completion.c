@@ -121,3 +121,25 @@ int sl_completion_find(const sl_completion_state_t *state, const char *text,
   }
   return match->count != 0;
 }
+
+int sl_completion_exact(const sl_completion_state_t *state, const char *text,
+                        size_t length) {
+  const sl_completion_level_t *level = state->levels;
+  const sl_completion_list_t *list = &state->list;
+  size_t i, token_length;
+  if (state->failed || state->start >= state->end || state->end > length)
+    return 0;
+  token_length = state->end - state->start;
+  for (;;) {
+    for (i = 0; i < list->count; ++i) {
+      const sl_completion_item_t *item = &list->items[i];
+      if (item->length == token_length &&
+          !memcmp(text + state->start, item->text, token_length))
+        return 1;
+    }
+    if (!level)
+      return 0;
+    list = &level->list;
+    level = level->next;
+  }
+}

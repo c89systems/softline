@@ -331,6 +331,31 @@ await uiCheck('copy preserves raw streamed Markdown before and after end',async(
   assert(frame.contentWindow.softlineTestCopied[1]===source,'final copy changed Markdown, whitespace or Unicode');
   event({type:'reset'});assert(!doc.querySelector(`[data-message="${id}"]`),'reset retained old output');
 });
+await uiCheck('labeled output uses one card per entry',()=>{
+  const w=frame.contentWindow,doc=frame.contentDocument;
+  const style=selector=>w.getComputedStyle(doc.querySelector(selector));
+  try {
+    event({type:'delta',id:'labeled-text',label:'Output',timestamp:'23:16:08',role:'note',format:'text',text:'Command output\n'});
+    event({type:'end',id:'labeled-text'});
+    event({type:'delta',id:'labeled-diff',label:'Diff',role:'note',format:'diff',kind:'added',text:'+ New line\n'});
+    event({type:'end',id:'labeled-diff'});
+    event({type:'delta',id:'standalone-text',role:'note',format:'text',timestamp:'231609',text:'Standalone output\n'});
+    assert(doc.querySelectorAll('#messages > .message > .feed-card').length===2,'labeled entries did not get independent cards');
+    assert(parseFloat(style('[data-message="labeled-text"] .feed-card').borderTopWidth)>0,'labeled card has no border');
+    for(const format of ['text','diff']) {
+      const pre=style(`.feed-card .feed-${format}`);
+      assert(pre.borderTopWidth==='0px'&&pre.backgroundColor==='rgba(0, 0, 0, 0)'&&pre.overflowX==='auto',`${format} still has a nested box or lost scrolling`);
+    }
+    assert(style('.feed-card .diff-row.added').backgroundColor!=='rgba(0, 0, 0, 0)','added row lost its color');
+    assert(parseFloat(style('[data-message="standalone-text"] pre').borderTopWidth)>0,'standalone text lost its border');
+    for(const [parent,block] of [['[data-message="labeled-text"]','.feed-card'],['[data-message="standalone-text"]','pre']]) {
+      const root=doc.querySelector(parent),stamp=root.querySelector('.feed-timestamp'),font=w.getComputedStyle(stamp);
+      const gap=root.querySelector(block).getBoundingClientRect().top-stamp.getBoundingClientRect().bottom;
+      assert(font.fontSize==='10px'&&font.fontFamily.includes('monospace')&&gap>=0&&gap<=2,'timestamp is too large or detached from its content');
+    }
+    assert(!doc.querySelector('[data-message="labeled-diff"] .feed-timestamp'),'omitted timestamp occupied a row');
+  } finally {event({type:'reset'});}
+});
 function inputDraft(text,inputType='insertText'){
   const w=frame.contentWindow,p=frame.contentDocument.querySelector('#prompt');
   p.focus();p.setSelectionRange(0,p.value.length);

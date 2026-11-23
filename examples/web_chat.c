@@ -9,6 +9,7 @@
 #include <time.h>
 #include <unistd.h>
 #define WEB_QUEUE_MAX 80u
+#define WEB_TIMESTAMP_SIZE 9
 
 typedef struct web_view {
   struct web_view *next;
@@ -52,6 +53,7 @@ struct demo_web_chat {
   unsigned long serial;
   unsigned long transcript_turns;
   char response[40], session[96];
+  char response_timestamp[WEB_TIMESTAMP_SIZE];
   char *status;
   int busy;
   size_t image_limit;
@@ -1084,28 +1086,104 @@ void demo_web_status(demo_web_chat_t *w, const char *text, int busy) {
   f[1].value = busy ? "1" : "0";
   (void)demo_www_publish(w->www, "status", f, 2);
 }
+static void demo_web_timestamp(char *text) {
+  time_t now = time(NULL);
+  struct tm local;
+  if (now == (time_t)-1 || !localtime_r(&now, &local) ||
+      !strftime(text, WEB_TIMESTAMP_SIZE, "%H:%M:%S", &local))
+    text[0] = '\0';
+}
+
 void demo_web_message(demo_web_chat_t *w, const char *role, const char *text) {
-  char id[40];
+  char id[40], timestamp[WEB_TIMESTAMP_SIZE];
+  const char *stamp = NULL;
   if (!w)
     return;
   (void)snprintf(id, sizeof(id), "m%lu", ++w->serial);
-  demo_www_begin(w->www, id, role);
-  demo_www_text(w->www, id, role, text, strlen(text));
+  if (strcmp(role, "user")) {
+    demo_web_timestamp(timestamp);
+    stamp = timestamp;
+  }
+  demo_www_begin(w->www, id, role, NULL, stamp);
+  demo_www_text(w->www, id, role, stamp, text, strlen(text));
   demo_www_end(w->www, id);
 }
+typedef struct demo_output_row {
+  const char *kind, *text;
+} demo_output_row_t;
+
+static void demo_web_output_sample(demo_web_chat_t *w, const char *label,
+                                   const char *tone, const char *format,
+                                   const demo_output_row_t *rows,
+                                   size_t count) {
+  char id[40], timestamp[WEB_TIMESTAMP_SIZE];
+  sl_www_field_t fields[] = {{"id", NULL, 0},     {"role", "note", 0},
+                             {"format", NULL, 0}, {"label", NULL, 0},
+                             {"tone", NULL, 0},   {"timestamp", NULL, 0},
+                             {"text", NULL, 0},   {"kind", NULL, 0}};
+  size_t i;
+  (void)snprintf(id, sizeof(id), "m%lu", ++w->serial);
+  demo_web_timestamp(timestamp);
+  fields[0].value = id;
+  fields[2].value = format;
+  fields[3].value = label;
+  fields[4].value = tone;
+  fields[5].value = timestamp;
+  (void)demo_www_publish(w->www, "begin", fields, 6);
+  for (i = 0; i < count; ++i) {
+    fields[6].value = rows[i].text;
+    fields[7].value = rows[i].kind;
+    (void)demo_www_publish(w->www, "delta", fields, rows[i].kind ? 8 : 7);
+  }
+  demo_www_end(w->www, id);
+}
+
+static void demo_web_command_sample(demo_web_chat_t *w, int finished) {
+  static const demo_output_row_t start[] = {{NULL, "Checking config.ini\n"}};
+  static const demo_output_row_t busy[] = {
+      {NULL, "The configuration check is still running.\n"}};
+  static const demo_output_row_t output[] = {{NULL, "\tSyntax OK\n"}};
+  static const demo_output_row_t changes[] = {
+      {"header", "config.ini\n"},
+      {"context", "  1   [chat]\n"},
+      {"removed", "  2 - show_reasoning = false\n"},
+      {"added", "  2 + show_reasoning = true\n"}};
+  if (!finished) {
+    demo_web_output_sample(w, "Running Check config.ini", "info", "text", start,
+                           1);
+    demo_web_output_sample(w, "Busy: command not started", "warning",
+                           "markdown", busy, 1);
+    return;
+  }
+  demo_web_output_sample(w, "Check config.ini output", "neutral", "text",
+                         output, 1);
+  demo_web_output_sample(w, "Ran Check config.ini (exit 0)", "success",
+                         "markdown", NULL, 0);
+  demo_web_output_sample(w, "Configuration update", "neutral", "diff", changes,
+                         sizeof(changes) / sizeof(*changes));
+}
+
 void demo_web_response(demo_web_chat_t *w, const void *bytes, size_t length) {
   if (!w || !length)
     return;
   if (!w->response[0]) {
+    if (w->transcript_turns % 3 == 0)
+      demo_web_command_sample(w, 0);
     (void)snprintf(w->response, sizeof(w->response), "m%lu", ++w->serial);
-    demo_www_begin(w->www, w->response, "assistant");
+    demo_web_timestamp(w->response_timestamp);
+    demo_www_begin(w->www, w->response, "assistant", "markdown",
+                   w->response_timestamp);
   }
-  demo_www_text(w->www, w->response, "assistant", bytes, length);
+  demo_www_text(w->www, w->response, "assistant", w->response_timestamp, bytes,
+                length);
 }
+
 void demo_web_response_end(demo_web_chat_t *w) {
   if (w && w->response[0]) {
     web_view_t *view;
     demo_www_end(w->www, w->response);
+    if (w->transcript_turns % 3 == 0)
+      demo_web_command_sample(w, 1);
     w->response[0] = 0;
     ++w->transcript_turns;
     for (view = w->views; view; view = view->next)

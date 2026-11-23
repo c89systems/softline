@@ -59,7 +59,6 @@ export async function runWebCompletionTests(source, completionSource, promptSour
     }
   }
   class Encoder { encode(text) { return Uint8Array.from(unescape(encodeURIComponent(text)), c => c.charCodeAt(0)); } }
-  class Decoder { decode(bytes = []) { return decodeURIComponent(escape(Array.from(bytes, n => String.fromCharCode(n)).join(''))); } }
   class Params {
     constructor(value = {}) {
       this.values = new Map(typeof value === 'string' ? value.split('&').filter(Boolean).map(part => { const at = part.indexOf('='); return [part.slice(0, at), decodeURIComponent(part.slice(at + 1).replace(/\+/g, ' '))]; }) : Object.entries(value));
@@ -203,7 +202,7 @@ export async function runWebCompletionTests(source, completionSource, promptSour
     const preferences = new Map(Object.entries(options.preferences || {}));
     const env = {
       document, window, TerminalPanel, Transcripts, ImagePreviews: class extends ImagePreviews { constructor(...args) { super(...args); previews = this; } },
-      WebSocket: Socket, TextEncoder: Encoder, TextDecoder: Decoder, URLSearchParams: Params,
+      WebSocket: Socket, TextEncoder: Encoder, TextDecoder: globalThis.TextDecoder, URLSearchParams: Params,
       URL: class extends globalThis.URL { static createObjectURL() { const url = 'blob:test-image-' + (++serial); blobs.push(url); return url; } static revokeObjectURL(url) { revoked.push(url); } }, location: { href: 'http://localhost/', protocol: 'http:', origin: 'http://localhost' },
       crypto: { getRandomValues(array) { return array.fill(++serial); } },
       localStorage: { getItem: name => preferences.get(name), setItem: (name, value) => preferences.set(name, value) },
@@ -1030,6 +1029,127 @@ export async function runWebCompletionTests(source, completionSource, promptSour
     assert(ui.copiedText[0] === 'First **bold**\n' &&
       ui.copiedText[1] === 'First **bold**\n\n`code`' && message.children[1].children.length === 1, 'copy depends on rendering or end duplicated the action');
   });
+  await check('copy defaults to assistant Markdown and can be controlled per message', async ui => {
+    for (const [id, role, format, copy, expected] of [
+      ['note', 'note', undefined, undefined, false],
+      ['user', 'user', undefined, undefined, false],
+      ['text', 'assistant', 'text', undefined, false],
+      ['diff', 'assistant', 'diff', undefined, false],
+      ['private', 'assistant', 'markdown', '0', false],
+      ['opt-in', 'note', 'markdown', '1', true]
+    ]) {
+      ui.event({ type: 'begin', id, role, format, copy });
+      ui.event({ type: 'delta', id, text: '**message**' });
+      ui.event({ type: 'end', id });
+      const message = ui.get('messages').children.at(-1);
+      assert((message.children[1]?.className === 'message-tools') === expected, 'wrong copy action for ' + id);
+    }
+  });
+  await check('literal output can start with a replay delta and copy its original whitespace and markup', async ui => {
+    const first = '  **literal**\t<img src=x>\n', last = '\t  tail';
+    ui.event({ type: 'delta', id: 'replay', role: 'note', format: 'text', copy: '1', text: first });
+    ui.event({ type: 'delta', id: 'replay', text: last });
+    ui.event({ type: 'end', id: 'replay' });
+    const message = ui.get('messages').children[0], block = message.children[0].children[0];
+    assert(block.tagName === 'PRE' && block.className === 'feed-text' &&
+      block.textContent === first + last && block.children.every(child => typeof child === 'string'),
+      'literal content was rendered as markup or whitespace changed');
+    const copy = message.children[1].children[0];
+    assert(copy['aria-label'] === 'Copy output', 'literal copy had the wrong label');
+    copy.click(); await ui.idle();
+    assert(ui.copiedText[0] === first + last, 'literal copy changed the streamed text');
+  });
+  await check('diff rows retain their kind across fragments and split UTF-8', async ui => {
+    const id = 'patch';
+    ui.event({ type: 'begin', id, role: 'note', format: 'diff', copy: '1' });
+    for (const chunk of [
+      { kind: 'header', text: 'config.ini\n' },
+      { kind: 'removed', text: '  1 - old' },
+      { text: ' value\n' },
+      { kind: 'added', text: '  1 + caf' },
+      { encoding: 'base64', data: 'ww==' },
+      { encoding: 'base64', data: 'qQ==' },
+      { kind: 'context', text: '\n\n' },
+      { kind: 'unrecognized', text: '  2   <tag>' }
+    ]) ui.event({ type: 'delta', id, ...chunk });
+    ui.event({ type: 'end', id });
+    const message = ui.get('messages').children[0], block = message.children[0].children[0];
+    assert(block.tagName === 'PRE' && block.className === 'feed-diff', 'diff block missing');
+    const rows = [['header', 'config.ini'], ['removed', '  1 - old value'],
+      ['added', '  1 + café'], ['context', ''], ['context', '  2   <tag>']];
+    assert(block.children.length === rows.length, 'diff line breaks changed row count');
+    for (const [index, [kind, text]] of rows.entries()) {
+      const row = block.children[index];
+      assert(row.className === 'diff-row ' + kind && row.textContent === text &&
+        row.children.every(child => typeof child === 'string'), 'wrong diff row ' + index);
+    }
+    message.children[1].children[0].click(); await ui.idle();
+    assert(ui.copiedText[0] === rows.map(row => row[1]).join('\n'), 'diff copy lost the original stream');
+  });
+  await check('labeled command output and receipts keep their chronological positions in live and replayed feeds', async ui => {
+    const feed = ui.get('messages');
+    const start = { type: 'begin', id: 'running', role: 'note', format: 'text', label: 'Running cat <file>', tone: 'info', timestamp: '23:16:08 +0200', copy: '1' };
+    const events = [start,
+      { type: 'delta', id: 'running', text: '# Hello\n' },
+      { type: 'end', id: 'running' },
+      { type: 'delta', id: 'busy', role: 'note', label: 'Busy', tone: 'warning', text: 'Already running.' },
+      { type: 'end', id: 'busy' },
+      { type: 'delta', id: 'steer', role: 'user', text: 'Check it.' },
+      { type: 'end', id: 'steer' },
+      { type: 'begin', id: 'resumed', role: 'note', format: 'text', label: 'Output from cat <file>' },
+      { type: 'delta', id: 'resumed', text: '\tLater ' },
+      { type: 'delta', id: 'resumed', text: 'output\n' },
+      { type: 'end', id: 'resumed' },
+      { type: 'begin', id: 'ran', role: 'note', label: 'Ran cat <file> (35 ms)', tone: 'success' },
+      { type: 'end', id: 'ran' },
+      { type: 'delta', id: 'patch', role: 'note', format: 'diff', label: 'Changes', tone: 'unknown', kind: 'added', text: '  2 + verified\n' },
+      { type: 'end', id: 'patch' }];
+    events.slice(0, 2).forEach(ui.event);
+    const [entry] = feed.children, [stamp, card] = entry.children, [header, body, tools] = card.children;
+    assert(stamp.className === 'feed-timestamp' && stamp.textContent === start.timestamp && card.dataset.tone === 'info' &&
+      header.textContent === start.label && body.textContent === '# Hello\n', 'running entry did not stream literal text');
+    events.slice(2).forEach(ui.event);
+    const verifyFeed = () => {
+      assert(feed.children.map(child => child.dataset.message).join(' ') === 'running busy steer resumed ran patch', 'later output was backfilled');
+      const [, busy, steer, resumed, ran, patch] = feed.children;
+      assert(busy.children[0].dataset.tone === 'warning' && steer.children[0].className === 'body', 'the busy or steer entry was misplaced');
+      assert(resumed.children[0].children[1].textContent === '\tLater output\n', 'resumed chunks did not stream into their own entry');
+      assert(ran.children[0].dataset.tone === 'success' && ran.textContent === 'Ran cat <file> (35 ms)', 'completion receipt was not header-only');
+      const diff = patch.children[0];
+      assert(!diff.dataset.tone && diff.children[1].children[0].children[0].className === 'diff-row added', 'invalid tone or lost diff row style');
+    };
+    verifyFeed();
+    assert(feed.children[0] === entry && body.textContent === '# Hello\n', 'later events changed earlier output');
+    tools.children[0].click(); await ui.idle();
+    assert(ui.copiedText[0] === '# Hello\n', 'copy included header, timestamp, or later output');
+    for (const boundary of [{ type: 'reset' }, { type: 'session', id: 'replacement' }]) {
+      ui.event(boundary);
+      assert(feed.children.length === 0, 'clearing a conversation retained labeled output');
+      events.forEach(ui.event);
+      verifyFeed();
+      assert(feed.children[0] !== entry && feed.children[0].textContent === entry.textContent, 'fresh replay did not reconstruct the first entry');
+    }
+  });
+  await check('timestamps are optional on replies and output and omitted from user prompts', async ui => {
+    const feed = ui.get('messages'), timestamp = '<231608> UTC+02';
+    ui.event({ type: 'begin', id: 'empty', role: 'assistant', timestamp: '' });
+    ui.event({ type: 'begin', id: 'omitted', role: 'note' });
+    ui.event({ type: 'begin', id: 'user-live', role: 'user', timestamp });
+    ui.event({ type: 'delta', id: 'user-replay', role: 'user', timestamp, text: 'hello' });
+    for (const message of feed.children) assert(message.children[0].className === 'body', 'a user or undated message added a timestamp row');
+    for (const [role, format] of [['assistant', 'markdown'], ['note', 'text'], ['note', 'diff']]) {
+      const id = `dated-${role}-${format}`;
+      ui.event({ type: 'delta', id, role, format, timestamp, text: 'content' });
+      ui.event({ type: 'delta', id, timestamp, text: ' continues' });
+      ui.event({ type: 'end', id });
+      const [stamp, body, tools] = feed.children.at(-1).children;
+      assert(stamp.className === 'feed-timestamp' && stamp.textContent === timestamp &&
+        stamp.children.every(child => typeof child === 'string') && body.className === 'body', 'timestamp was reinterpreted or duplicated');
+      if (role === 'assistant') tools.children[0].click();
+    }
+    await ui.idle();
+    assert(ui.copiedText[0] === 'content continues', 'copy included timestamp metadata');
+  });
   await check('terminal messages validate source origin and bounded measurements', async ui => {
     const frame = openTerminal(ui), panel = ui.get('terminal-panel'), height = paneSize(panel);
     for (const data of [{ type: 'softline-terminal-size', rowHeight: Infinity, chromeHeight: 20 }, { type: 'softline-terminal-size', rowHeight: 0, chromeHeight: 20 }, { type: 'softline-terminal-size', rowHeight: 18, chromeHeight: -2 }]) terminalEvent(ui, data);
@@ -1292,7 +1412,7 @@ export async function runWebCompletionTests(source, completionSource, promptSour
     ui.prompt.setRangeText(' pasted', ui.prompt.selectionStart, ui.prompt.selectionEnd, 'end');
     ui.prompt.fire('input', { inputType: 'insertFromPaste' });
     ui.reply(ui.queries()[0]); await ui.idle();
-    assert(ui.prompt.value === 'l pasted', 'pending completion lost native pasted text');
+    assert(ui.prompt.value === '@l pasted', 'pending completion changed native pasted text');
   }, { manual: true });
   await check('approval buttons are Approve Edit Reject and edit preserves the independent draft', async ui => {
     ui.event({ type: 'capabilities', edit: '1' });
@@ -1556,7 +1676,7 @@ export async function runWebCompletionTests(source, completionSource, promptSour
     assert(ui.ghost() === 'ua/' && ui.queries().length === 1, 'provider snapshot was not reused');
     ui.input('i'); await ui.idle();
     assert(ui.ghost() === 'b/', 'typed prefix did not rematch cached inventory');
-    ui.key('Enter'); await ui.idle(); assert(ui.sent() === 'li', 'Enter accepted ghost');
+    ui.key('Enter'); await ui.idle(); assert(ui.sent() === '@li', 'Enter changed an unaccepted ghost');
   });
   await check('committing directory previews children without a popup or insertion', async ui => {
     await ui.type('@l'); ui.key('Tab'); await ui.idle(); ui.key('ArrowRight'); await ui.idle();
@@ -1573,19 +1693,19 @@ export async function runWebCompletionTests(source, completionSource, promptSour
     ui.key('Enter'); await ui.idle(); assert(ui.sent() === 'lua/', 'Escape retained trigger');
   });
   await check('Enter submits immediately before root reply arrives', async ui => {
-    ui.input('@REA'); ui.key('Enter'); await ui.idle();
-    assert(ui.sent() === 'REA', 'Enter waited for or accepted an unresolved ghost');
+    ui.input('@README.md'); ui.key('Enter'); await ui.idle();
+    assert(ui.sent() === '@README.md', 'Enter waited for or changed an unresolved token');
     ui.reply(ui.queries()[0]); await ui.idle(); assert(!ui.ghost(), 'stale result reactivated submitted draft');
   }, { manual: true });
   await check('pending Tab preserves fast subsequent typing and submission order', async ui => {
     ui.input('@l'); ui.key('Tab'); ui.input('X'); ui.key('Enter');
     assert(ui.sent() === undefined, 'submission raced completion acceptance');
-    ui.reply(ui.queries()[0]); await ui.idle(); assert(ui.sent() === 'lua/X', 'queued editor input was lost or reordered');
+    ui.reply(ui.queries()[0]); await ui.idle(); assert(ui.sent() === '@lua/X', 'queued editor input was lost or reordered');
   }, { manual: true });
   await check('clicking away cancels pending acceptance', async ui => {
     ui.input('@l'); ui.key('Tab'); ui.prompt.setSelectionRange(0, 0); ui.prompt.fire('click');
     ui.reply(ui.queries()[0]); await ui.idle();
-    assert(ui.prompt.value === 'l', 'late acceptance overwrote moved draft');
+    assert(ui.prompt.value === '@l', 'late acceptance overwrote moved draft');
   }, { manual: true });
   await check('provider timeout releases pending editor input without losing typed text', async ui => {
     ui.input('@l'); ui.key('Tab'); ui.input('X'); ui.key('Enter'); ui.timeout(3000); await ui.idle();
@@ -1598,13 +1718,39 @@ export async function runWebCompletionTests(source, completionSource, promptSour
     ui.input('literal @mention user@example.com @README.md', 'insertFromPaste'); ui.form(); await ui.idle();
     assert(ui.sent() === 'literal @mention user@example.com @README.md' && !ui.queries().length, 'paste was treated as completion syntax');
   });
-  await check('a bare trigger does not send an empty prompt', async ui => {
-    ui.input('@'); ui.form(); await ui.idle(); assert(ui.sent() === undefined && !ui.prompt.value, 'empty prompt submitted');
+  for (const [pasted, expected] of [['X', '@README.mdX'], [' tail', 'README.md tail']]) {
+    await check('pasting ' + JSON.stringify(pasted) + ' uses the resulting completion token', async ui => {
+      await ui.type('@REA'); ui.key('Tab'); await ui.idle();
+      ui.input(pasted, 'insertFromPaste'); ui.form(); await ui.idle();
+      assert(ui.sent() === expected, 'paste did not preserve the resulting token');
+    });
+  }
+  await check('a bare trigger submits as literal text', async ui => {
+    ui.input('@'); ui.form(); await ui.idle(); assert(ui.sent() === '@', 'bare trigger was lost');
   });
   await check('steering strips only active trigger', async ui => {
     await ui.type('email user@example.com @icon@2'); ui.key('Enter', { altKey: true }); await ui.idle();
-    assert(ui.sent('steer') === 'email user@example.com icon@2', 'steer changed literal at-signs');
+    assert(ui.sent('steer') === 'email user@example.com @icon@2', 'steer changed literal at-signs');
   });
+  await check('Space and Enter preserve an exact token before its reply', async ui => {
+    ui.input('@README.md');
+    const query = ui.queries()[0];
+    ui.key(' ');
+    assert(ui.prompt.value === '@README.md ', 'Space waited for the provider');
+    ui.key('Enter'); await ui.idle();
+    assert(ui.sent() === '@README.md ', 'submission waited or stripped unresolved text');
+    ui.reply(query); await ui.idle();
+    assert(!ui.ghost() && ui.sent() === '@README.md ', 'late reply changed submitted text');
+  }, { manual: true });
+  await check('host decline preserves shell text including an exact candidate', async ui => {
+    ui.input('!echo '); ui.input('@README.md');
+    const query = ui.queries()[0];
+    assert(query.get('text') === '!echo @README.md', 'host could not inspect the draft');
+    ui.reply(query, [], 'declined'); await ui.idle();
+    assert(!ui.ghost(), 'declined provider offered a candidate');
+    ui.key('Enter', { altKey: true }); await ui.idle();
+    assert(ui.sent('steer') === '!echo @README.md', 'declined token changed on steer');
+  }, { manual: true });
   await check('input-method separator follows the phrase completion rule', async ui => {
     await ui.type('@README.md'); ui.input(' '); ui.input('next'); ui.form(); await ui.idle();
     assert(ui.sent() === 'README.md next', 'input-method separator did not commit active trigger');
@@ -1723,7 +1869,7 @@ export async function runWebCompletionTests(source, completionSource, promptSour
   await check('late Right completion cannot move the cursor after a click elsewhere', async ui => {
     ui.input('@l'); ui.key('ArrowRight'); ui.prompt.setSelectionRange(0, 0); ui.prompt.fire('click');
     ui.reply(ui.queries()[0]); await ui.idle();
-    assert(ui.prompt.value === 'l' && ui.prompt.selectionStart === 0, 'pending Right moved the new insertion point');
+    assert(ui.prompt.value === '@l' && ui.prompt.selectionStart === 0, 'pending Right moved the new insertion point or changed the literal');
   }, { manual: true });
   await check('toolbar branding is hidden and empty by default', async ui => {
     assert(ui.get('brand').hidden && ui.get('brand').innerHTML === '', 'default toolbar included branding');

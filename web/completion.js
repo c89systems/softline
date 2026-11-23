@@ -29,13 +29,15 @@ export class Completion {
   }
   provider(rule) { this.providers.set(rule.trigger, rule); }
   reset() { ++this.revision; this.session = null; this.redraw(); }
-  active() { return !!this.session && !this.session.literal; }
+  active() { return !!this.session && !this.session.literal && !this.session.declined; }
   async level(session, prefix) {
     if (!session.levels.has(prefix)) {
       const entry = { items: [], pending: true };
       session.levels.set(prefix, entry);
       entry.promise = this.resolve(prefix, session).then(items => {
-        entry.items = [...new Set(items)]; entry.pending = false; this.redraw(); return entry.items;
+        if (items === null) session.declined = true;
+        else entry.items = [...new Set(items)];
+        entry.pending = false; this.redraw(); return entry.items;
       }, () => {
         entry.pending = false; entry.failed = true;
         if (prefix === session.rule.trigger) session.failed = true;
@@ -60,9 +62,12 @@ export class Completion {
     const s = this.session;
     this.session = null;
     const { text, cursor } = this.current();
-    if (s && !s.literal && !s.failed && s.rule.strip && text[s.start] === s.rule.trigger) {
-      this.edit(text.slice(0, s.start) + text.slice(s.start + 1), cursor > s.start ? cursor - 1 : cursor,
-        { at: s.start, removed: 1, syntax: true });
+    if (s && !s.literal && !s.failed && !s.declined && s.rule.strip) {
+      const token = text.slice(s.start, s.end);
+      if ([...s.levels.values()].some(entry => entry.items.includes(token))) {
+        this.edit(text.slice(0, s.start) + text.slice(s.start + 1), cursor > s.start ? cursor - 1 : cursor,
+          { at: s.start, removed: 1, syntax: true });
+      }
     }
     this.redraw();
   }
@@ -80,7 +85,15 @@ export class Completion {
       const d = edit || difference(before, after);
       s.cycle = null; s.committed = false;
       if (d.at <= s.start || d.at > s.end || d.removed > s.end - d.at) this.session = null;
-      else s.end += d.inserted - d.removed;
+      else {
+        s.end += d.inserted - d.removed;
+        if (literalInput) for (let at = d.at; at < d.at + d.inserted; ++at) {
+          if (space(after[at]) && !this.spaceContinues(s, after, at, after[at])) {
+            s.end = at;
+            break;
+          }
+        }
+      }
     }
     this.cursor(false);
     if (this.session && !this.session.literal && !this.list().length) {
@@ -92,9 +105,9 @@ export class Completion {
     this.activate(this.current().text, this.current().cursor, literalInput);
     this.redraw();
   }
-  list(s = this.session) {
-    if (!s || s.literal || s.failed) return [];
-    const { text, cursor } = this.current(), prefix = text.slice(s.start, cursor);
+  list(s = this.session, cursor = this.current().cursor) {
+    if (!s || s.literal || s.failed || s.declined) return [];
+    const prefix = this.current().text.slice(s.start, cursor);
     let best = -1, items = [];
     for (const [key, entry] of s.levels) {
       if (!entry.failed && entry.items.length && key.length > best && prefix.startsWith(key) && entry.items.some(item => item.startsWith(prefix))) {
@@ -121,8 +134,8 @@ export class Completion {
   }
   async ready() {
     const s = this.session, revision = this.revision;
-    if (s && !s.literal) await this.level(s, s.rule.trigger);
-    return this.session === s && revision === this.revision ? s : null;
+    if (s && !s.literal && !s.declined) await this.level(s, s.rule.trigger);
+    return this.session === s && revision === this.revision && !s?.declined ? s : null;
   }
   ancestor(s) {
     const { text, cursor } = this.current(), prefix = text.slice(s.start, cursor);
@@ -196,10 +209,16 @@ export class Completion {
     if (!s.committed && prefix && s.rule.expand && this.ancestor(s) === prefix) { await this.commitPrefix(); return true; }
     return false;
   }
-  async separator(character) {
-    await this.ready();
+  spaceContinues(s, text, cursor, character) {
+    const prefix = text.slice(s.start, cursor) + character;
+    return this.list(s, cursor).some(item => item.length > prefix.length && item.startsWith(prefix));
+  }
+  separator(character) {
     const s = this.session, { text, cursor } = this.current();
-    if (s && (s.literal || !this.list(s).some(item => item.startsWith(text.slice(s.start, cursor) + character)))) this.finish();
+    if (s && !this.spaceContinues(s, text, cursor, character)) {
+      s.end = Math.min(s.end, cursor);
+      this.finish();
+    }
     if (this.session) { this.session.cycle = null; this.session.committed = false; }
   }
   escape() {

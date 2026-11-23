@@ -68,13 +68,16 @@ conversation session.
 | `transcript_reset` | `id` |
 | `transcript_remove` | `id` |
 
-Send data in chunks of up to 16 KiB before base64 encoding. Text events
-carry complete UTF-8 characters. VT events can split UTF-8 and terminal
+The browser accepts up to 16 KiB of decoded data per chunk. When sending with
+`sl_www_emit()`, all field values together must also fit `SL_WWW_CHUNK_MAX`
+(8192 bytes), including `id`, `encoding`, and the base64 string. Chunks of up
+to 5 KiB of raw VT data fit this budget with any supported transcript ID. Text
+events carry complete UTF-8 characters. VT events can split UTF-8 and terminal
 sequences across chunks. The browser keeps its own screen for each viewer.
-An existing ID can be re-announced on resume, and a host can send a
-reset and stream replay from a known initial screen. After a conversation
-reset or session change, announce the current registry again before replaying
-any chunks.
+Re-announcing an existing ID leaves that viewer intact. Send
+`transcript_resize` to change its source dimensions or `transcript_reset`
+before replaying from an empty screen. After a conversation reset or session
+change, announce the current registry again before replaying any chunks.
 
 **F8** or the **Transcripts** button cycles through viewers and closes the
 pane after the last one. Select a tab to jump directly to a viewer. Use the

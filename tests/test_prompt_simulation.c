@@ -104,9 +104,10 @@ static int simulate(int master, int slave) {
   options.start_delay_ms = 0;
   options.character_delay_ms = 5;
   probe.deadline = milliseconds() + 2000;
-  CHECK(sl_simulate_prompt(sl, "@abc def @abc tail", &options) == SL_OK);
+  CHECK(sl_simulate_prompt(sl, "@abc def @missing @abc tail", &options) ==
+        SL_OK);
   line = sl_readline(sl, "> ");
-  CHECK(line && !strcmp(line, "abc def abc tail"));
+  CHECK(line && !strcmp(line, "abc def @missing abc tail"));
   sl_free_string(sl, line);
   probe.deadline = 0;
   memset(&options, 0, sizeof(options));

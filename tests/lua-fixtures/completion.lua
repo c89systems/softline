@@ -174,6 +174,19 @@ for i, resolve in ipairs({
   assert(sl:next_prompt("expand-error-" .. i .. "> ") == "lib/")
   assert(attempts == 1)
 end
+local vetoed, candidates = 0, 0
+assert(sl:set_completion_providers({{trigger="@", scope=softline.COMPLETION_WORD, strip_trigger=true,
+  complete=function() candidates = candidates + 1; return {"@alpha"} end}}))
+assert(sl:set_completion_predicate(function(trigger)
+  assert(trigger == "@" and sl:cursor() > 0)
+  if sl:buffer():sub(1, 1) == "!" then vetoed = vetoed + 1; return false end
+  return true
+end))
+assert(sl:next_prompt("predicate-1> ") == "!echo @alpha")
+assert(vetoed > 0 and candidates == 0)
+assert(sl:set_completion_predicate(nil))
+assert(sl:next_prompt("predicate-2> ") == "alpha")
+assert(candidates == 1)
 sl:close()
 for mode = 0, 1 do
   local editor = assert(softline.new({prompt_theme=softline.PROMPT_THEME_PLAIN}))

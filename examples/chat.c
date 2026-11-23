@@ -1607,8 +1607,8 @@ int main(int argc, char **argv) {
             "`/` resolves commands; `@` lists one directory at a time (except "
             ".git). "
             "Tab cycles; Right/Ctrl-F commits and previews the next list. "
-            "Enter or a separating space removes "
-            "`@`. "
+            "Enter or a separating space removes `@` from a completed "
+            "filename. "
             "[Hyperlink demo](https://pkt.systems).") != 0) {
       report_failure(&state, "completion demo output");
       exit_code = 1;

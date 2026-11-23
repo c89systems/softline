@@ -43,10 +43,13 @@ typedef struct sl_www_asset {
   /** Body byte count. */
   size_t length;
 } sl_www_asset_t;
-/** One complete, bounded UTF-8 JSON WebSocket text frame. SL_OK consumes the
- * frame. NOT_READY consumes none; the host must retry or disconnect/replay.
- * The bytes are borrowed for this call only. A frame is not a whole response:
- * publish response deltas as the producer emits them. */
+/** Consume one bounded UTF-8 JSON payload for a WebSocket text frame.
+ * Publish response deltas as the producer emits them.
+ * @param context Host-owned writer state.
+ * @param frame JSON bytes borrowed for this call, without transport framing.
+ * @param length Payload size in bytes.
+ * @return SL_OK if the host consumed the payload. SL_ERROR_NOT_READY means
+ * it consumed none. Retry the event or disconnect and replay. */
 typedef int (*sl_www_write_t)(void *context, const void *frame, size_t length);
 /** One callback-scoped action or binary request. */
 typedef struct sl_www_request {
@@ -192,12 +195,27 @@ int sl_www_simulate_prompt_tracked(
  * thread, outside receiver callbacks. */
 int sl_www_cancel_prompt_simulation(sl_www_t *self, sl_www_write_t write,
                                     void *target, const char *id);
-/** Encode one bounded event and call write once. The output is JSON, without
- * HTTP/WebSocket framing. Field names are ASCII identifiers. type and seq are
- * reserved. seq may be NULL for transient replies. The fields and their UTF-8
- * values are borrowed for this call. See the web frontend guide for events.
- * @return The writer's result, or an SL_ERROR_* status for an invalid or
- * unencodable event. */
+/** Encode one bounded browser event and call the writer once on success.
+ * The host owns event order and replay. Open a feed message with begin (id,
+ * role, optional format, copy, label, tone and timestamp), stream delta events
+ * with that id, and finish with end. Supply label and timestamp as display
+ * text for assistant or note messages. Start a new message id when output
+ * resumes after an intervening feed entry. See docs/web-frontend.md for the
+ * event fields and their defaults.
+ * @param write Required writer for a JSON payload without transport framing.
+ * @param context Borrowed writer context.
+ * @param type Event name. It and field names use 1 to 64 ASCII letters,
+ * digits, underscores or hyphens. Field names must be unique and must exclude
+ * the reserved names type and seq.
+ * @param seq Optional host replay cursor of at most 64 UTF-8 bytes. NULL
+ * omits the field.
+ * @param fields Borrowed field array with up to SL_WWW_CHUNK_MAX bytes of
+ * UTF-8 values in total, before JSON escaping.
+ * @param count Field count from zero to SL_WWW_FIELDS_MAX. Zero allows a NULL
+ * fields pointer.
+ * @return Writer status, SL_ERROR_INVALID for invalid input, SL_ERROR_NOMEM
+ * on allocation failure, or SL_ERROR_FULL if encoding exceeds capacity.
+ * @see sl_www_write_t */
 int sl_www_emit(sl_www_write_t write, void *context, const char *type,
                 const char *seq, const sl_www_field_t *fields, size_t count);
 /** Look up a borrowed decoded field; NULL means absent. */

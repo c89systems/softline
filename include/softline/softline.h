@@ -211,6 +211,18 @@ typedef enum sl_completion_scope {
  * Return SL_OK or an error. Providers must stop emitting on error. */
 typedef int (*sl_completion_emit_t)(const char *text, void *context);
 
+/** Decide whether an eligible trigger may start a new completion activation.
+ * Runs synchronously on the input owner before the provider. It may inspect
+ * sl_buffer() and sl_cursor(). Treat the editor as read-only for the call.
+ * A declined token can be checked again on a later input turn.
+ * @param self Editor with the current draft and cursor.
+ * @param trigger Registered introductory character under consideration.
+ * @param userdata Borrowed context supplied to sl_set_completion_predicate().
+ * @return Positive to call the provider, zero or negative to decline silently.
+ * @see sl_set_completion_predicate */
+typedef int (*sl_completion_predicate_t)(sl_t *self, char trigger,
+                                         void *userdata);
+
 /** Resolve a trigger once on the editor owner thread. Emit candidates in Tab
  * cycling order and return SL_OK or an error. Read editor state but do not
  * mutate/destroy the handle or retain emit/context. No provider runs from a
@@ -242,11 +254,13 @@ typedef struct sl_completion_provider {
   char trigger;
   /** Eligible positions; default is draft start only. */
   sl_completion_scope_t scope;
-  /** Remove the trigger when completion exits or the prompt is submitted. */
+  /** Zero preserves the trigger. One removes it on exit or submission if the
+   * whole active token exactly matches a resolved candidate. */
   int strip_trigger;
   /** Synchronous callback called once per active token. */
   sl_completion_callback_t callback;
-  /** Borrowed host context, valid until registrations are replaced. */
+  /** Borrowed host context, valid until the registry is replaced or the
+   * editor is destroyed. */
   void *userdata;
   /** Optional lazy continuation callback, cached per completed string. */
   sl_completion_expand_callback_t expand;
@@ -1414,6 +1428,10 @@ struct sl {
                          const sl_prompt_simulation_options_t *options);
   /** Cancel a pending simulation, preserving the visible draft. */
   int (*cancel_prompt_simulation)(sl_t *self);
+  /** Set or clear the optional activation predicate.
+   * @see sl_set_completion_predicate */
+  int (*set_completion_predicate)(sl_t *self, sl_completion_predicate_t allow,
+                                  void *userdata);
 };
 
 /**
@@ -2020,9 +2038,9 @@ int sl_set_quoted_prompt_prefix(sl_t *self, const char *prefix);
 /** Override per-theme quote colours, or pass NULL to restore theme defaults. */
 int sl_set_quoted_prompt_style(sl_t *self, const sl_quote_style_t *style);
 
-/** Atomically replace completion providers on the owner thread. NULL/count
- * zero clears them; invalid fields, duplicate triggers or copy failure keep
- * the previous registry. Registration changes end the current completion.
+/** Replace completion providers on the owner thread. A zero count clears the
+ * registry. Invalid fields, duplicate triggers or copy failure preserve the
+ * previous registry. Registration changes end the current completion.
  * Each activation copies one callback-produced list, reused through typing,
  * Backspace, Undo and Tab cycling. Typed/yanked/host-inserted whitespace keeps
  * the activation when a candidate matches through it with a suffix remaining;
@@ -2037,17 +2055,43 @@ int sl_set_quoted_prompt_style(sl_t *self, const sl_quote_style_t *style);
  * without moving the cursor. With no further preview, it resumes ordinary
  * movement; a no-op at the draft end preserves the commit and its text.
  * Editing/navigation resets that cycle but retains the activation list inside
- * its token. Enter submits actual text, never the ghost. strip_trigger is
- * undoable and applied on normal exit or submission; replacing/discarding the
- * draft needs no extra deletion. Failed providers are not retried until another
- * activation. Optional expand callbacks run on Right/Ctrl-F commit and on Tab
- * outside an active cycle, including for fully present unique candidates.
- * Deeper lists are separate snapshots; Backspace selects the original parent
- * list. Without further candidates, a fully present unique match or no match
- * lets Tab reach ordinary host/queue handling. */
+ * its token. Enter submits actual text, never the ghost. strip_trigger applies
+ * on normal exit or submission when the whole token equals a resolved
+ * candidate. The removal is undoable and shares the paste's undo group when
+ * a pasted separator ends completion. Failed providers are retried only
+ * on another activation. Optional expand callbacks run on Right/Ctrl-F commit
+ * and on Tab outside an active cycle, including for fully present unique
+ * candidates. Deeper lists are separate snapshots. Backspace selects the
+ * original parent list. A fully present unique match with no descendants, or
+ * an unmatched token, lets Tab reach ordinary host/queue handling.
+ * @param self Editor on its owner thread.
+ * @param providers Array copied on success. Pass NULL with count zero.
+ * The callbacks and their borrowed contexts must remain valid while registered.
+ * @param count Number of registrations.
+ * @return SL_OK, SL_ERROR_INVALID for invalid registrations or unavailable
+ * editor, SL_ERROR_NOT_READY during resolution, SL_ERROR_NOMEM if the registry
+ * could not be copied, or SL_ERROR if the old completion could not be finished.
+ * SL_ERROR_IO means the new registry was installed and its redraw failed.
+ * @see sl_set_completion_predicate */
 int sl_set_completion_providers(sl_t *self,
                                 const sl_completion_provider_t *providers,
                                 size_t count);
+
+/** Set or clear an editor-wide completion activation predicate.
+ * Changing it clears any active preview and cached candidates while preserving
+ * the draft and cursor. A declined activation skips the provider silently.
+ * @param self Editor on its owner thread, outside terminal relay and queue
+ * backend callbacks.
+ * @param allow Callback to run before a provider resolves a new token. NULL
+ * restores normal trigger eligibility.
+ * @param userdata Borrowed callback context, valid until replacement or
+ * editor destruction.
+ * @return SL_OK, SL_ERROR_INVALID for an unavailable editor,
+ * SL_ERROR_NOT_READY during completion resolution, or SL_ERROR_IO if the
+ * predicate changed but the prompt redraw failed.
+ * @see sl_completion_predicate_t */
+int sl_set_completion_predicate(sl_t *self, sl_completion_predicate_t allow,
+                                void *userdata);
 
 /** Set OSC 8 policy on the owner thread between output streams. Refused with
  * SL_ERROR_NOT_READY while a stream, partial control or producer link is open.

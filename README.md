@@ -84,7 +84,8 @@ simulated reply. The browser renders the same chart fences, with tile charts
 shown as pies. Lua chat demonstrates the queue with plain text. The examples
 register their own commands and completions. Try `/q` then Tab for `/quit`,
 or `@REA` then Tab for `@README.md`. Right or Ctrl+F commits a directory and
-previews its first child. The example removes `@` when the completion ends.
+previews its first child. When completion ends, the example strips `@` from
+exact matches and preserves partial or unmatched text.
 
 | C chat command | Effect |
 | --- | --- |
@@ -223,7 +224,8 @@ For editor setup, run `make build-debug` to prepare the dependencies, generated
 headers and `build/debug/compile_commands.json`. The checked-in `.clangd` uses
 that database; public-header Doxygen comments supply API hover documentation.
 `make test-clangd` verifies configuration/database discovery and semantic parsing
-of `src/softline.c`. Lua API usage and callback contracts are documented in
+of `src/softline.c`. `make test-public-header-docs` checks documentation coverage
+for installed C declarations. Lua usage and callback contracts are documented in
 [lua/README.md](lua/README.md) and the facade's source comments.
 
 Shared builds use `SOFTLINE_ABI_VERSION=5` for SONAME/SOVERSION. Image-paste handover

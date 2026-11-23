@@ -1481,13 +1481,15 @@ static int sl_completion_finish(sl_t *self) {
   sl_impl_t *impl = sl_impl(self);
   sl_completion_state_t *state = &impl->completion;
   if (state->active && state->provider.strip_trigger &&
-      state->start < impl->len &&
-      impl->buf[state->start] == state->provider.trigger) {
+      sl_completion_exact(state, impl->buf, impl->len)) {
     size_t cursor = impl->cursor;
     int simulating = impl->prompt_simulation.text &&
                      impl->prompt_simulation.revision == impl->draft_revision &&
                      cursor == impl->len;
-    sl_edit_begin(&impl->edit, SL_EDIT_OTHER);
+    /* A pasted separator can finish completion before the rest of the paste.
+     * Keep the trigger removal in the paste's undo group. */
+    if (!impl->edit.open || impl->edit.command != SL_EDIT_PASTE)
+      sl_edit_begin(&impl->edit, SL_EDIT_OTHER);
     state->finishing = 1;
     if (sl_buf_replace(self, state->start, 1, NULL, 0) != 0) {
       state->finishing = 0;
@@ -1578,6 +1580,15 @@ static void sl_completion_prepare(sl_t *self) {
       break;
   if (i == state->provider_count)
     return;
+  if (state->allow) {
+    int allowed;
+    state->resolving = 1;
+    allowed =
+        state->allow(self, state->providers[i].trigger, state->predicate_data);
+    state->resolving = 0;
+    if (allowed <= 0)
+      return;
+  }
   end = impl->cursor;
   while (end < impl->len && !sl_completion_space((unsigned char)impl->buf[end]))
     ++end;
@@ -7977,6 +7988,9 @@ static char *sl_readline_impl(sl_t *self, const char *prompt,
         if (sl_buf_insert(self, impl->cursor, paste_bytes, paste_len) == 0) {
           impl->cursor += paste_len;
           pasted_since_render += paste_len;
+          if (impl->completion.active && impl->cursor > impl->completion.end &&
+              sl_completion_finish(self) != SL_OK)
+            failed = done = 1;
         } else {
           failed = 1;
           done = 1;
@@ -8171,7 +8185,10 @@ static char *sl_readline_impl(sl_t *self, const char *prompt,
            !sl_completion_space_continues(impl, impl->cursor,
                                           key == ' ' ? ' ' : '\n')) ||
           key == SL_KEY_ENTER || key == SL_KEY_ALT_ENTER ||
-          key == SL_KEY_ALT_E || key == SL_KEY_PASTE_BEGIN) {
+          key == SL_KEY_ALT_E) {
+        if ((key == ' ' || key == SL_KEY_CTRL_J) &&
+            impl->cursor < impl->completion.end)
+          impl->completion.end = impl->cursor;
         if (sl_completion_finish(self) != SL_OK) {
           failed = done = 1;
           break;
@@ -8993,6 +9010,22 @@ static int sl_set_completion_providers_method(
   free(impl->completion.providers);
   impl->completion.providers = next;
   impl->completion.provider_count = count;
+  if (impl->active_prompt && sl_render_apply(self, impl->active_prompt) != 0)
+    return SL_ERROR_IO;
+  return SL_OK;
+}
+
+static int sl_set_completion_predicate_method(sl_t *self,
+                                              sl_completion_predicate_t allow,
+                                              void *userdata) {
+  sl_impl_t *impl = sl_impl(self);
+  if (!impl || impl->terminal_active || sl_backend_callback_active(impl))
+    return SL_ERROR_INVALID;
+  if (impl->completion.resolving)
+    return SL_ERROR_NOT_READY;
+  sl_completion_reset(&impl->completion);
+  impl->completion.allow = allow;
+  impl->completion.predicate_data = userdata;
   if (impl->active_prompt && sl_render_apply(self, impl->active_prompt) != 0)
     return SL_ERROR_IO;
   return SL_OK;
@@ -10159,6 +10192,7 @@ static sl_t *sl_create_with_config_impl(const sl_config_t *config) {
   self->image_paste_complete = sl_image_complete;
   self->image_paste_cancel = sl_image_cancel;
   self->set_completion_providers = sl_set_completion_providers_method;
+  self->set_completion_predicate = sl_set_completion_predicate_method;
   self->set_osc8_mode = sl_set_osc8_mode_method;
   self->get_osc8_info = sl_get_osc8_info_method;
   self->destroy = sl_destroy_method;
@@ -10350,6 +10384,13 @@ int sl_set_completion_providers(sl_t *self,
   if (!self || !self->set_completion_providers)
     return SL_ERROR_INVALID;
   return self->set_completion_providers(self, providers, count);
+}
+
+int sl_set_completion_predicate(sl_t *self, sl_completion_predicate_t allow,
+                                void *userdata) {
+  if (!self || !self->set_completion_predicate)
+    return SL_ERROR_INVALID;
+  return self->set_completion_predicate(self, allow, userdata);
 }
 
 int sl_set_osc8_mode(sl_t *self, sl_osc8_mode_t mode) {

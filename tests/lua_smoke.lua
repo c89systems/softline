@@ -25,6 +25,21 @@ do
   assert(weak[1] == nil, "completion callbacks must not root their editor")
 end
 
+do
+  local editor = assert(softline.new())
+  local weak = setmetatable({}, {__mode="v"})
+  do
+    local context = {}
+    weak[1] = context
+    assert(editor:set_completion_predicate(function() return context ~= nil end))
+  end
+  collectgarbage("collect")
+  assert(weak[1] ~= nil, "the editor owns the predicate while open")
+  editor:close()
+  collectgarbage("collect")
+  assert(weak[1] == nil, "closing the editor releases the predicate")
+end
+
 local prompt_methods = {
   "next_prompt",
   "set_live_scroll_region",
@@ -61,6 +76,7 @@ local prompt_methods = {
   "queue_keys",
   "set_prompt_theme",
   "set_completion_providers",
+  "set_completion_predicate",
   "set_osc8_mode",
   "get_osc8_info",
   "set_quoted_prompt_prefix",
