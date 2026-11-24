@@ -8,7 +8,7 @@ export async function runWebCompletionTests(source, completionSource, promptSour
     addEventListener(name, fn) { const list = this.listeners.get(name) || []; list.push(fn); this.listeners.set(name, list); }
     dispatchEvent(event) { return !this.fire(event.type, { detail: event.detail }).defaultPrevented; }
     fire(name, fields = {}) {
-      const event = { target: this, key: '', altKey: false, shiftKey: false, ctrlKey: false, metaKey: false, isComposing: false, defaultPrevented: false, preventDefault() { this.defaultPrevented = true; }, stopImmediatePropagation() { this.stopped = true; }, ...fields };
+      const event = { target: this, key: '', altKey: false, shiftKey: false, ctrlKey: false, metaKey: false, isComposing: false, defaultPrevented: false, preventDefault() { this.defaultPrevented = true; }, stopPropagation() { this.stopped = true; }, stopImmediatePropagation() { this.stopped = true; }, ...fields };
       for (const fn of this.listeners.get(name) || []) { fn(event); if (event.stopped) break; }
       return event;
     }
@@ -33,6 +33,7 @@ export async function runWebCompletionTests(source, completionSource, promptSour
     getBoundingClientRect() { return this.rect || { left: 0, top: 0, right: 400, bottom: 36, width: 400, height: 36 }; }
     getClientRects() { return this.rects || [this.getBoundingClientRect()]; }
     get childElementCount() { return this.children.length; }
+    prepend(child) { child.parent = this; this.children.unshift(child); }
     focus(options) { this.focusOptions = options; if (this.ownerDocument) this.ownerDocument.activeElement = this; this.fire('focus'); }
     showModal() { this.beforeModal = this.ownerDocument?.activeElement; this.open = true; }
     close() { this.open = false; this.fire('close'); this.beforeModal?.focus(); }
@@ -91,11 +92,19 @@ export async function runWebCompletionTests(source, completionSource, promptSour
         this.parser = { registerOscHandler: (code, fn) => { if (fn()) this.osc.add(code); } };
         terminals.push(this);
       }
-      open(stage) { this.element = new Element(); stage.append(this.element); }
+      open(stage) { this.element = document.createElement('div'); stage.append(this.element); }
       get rows() { return this.options.rows; }
       write(bytes, done) { this.chunks.push(bytes); if (!options.stallTranscript) done(); }
       resize(cols, rows) { this.options.cols = cols; this.options.rows = rows; }
       refresh() {}
+      onScroll(fn) { this.scroll = fn; }
+      onRender(fn) { this.render = fn; }
+      onWriteParsed(fn) { this.parsed = fn; }
+      scrollToBottom() { this.buffer.active.viewportY = this.buffer.active.baseY; }
+      registerMarker(offset) {
+        const buffer = this.buffer.active;
+        return this.marker = { line: buffer.baseY + buffer.cursorY + offset, dispose() { this.line = -1; } };
+      }
       dispose() { this.disposed = true; this.element?.remove(); }
     };
     const Transcripts = new Function('Terminal', 'PaneDivider', stripImports(transcriptsSource) + '\nreturn Transcripts;')(Terminal, PaneDivider);
@@ -920,6 +929,56 @@ export async function runWebCompletionTests(source, completionSource, promptSour
     assert(current.element && current.chunks.length === 1 &&
       ui.get('transcript-tabs').children[0]['aria-selected'] === 'true', 'reset did not restore the selected viewer');
   }, { stallTranscript: true });
+  await check('transcript scrollback fills a taller viewport and pages without resizing the source VT', async ui => {
+    transcript(ui, 'short', 'open', { rows: '4', columns: '140' });
+    const screen = ui.get('transcript-screen'), panel = ui.get('transcripts');
+    const terminal = ui.terminals[0];
+    const normal = { type: 'normal', baseY: 100, cursorY: 3, viewportY: 100 };
+    const alternate = { type: 'alternate', baseY: 0, cursorY: 0, viewportY: 0 };
+    terminal.buffer = { active: normal };
+    screen.clientHeight = 160;
+    Object.defineProperty(screen, 'scrollHeight', { get: () => Math.max(160, (terminal.buffer.active.baseY + 4) * 16) });
+    terminal._core = {
+      _renderService: { _renderer: { value: {
+        dimensions: { css: { cell: { height: 16, width: 8 }, canvas: { width: 1120 } } },
+        _bufferService: { buffer: { lines: { get: index => 'line ' + index } } },
+        _rowContainer: { style: { lineHeight: 'normal', letterSpacing: '1px' } },
+        _rowFactory: { createRow: (line, index, cursor) => {
+          assert(!cursor && line === 'line ' + index, 'history row had live cursor or wrong buffer index');
+          const cell = ui.document.createElement('span');
+          cell.textContent = line;
+          cell.className = 'xterm-fg-2';
+          return [cell];
+        } }
+      } } }
+    };
+    ui.get('transcript-toggle').click();
+    const [history] = terminal.element.children;
+    const [rows] = history.children;
+    assert(rows.children.length === 7 && rows.children[1].textContent === 'line 94' &&
+      rows.children[0].children[0].className === 'xterm-fg-2', 'viewport did not show formatted history above the four-row grid');
+    const wheel = screen.fire('wheel');
+    assert(terminal.rows === 4 && terminal.options.cols === 140 && wheel.stopped &&
+      !wheel.defaultPrevented, 'projection changed source geometry or prevented native wheel scrolling');
+    const page = (key, fields) => panel.fire('keydown', { target: screen, key, ...fields });
+    assert(!page('PageUp', { shiftKey: true }).defaultPrevented &&
+      !page('PageUp', { target: ui.prompt }).defaultPrevented, 'pager captured a modified or chat key');
+    assert(page('PageUp').defaultPrevented && screen.scrollTop === 84 * 16, 'Page Up did not move a full visible page');
+    screen.fire('scroll');
+    assert(rows.children[1].textContent === 'line 84' && rows.children.length === 11, 'did not replace just the visible history rows');
+    normal.baseY += 2; normal.viewportY += 2;
+    terminal.parsed(); ui.frame();
+    assert(screen.scrollTop === 84 * 16, 'live output moved the scrolled position');
+    terminal.marker.line--;
+    terminal.parsed(); ui.frame();
+    assert(screen.scrollTop === 83 * 16, 'history eviction did not keep the same row visible');
+    terminal.buffer.active = alternate; terminal.render(); ui.frame();
+    assert(rows.children.length === 0 && screen.scrollTop === 0, 'alternate screen showed normal scrollback');
+    terminal.buffer.active = normal; terminal.render(); ui.frame();
+    assert(screen.scrollTop === 83 * 16, 'leaving alternate screen lost scroll position');
+    assert(page('PageDown', { target: ui.get('transcript-tabs').children[0] }).defaultPrevented &&
+      screen.scrollTop === 93 * 16, 'Page Down from the tab did not move a full visible page');
+  });
   await check('docked terminal leaves prompt and conversation live', async ui => {
     const frame = openTerminal(ui);
     assert(frame && !ui.opened.length && !ui.prompt.readOnly && !ui.get('terminal-panel').hidden, 'terminal opening blocked prompt or opened another tab');

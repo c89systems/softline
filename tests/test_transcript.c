@@ -21,6 +21,7 @@
 #include <termios.h>
 #include <time.h>
 #include <unistd.h>
+#include <vterm.h>
 
 #define CHECK(expression)                                                      \
   do {                                                                         \
@@ -48,6 +49,7 @@ typedef struct fixture {
   int stop[2];
   size_t pending_length;
   char pending[CAPTURE_LIMIT];
+  VTerm *terminal;
 } fixture_t;
 
 static volatile sig_atomic_t restored;
@@ -100,6 +102,8 @@ static void capture(fixture_t *f) {
   CHECK(!pthread_mutex_lock(&f->capture_lock));
   read_output(f);
   CHECK(f->pending_length < sizeof(f->output) - f->length);
+  if (f->terminal)
+    vterm_input_write(f->terminal, f->pending, f->pending_length);
   memcpy(f->output + f->length, f->pending, f->pending_length);
   f->length += f->pending_length;
   f->pending_length = 0;
@@ -111,6 +115,260 @@ static void advance(fixture_t *f, const char *input) {
   ++f->phase;
   f->length = 0;
   keys(f, input);
+}
+
+static void screen_text(const fixture_t *f, int row, int start, char *text,
+                        size_t capacity) {
+  VTermRect rect = {row, row + 1, start, 20};
+  size_t used = vterm_screen_get_text(vterm_obtain_screen(f->terminal), text,
+                                      capacity - 1, rect);
+  text[used] = 0;
+}
+
+static int screen_has(const fixture_t *f, const char *needle, int highlight) {
+  VTermScreen *screen = vterm_obtain_screen(f->terminal);
+  int rows, columns, row, col;
+  char text[128];
+  vterm_get_size(f->terminal, &rows, &columns);
+  for (row = 0; row < rows; ++row) {
+    if (!highlight) {
+      screen_text(f, row, 0, text, sizeof(text));
+      if (strstr(text, needle))
+        return 1;
+    } else {
+      for (col = 0; col < columns; ++col) {
+        VTermPos pos = {row, col};
+        VTermScreenCell cell;
+        CHECK(vterm_screen_get_cell(screen, pos, &cell));
+        if (VTERM_COLOR_IS_INDEXED(&cell.bg) &&
+            cell.bg.indexed.idx == highlight) {
+          screen_text(f, row, col, text, sizeof(text));
+          if (!strncmp(text, needle, strlen(needle)))
+            return 1;
+        }
+      }
+    }
+  }
+  return 0;
+}
+
+static void top_row(const fixture_t *f, int row) {
+  char expected[16], text[128];
+  snprintf(expected, sizeof(expected), "row%02d", row);
+  screen_text(f, 1, 0, text, sizeof(text));
+  CHECK(!strncmp(text, expected, strlen(expected)));
+}
+
+static void numbered_rows(sl_t *sl, sl_transcript_id_t id) {
+  int i;
+  for (i = 0; i <= 24; ++i) {
+    char row[64];
+    const char *tail = i == 2    ? " \033[31mNeEd\033[0mLe"
+                       : i == 8  ? " needle NEEDLE"
+                       : i == 23 ? "                        Café 中"
+                                 : "";
+    snprintf(row, sizeof(row), "%srow%02d%s", i ? "\r\n" : "", i, tail);
+    CHECK(sl_transcript_write(sl, id, SL_TRANSCRIPT_VT, row, strlen(row)) ==
+          SL_OK);
+  }
+}
+
+static void drive_navigation(sl_t *sl, void *context) {
+  static const struct {
+    const char *key;
+    int top;
+  } steps[] = {{"g", 0},      {"k", 0},      {"j", 1},       {"J", 6},
+               {"K", 1},      {"d", 4},      {"u", 1},       {" ", 6},
+               {"f", 11},     {"b", 6},      {"\033[5~", 1}, {"\033[6~", 6},
+               {"\033[A", 5}, {"\033[B", 6}, {"\033[H", 0},  {"\033[F", 19},
+               {"J", 19},     {"g", 0}};
+  fixture_t *f = context;
+  int count = (int)(sizeof(steps) / sizeof(*steps));
+  int phase = f->phase - count;
+  capture(f);
+  if (!f->phase) {
+    numbered_rows(sl, f->log);
+    advance(f, "draft\024");
+    return;
+  }
+  if (f->phase <= count) {
+    top_row(f, f->phase == 1 ? 19 : steps[f->phase - 2].top);
+    if (f->phase > 1)
+      CHECK(!strstr(f->output, "\033[2J"));
+    if (f->phase > 2 && steps[f->phase - 2].top == steps[f->phase - 3].top)
+      CHECK(!f->length);
+    advance(f, steps[f->phase - 1].key);
+    return;
+  }
+  if (phase == 28) {
+    CHECK(!sl_transcript_visible(sl) && strstr(f->output, "chat-restored"));
+    advance(f, "\024");
+    return;
+  }
+  if (phase == 30) {
+    CHECK(!sl_transcript_visible(sl));
+    advance(f, "\024");
+    return;
+  }
+  if (phase == 32) {
+    CHECK(!sl_transcript_visible(sl));
+    advance(f, "qj/Gc\r");
+    return;
+  }
+  CHECK(sl_transcript_visible(sl));
+  switch (phase) {
+  case 1: {
+    struct winsize size = {9, 20, 0, 0};
+    top_row(f, 0);
+    CHECK(!ioctl(f->master, TIOCSWINSZ, &size));
+    vterm_set_size(f->terminal, 9, 20);
+    advance(f, "");
+    break;
+  }
+  case 2:
+    advance(f, "d");
+    break;
+  case 3:
+    top_row(f, 4);
+    advance(f, "u");
+    break;
+  case 4:
+    top_row(f, 0);
+    advance(f, "/needle\r");
+    break;
+  case 5:
+    CHECK(screen_has(f, "NeEdLe", 11));
+    advance(f, "Nn");
+    break;
+  case 6:
+    top_row(f, 1);
+    CHECK(!screen_has(f, "No further match", 0) &&
+          screen_has(f, "needle", 11) && screen_has(f, "NEEDLE", 3));
+    advance(f, "n");
+    break;
+  case 7:
+    CHECK(screen_has(f, "needle", 3) && screen_has(f, "NEEDLE", 11));
+    advance(f, "/qjdG");
+    break;
+  case 8:
+    CHECK(screen_has(f, "/qjdG", 0) && screen_has(f, "NEEDLE", 11));
+    advance(f, "\033");
+    break;
+  case 9:
+    top_row(f, 1);
+    CHECK(!screen_has(f, "/qjdG", 0) && screen_has(f, "NEEDLE", 11));
+    advance(f, "N");
+    break;
+  case 10:
+    CHECK(screen_has(f, "needle", 11));
+    advance(f, "/CAFé 中\r");
+    break;
+  case 11:
+    CHECK(screen_has(f, "Café 中", 11));
+    advance(f, "n");
+    break;
+  case 12:
+    CHECK(screen_has(f, "No further match", 0) && screen_has(f, "Café 中", 11));
+    CHECK(VT(sl, f->log, "\033[5;43H!") == SL_OK);
+    advance(f, "");
+    break;
+  case 13:
+    CHECK(!screen_has(f, "", 11) && screen_has(f, "Café 中", 3));
+    CHECK(sl_transcript_reset(sl, f->log) == SL_OK);
+    numbered_rows(sl, f->log);
+    advance(f, "/");
+    break;
+  case 14:
+    top_row(f, 17);
+    CHECK(!screen_has(f, "", 3) && !screen_has(f, "", 11));
+    CHECK(TEXT(sl, f->log, "\nrow25 newneedle\nrow26") == SL_OK);
+    advance(f, "");
+    break;
+  case 15:
+    top_row(f, 17);
+    CHECK(!f->length && !screen_has(f, "newneedle", 0));
+    advance(f, "newneedle\r");
+    break;
+  case 16: {
+    int i;
+    CHECK(screen_has(f, "newneedle", 11));
+    for (i = 0; i < 2100; ++i)
+      CHECK(TEXT(sl, f->log, "\nx") == SL_OK);
+    CHECK(TEXT(sl, f->log, "\nrow27 newneedle") == SL_OK);
+    advance(f, "");
+    break;
+  }
+  case 17:
+    CHECK(!screen_has(f, "row25", 0) && !screen_has(f, "", 11));
+    advance(f, "n");
+    break;
+  case 18:
+    CHECK(screen_has(f, "row27 ", 0) && screen_has(f, "newneedle", 11));
+    advance(f, "G");
+    break;
+  case 19:
+    CHECK(screen_has(f, "row27 ", 0) && screen_has(f, "newneedle", 3) &&
+          !screen_has(f, "", 11));
+    CHECK(CHAT(sl, "chat-restored\n") == SL_OK);
+    CHECK(TEXT(sl, f->log, "\nrow28 tail-follow") == SL_OK);
+    advance(f, "");
+    break;
+  case 20:
+    CHECK(screen_has(f, "row28 tail-follow", 0));
+    advance(f, "c");
+    break;
+  case 21:
+    CHECK(screen_has(f, "row28 tail-follow", 0) &&
+          screen_has(f, "row27 newneedle", 0) && !screen_has(f, "", 3) &&
+          !screen_has(f, "", 11));
+    CHECK(TEXT(sl, f->log, "\nrow29 newneedle") == SL_OK);
+    advance(f, "n");
+    break;
+  case 22:
+    CHECK(screen_has(f, "row29 newneedle", 0) && !screen_has(f, "", 3) &&
+          !screen_has(f, "", 11) && !screen_has(f, "No further match", 0));
+    CHECK(VT(sl, f->log, "\033[6;1Hshort\033[K") == SL_OK);
+    advance(f, "");
+    break;
+  case 23:
+    CHECK(!strcmp(f->output, "\033[9;1H\033[0mshort\033[0m\033[K"));
+    CHECK(screen_has(f, "row28 tail-follow", 0) &&
+          !screen_has(f, "row29 newneedle", 0));
+    CHECK(VT(sl, f->log, "\033[6;1H12345678901234567890") == SL_OK);
+    advance(f, "");
+    break;
+  case 24:
+    CHECK(!strstr(f->output, "\033[K") &&
+          screen_has(f, "12345678901234567890", 0));
+    advance(f, "/absent-target\r");
+    break;
+  case 25: {
+    struct winsize size = {9, 80, 0, 0};
+    CHECK(screen_has(f, "12345678901234567890", 0) &&
+          screen_has(f, "No further match", 0));
+    CHECK(!ioctl(f->master, TIOCSWINSZ, &size));
+    vterm_set_size(f->terminal, 9, 80);
+    advance(f, "");
+    break;
+  }
+  case 26:
+    CHECK(strstr(f->output, "c clear  nN match"));
+    advance(f, "c");
+    break;
+  case 27:
+    CHECK(strstr(f->output, "/ search  q quit") &&
+          !strstr(f->output, "c clear") && !strstr(f->output, "nN match"));
+    advance(f, "q");
+    break;
+  case 29:
+    advance(f, "\033");
+    break;
+  case 31:
+    advance(f, "\003");
+    break;
+  default:
+    CHECK(0);
+  }
 }
 
 static double milliseconds(void) {
@@ -168,7 +426,9 @@ static void drive(sl_t *sl, void *context) {
   case 1: {
     int calls = 0;
     CHECK(sl_transcript_visible(sl));
-    CHECK(strstr(f->output, "\033[?1049h") && strstr(f->output, "1/2 Log"));
+    CHECK(strstr(f->output, "\033[?1049h") &&
+          strstr(f->output, "1/2  jkJKudgG scroll  / search  q quit") &&
+          !strstr(f->output, "c clear"));
     CHECK(strstr(f->output, "plain   text") && !strstr(f->output, "\033[31m"));
     CHECK(!strstr(f->output, "queued-marker") && ++f->viewer_idle_ticks <= 24);
     if (milliseconds() - f->queue_started < 850)
@@ -203,7 +463,8 @@ static void drive(sl_t *sl, void *context) {
     advance(f, "ignored\024");
     break;
   case 4:
-    CHECK(strstr(f->output, "2/2 Worker") && strstr(f->output, "ALT frame"));
+    CHECK(strstr(f->output, "2/2  jkJKudgG scroll") &&
+          strstr(f->output, "ALT frame"));
     CHECK(!strstr(f->output, "normal frame") &&
           !strstr(f->output, "\033[?1049h"));
     CHECK(!strstr(f->output, "external title"));
@@ -387,6 +648,26 @@ int main(void) {
     sl_destroy(sl);
     CHECK(!tcgetattr(slave, &after) && test_termios_equal(&before, &after));
   }
+  size.ws_row = 7;
+  size.ws_col = 20;
+  CHECK(!ioctl(f.master, TIOCSWINSZ, &size));
+  f.length = 0;
+  f.phase = 0;
+  f.terminal = vterm_new(7, 20);
+  CHECK(f.terminal);
+  vterm_set_utf8(f.terminal, 1);
+  vterm_screen_enable_altscreen(vterm_obtain_screen(f.terminal), 1);
+  vterm_screen_reset(vterm_obtain_screen(f.terminal), 1);
+  sl = sl_create_with_config(&config);
+  CHECK(sl && sl_transcript_add(sl, "Navigation", 6, 44, &f.log) == SL_OK);
+  CHECK(sl_set_idle_callback(sl, drive_navigation, &f) == SL_OK);
+  CHECK(sl_output_stream_begin(sl) == SL_OK);
+  line = sl_readline(sl, "test> ");
+  CHECK(line && !strcmp(line, "draftqj/Gc") && f.phase == 51);
+  sl_free_string(sl, line);
+  CHECK(sl_output_stream_end(sl) == SL_OK);
+  sl_destroy(sl);
+  vterm_free(f.terminal);
   close(f.stop[1]);
   CHECK(!pthread_join(f.reader, NULL));
   CHECK(!pthread_mutex_destroy(&f.capture_lock));

@@ -67,6 +67,8 @@ struct chat_state {
   char web_bytes[64];
   size_t web_length;
   sl_transcript_id_t transcripts[2];
+  unsigned long transcript_step;
+  double next_transcript_step;
 };
 
 static void destroy_remote(struct chat_state *state) {
@@ -187,21 +189,21 @@ static int sink_to_softline(void *userdata, const char *bytes, size_t length) {
   return sl_output_stream_write(state->sl, bytes, length) == SL_OK ? 0 : -1;
 }
 
-static int refresh_transcripts(struct chat_state *state) {
-  int i;
-  for (i = 0; i < 2; ++i) {
-    char frame[160];
-    if (!state->transcripts[i])
-      continue;
-    demo_transcript_frame(i, (unsigned long)state->response_documents, frame,
-                          sizeof(frame));
-    if (sl_transcript_reset(state->sl, state->transcripts[i]) != SL_OK ||
-        sl_transcript_write(state->sl, state->transcripts[i],
-                            i ? SL_TRANSCRIPT_VT : SL_TRANSCRIPT_TEXT, frame,
-                            strlen(frame)) != SL_OK)
-      return -1;
-  }
-  return 0;
+static int write_transcripts(struct chat_state *state, const char *log,
+                             int initial) {
+  char worker[DEMO_TRANSCRIPT_LINE];
+  if (!state->transcripts[0])
+    return 0;
+  demo_transcript_worker(state->transcript_step,
+                         (unsigned long)state->response_documents, initial,
+                         worker, sizeof(worker));
+  return sl_transcript_write(state->sl, state->transcripts[0],
+                             SL_TRANSCRIPT_TEXT, log, strlen(log)) == SL_OK &&
+                 sl_transcript_write(state->sl, state->transcripts[1],
+                                     SL_TRANSCRIPT_VT, worker,
+                                     strlen(worker)) == SL_OK
+             ? 0
+             : -1;
 }
 
 static int shell_editor_key(sl_t *sl, sl_key_t key, void *userdata,
@@ -344,6 +346,7 @@ static int show_goodbye(struct chat_state *state) {
 }
 
 static int finish_response_document(struct chat_state *state) {
+  char line[64];
   web_flush(state);
   demo_web_response_end(state->web);
   if (!state->response_open)
@@ -353,7 +356,9 @@ static int finish_response_document(struct chat_state *state) {
     return -1;
   state->response_open = 0;
   state->response_documents++;
-  return refresh_transcripts(state);
+  (void)snprintf(line, sizeof(line), "Responses received: %lu\n",
+                 (unsigned long)state->response_documents);
+  return write_transcripts(state, line, 0);
 }
 
 static int command_message(struct chat_state *state, const char *message) {
@@ -735,13 +740,6 @@ static int dispatch_next_turn(struct chat_state *state) {
   return 0;
 }
 
-static double monotonic_seconds(void) {
-  struct timespec value;
-  if (clock_gettime(CLOCK_MONOTONIC, &value) != 0)
-    return -1;
-  return (double)value.tv_sec + (double)value.tv_nsec / 1000000000.0;
-}
-
 static void schedule_injection(struct chat_state *state, double now) {
   unsigned int interval = state->approval_interval_ms;
   if (!interval)
@@ -751,17 +749,27 @@ static void schedule_injection(struct chat_state *state, double now) {
 
 /* The demo uses the editor's owner-thread idle hook. No timer worker or
  * competing input loop is needed; typing and stream watches keep priority. */
-static void approval_demo_idle(sl_t *sl, void *userdata) {
+static void chat_idle(sl_t *sl, void *userdata) {
   static const char *const demo_prompts[] = {
       "Summarize the next steps.", "Show the current progress as a chart.",
       "Which details should we verify before continuing?"};
   struct chat_state *state = userdata;
   sl_prompt_queue_delivery_t delivery;
   sl_prompt_queue_entry_info_t draft;
-  double now = monotonic_seconds();
+  double now = demo_monotonic_seconds();
   int result = SL_OK;
   if (demo_web_tick(state->web))
     state->demo_failed = 1;
+  if (state->transcripts[0] &&
+      demo_transcript_due(now, &state->next_transcript_step)) {
+    char line[DEMO_TRANSCRIPT_LINE];
+    (void)demo_transcript_line(++state->transcript_step, line, sizeof(line));
+    if (write_transcripts(state, line, 0)) {
+      state->demo_failed = 1;
+      (void)sl_cancel(sl);
+      return;
+    }
+  }
   if (state->prompt_demo && !state->busy && !sl_buffer(sl)[0] &&
       now >= state->next_demo_attempt) {
     sl_prompt_simulation_options_t options = {0};
@@ -845,7 +853,7 @@ static int setup_approval_demo(struct chat_state *state) {
     }
     state->approval_interval_ms = (unsigned int)value;
   }
-  now = monotonic_seconds();
+  now = demo_monotonic_seconds();
   if (now < 0)
     return -1;
   if (seed_text && seed_text[0]) {
@@ -866,9 +874,7 @@ static int setup_approval_demo(struct chat_state *state) {
   if (state->remote)
     return 0;
   return sl_set_prompt_queue_delivery(state->sl,
-                                      SL_PROMPT_QUEUE_DELIVERY_AUTO) == SL_OK &&
-                 sl_set_idle_callback(state->sl, approval_demo_idle, state) ==
-                     SL_OK
+                                      SL_PROMPT_QUEUE_DELIVERY_AUTO) == SL_OK
              ? 0
              : -1;
 }
@@ -918,8 +924,7 @@ static int exit_editor_key(sl_t *sl, sl_key_t key, void *userdata,
       state->prompt_demo = !state->prompt_demo;
       state->next_demo_attempt = 0;
       if (sl->cancel_prompt_simulation(sl) != SL_OK ||
-          sl->set_buffer(sl, "") != SL_OK ||
-          sl->set_idle_callback(sl, approval_demo_idle, state) != SL_OK)
+          sl->set_buffer(sl, "") != SL_OK)
         return SL_ERROR_IO;
       return set_chat_message(sl, state->prompt_demo ? "Prompt demo on."
                                                      : "Prompt demo off.");
@@ -1037,7 +1042,7 @@ static int remote_event(void *context, int kind, const char *text) {
                   state->remote_state == DEMO_SYNCHRONIZING;
     state->remote_state = kind;
     if (kind == DEMO_CONNECTING)
-      state->connecting_since = monotonic_seconds();
+      state->connecting_since = demo_monotonic_seconds();
     else if (kind == DEMO_DISCONNECTED)
       state->shell_requested = 0;
     /* Transport retries are observable to the host, but availability has
@@ -1133,7 +1138,7 @@ static int reconnect_tick(sl_t *sl, const sl_watch_event_t *event,
   if (state->remote_state == DEMO_DISCONNECTED ||
       ((state->remote_state == DEMO_CONNECTING ||
         state->remote_state == DEMO_SYNCHRONIZING) &&
-       monotonic_seconds() - state->connecting_since >= 3))
+       demo_monotonic_seconds() - state->connecting_since >= 3))
     return demo_client_reconnect(state->remote);
   return SL_OK;
 }
@@ -1317,7 +1322,7 @@ static int run_web_only(struct chat_state *state) {
   while (!web_quit && !state->exit_requested && !state->demo_failed) {
     struct pollfd fds[DEMO_WWW_FDS + 1];
     int count, timeout, result;
-    approval_demo_idle(state->sl, state);
+    chat_idle(state->sl, state);
     if (state->demo_failed)
       break;
     count =
@@ -1512,6 +1517,7 @@ int main(int argc, char **argv) {
   if (interactive)
     (void)signal(SIGINT, keep_chat_on_interrupt);
   if (interactive && !state.web_only) {
+    char history[DEMO_TRANSCRIPT_HISTORY];
     int i;
     for (i = 0; i < 2; ++i)
       if (sl_transcript_add(state.sl, demo_transcript_titles[i],
@@ -1521,7 +1527,11 @@ int main(int argc, char **argv) {
         exit_code = 1;
         goto cleanup;
       }
-    if (refresh_transcripts(&state)) {
+    state.transcript_step = DEMO_TRANSCRIPT_SEED;
+    state.next_transcript_step =
+        demo_monotonic_seconds() + DEMO_TRANSCRIPT_INTERVAL;
+    demo_transcript_history(state.transcript_step, 0, history);
+    if (write_transcripts(&state, history, 1)) {
       report_failure(&state, "transcript content");
       exit_code = 1;
       goto cleanup;
@@ -1564,8 +1574,7 @@ int main(int argc, char **argv) {
       exit_code = 1;
       goto cleanup;
     }
-    if (state.web &&
-        sl_set_idle_callback(state.sl, approval_demo_idle, &state) != SL_OK) {
+    if (sl_set_idle_callback(state.sl, chat_idle, &state) != SL_OK) {
       exit_code = 1;
       goto cleanup;
     }
@@ -1577,7 +1586,6 @@ int main(int argc, char **argv) {
                           state.approval_seed);
       if (demo_client_attach(state.remote, state.sl) != SL_OK ||
           setup_reconnect(&state) != 0 ||
-          sl_set_idle_callback(state.sl, approval_demo_idle, &state) != SL_OK ||
           sl_bind_key(state.sl, SL_KEY_ALT_BASE + 'r', reconnect_editor,
                       &state) != SL_OK ||
           sl_bind_key(state.sl, SL_KEY_CTRL_ENTER, exit_editor_key, &state) !=

@@ -261,6 +261,43 @@ if (motionEnabled) await uiCheck('transcript split moves the conversation as it 
     }
   } finally { event({type:'transcript_remove',id:'split'}); frame.style.width = previousWidth; }
 });
+await uiCheck('transcript shows formatted scrollback above the source grid with native paging and panning', async () => {
+  const doc = frame.contentDocument, w = frame.contentWindow;
+  const screen = doc.querySelector('#transcript-screen'), panel = doc.querySelector('#transcripts');
+  const id = 'scrollback-fixture';
+  try {
+    event({type:'transcript_open',id,title:'Short PTY',rows:'4',columns:'140'});
+    doc.querySelector('#transcript-toggle').click();
+    const styled = '\x1b[1;4;38;2;230;140;50;48;5;25mCafé 中\x1b[0m';
+    const data = Array.from({length:80}, (_, i) => styled + ' row ' + i).join('\r\n');
+    event({type:'transcript_data',id,encoding:'base64',data:btoa(String.fromCharCode(...new TextEncoder().encode(data)))});
+    const history = screen.querySelector('.transcript-history-rows');
+    const live = screen.querySelector('.xterm-screen .xterm-rows');
+    assert(history && live, 'source renderer was unavailable');
+    await waitFor(() => history.querySelector('.xterm-bold') && live.textContent.includes('row 79'));
+    const newest = screen.scrollTop;
+    assert(live.childElementCount === 4 && screen.clientHeight > live.getBoundingClientRect().height,
+      'the source grid was resized or there was no room for scrollback');
+    assert(newest > 0 && Math.abs(newest - (screen.scrollHeight - screen.clientHeight)) <= 1,
+      'the native scrollbar did not follow new output');
+    const previousCell = history.querySelector('.xterm-bold'), liveCell = live.querySelector('.xterm-bold');
+    const historyStyle = w.getComputedStyle(previousCell), liveStyle = w.getComputedStyle(liveCell);
+    assert(previousCell.textContent === liveCell.textContent &&
+      previousCell.className === liveCell.className &&
+      ['fontFamily', 'fontWeight', 'color', 'backgroundColor', 'textDecorationLine', 'width']
+        .every(property => historyStyle[property] === liveStyle[property]), 'history style or glyph width differed from xterm');
+    screen.focus({preventScroll:true});
+    const page = key => screen.dispatchEvent(new w.KeyboardEvent('keydown', {key,bubbles:true,cancelable:true}));
+    assert(!page('PageUp') && screen.scrollTop < newest, 'Page Up failed');
+    await waitFor(() => history.textContent !== '' && !history.textContent.includes('row 75'));
+    assert(!page('PageDown') && Math.abs(screen.scrollTop - newest) <= 1, 'Page Down failed');
+    screen.scrollLeft = 60;
+    assert(screen.scrollLeft > 0 && screen.scrollWidth > screen.clientWidth, 'wide PTY could not pan horizontally');
+  } finally {
+    event({type:'transcript_remove',id});
+    await waitFor(() => panel.hidden);
+  }
+});
 await uiCheck('terminal docks below the composer and fits short and tall viewports',async()=>{
   const doc=frame.contentDocument,w=frame.contentWindow,p=doc.querySelector('#prompt');
   let metrics;

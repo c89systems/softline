@@ -11,6 +11,83 @@ function size(event) {
     Number.isInteger(cols) && cols >= 1 && cols <= 320 ? { rows, cols } : null;
 }
 
+// xterm 6.0 ties its render viewport to the VT grid. Use its DOM row factory
+// for the visible part of scrollback so colors, attributes and cell widths
+// match the live grid without changing the geometry seen by the producer.
+function attachScrollback(terminal, screen) {
+  const renderer = terminal._core?._renderService?._renderer?.value;
+  if (!renderer?._rowFactory) return null;
+  const document = terminal.element.ownerDocument;
+  const history = document.createElement('div');
+  const rows = document.createElement('div');
+  history.className = 'transcript-history';
+  rows.className = 'xterm-rows transcript-history-rows';
+  history.append(rows);
+  terminal.element.prepend(history);
+  terminal.element.classList.add('transcript-scrollback');
+  history.addEventListener('mousedown', event => event.stopPropagation());
+  terminal.onScroll(() => {
+    const buffer = terminal.buffer.active;
+    if (buffer.viewportY !== buffer.baseY) terminal.scrollToBottom();
+  });
+
+  const positions = { normal: { follow: true }, alternate: { follow: false } };
+  let position;
+  let paintedTop;
+  function paint(height, base, top) {
+    // Keep one extra row for the stage padding and fractional scroll offsets.
+    const first = Math.min(base, Math.max(0, Math.floor(top / height) - 1));
+    const end = Math.min(base, Math.ceil((top + screen.clientHeight) / height));
+    const { lines } = renderer._bufferService.buffer;
+    const nodes = [];
+    for (let index = first; index < end; index++) {
+      const row = document.createElement('div');
+      row.style.height = row.style.lineHeight = `${height}px`;
+      row.style.width = `${renderer.dimensions.css.canvas.width}px`;
+      row.append(...renderer._rowFactory.createRow(lines.get(index), index,
+        false, '', '', 0, false, renderer.dimensions.css.cell.width,
+        renderer._widthCache, -1, -1));
+      nodes.push(row);
+    }
+    rows.style.top = `${first * height}px`;
+    rows.style.lineHeight = renderer._rowContainer.style.lineHeight;
+    rows.style.letterSpacing = renderer._rowContainer.style.letterSpacing;
+    rows.replaceChildren(...nodes);
+    paintedTop = top;
+  }
+
+  return {
+    update() {
+      const height = renderer.dimensions.css.cell.height;
+      if (!height) return;
+      const buffer = terminal.buffer.active;
+      position = positions[buffer.type];
+      history.style.height = `${buffer.baseY * height}px`;
+      const maximum = Math.max(0, screen.scrollHeight - screen.clientHeight);
+      const anchor = position.marker;
+      const top = position.follow ? maximum : anchor
+        ? Math.max(0, anchor.line) * height + position.offset : (position.top ?? 0);
+      if (screen.scrollTop !== top) screen.scrollTop = top;
+      paint(height, buffer.baseY, screen.scrollTop);
+    },
+    scroll() {
+      const top = screen.scrollTop;
+      const height = renderer.dimensions.css.cell.height;
+      if (!position || !height || top === paintedTop) return;
+      const buffer = terminal.buffer.active;
+      if (position !== positions[buffer.type]) return;
+      position.top = top;
+      position.follow = screen.scrollHeight - screen.clientHeight - top <= 1;
+      position.marker?.dispose();
+      const line = Math.floor(top / height);
+      position.marker = !position.follow && buffer.type === 'normal'
+        ? terminal.registerMarker(line - buffer.baseY - buffer.cursorY) : null;
+      position.offset = top - line * height;
+      paint(height, buffer.baseY, top);
+    }
+  };
+}
+
 export class Transcripts {
   constructor(document, window) {
     this.document = document;
@@ -26,12 +103,28 @@ export class Transcripts {
       this.sizes[axis] = value;
       this.resize();
     });
-    const observer = new window.ResizeObserver(() => this.resize());
+    const observer = new window.ResizeObserver(() => {
+      this.resize();
+      this.views.get(this.active)?.scrollback?.update();
+    });
     observer.observe(this.workspace);
     observer.observe(this.composer);
     this.stacked.addEventListener('change', () => this.resize());
     this.tabs = document.getElementById('transcript-tabs');
     this.screen = document.getElementById('transcript-screen');
+    this.screen.addEventListener('wheel', event => {
+      // Leave scrolling to the pane even when the producer changes mouse mode.
+      if (this.views.get(this.active)?.scrollback) event.stopPropagation();
+    }, { capture: true, passive: true });
+    this.screen.addEventListener('scroll', () => {
+      const view = this.views.get(this.active);
+      if (view) {
+        view.left = this.screen.scrollLeft;
+        view.scrollback?.scroll();
+      }
+    }, { passive: true });
+    observer.observe(this.screen);
+    this.panel.addEventListener('keydown', event => this.pageKey(event), { capture: true });
     this.views = new Map();
     this.active = '';
     this.serial = 0;
@@ -110,8 +203,26 @@ export class Transcripts {
       next.tab.focus({ preventScroll: true });
     }
     if (next !== previous) next.tab.scrollIntoView({ block: 'nearest', inline: 'nearest' });
-    if (next.terminal && !next.terminal.element) next.terminal.open(next.stage);
-    else if (next.terminal) next.terminal.refresh(0, next.terminal.rows - 1);
+    if (next.terminal && !next.terminal.element) {
+      const terminal = next.terminal;
+      terminal.open(next.stage);
+      next.scrollback = attachScrollback(terminal, this.screen);
+      if (next.scrollback) {
+        let frame = 0;
+        const repaint = () => {
+          if (frame || this.active !== id) return;
+          frame = this.window.requestAnimationFrame(() => {
+            frame = 0;
+            if (this.active === id && next.terminal === terminal) next.scrollback.update();
+          });
+        };
+        terminal.onRender(repaint);
+        // The live grid can be outside the viewport while scrollback is visible.
+        terminal.onWriteParsed(repaint);
+      }
+    } else if (next.terminal) next.terminal.refresh(0, next.terminal.rows - 1);
+    next.scrollback?.update();
+    if (next !== previous) this.screen.scrollLeft = next.left || 0;
   }
 
   cycle() {
@@ -134,8 +245,27 @@ export class Transcripts {
     this.show(keys[index], true);
   }
 
+  pageKey(event) {
+    if (event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey ||
+        event.shiftKey || event.isComposing ||
+        !['PageUp', 'PageDown'].includes(event.key) ||
+        !(this.screen.contains(event.target) || this.tabs.contains(event.target))) return;
+    const view = this.views.get(this.active);
+    if (!view?.terminal?.element) return;
+    const direction = event.key === 'PageUp' ? -1 : 1;
+    const height = this.screen.clientHeight;
+    if (view.scrollback || this.screen.scrollHeight > height) {
+      this.screen.scrollTop += direction * height;
+    } else {
+      view.terminal.scrollPages(direction);
+    }
+    event.preventDefault();
+    event.stopPropagation();
+  }
+
   createTerminal(view) {
     view.pending = 0;
+    view.scrollback = null;
     view.stage.replaceChildren();
     view.terminal = new Terminal({
       rows: view.rows, cols: view.cols, disableStdin: true, scrollback: 2000,
@@ -168,6 +298,7 @@ export class Transcripts {
     if (view.pending + weight > maxPending) {
       terminal.dispose();
       view.terminal = null;
+      view.scrollback = null;
       view.stage.textContent = 'Transcript fell behind. Waiting for the host to reset it.';
       return;
     }

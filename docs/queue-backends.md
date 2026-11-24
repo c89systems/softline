@@ -195,10 +195,12 @@ its acknowledged absolute path. Completed images remain in `build/`; set
 See [image handover](image-paste.md#remote-chat-example) for limits and cleanup.
 
 The TCP examples opt in to [c89.systems' libcbor](https://github.com/c89systems/libcbor).
-Install the C89Cbor 0.2 SDK and its lonejson and cpkt SDK prerequisites for the
-build target. Pass their prefixes as a semicolon-separated
-`SL_CBOR_SDK_PREFIXES` to `make build-cbor-debug` or the TCP run targets.
-Direct CMake builds use `-DSL_ENABLE_CBOR_TCP=ON` and the same SDK prefixes.
+The TCP run targets and `make build-cbor-debug` resolve pinned C89Cbor, lonejson
+and cpkt SDKs for supported targets from the verified dependency cache.
+Missing archives are downloaded and checked against the pinned SHA-256 digests.
+To use your own SDKs, pass their prefixes as a semicolon-separated
+`SL_CBOR_SDK_PREFIXES`. Direct CMake builds opt in with
+`-DSL_ENABLE_CBOR_TCP=ON` and accept the same override.
 The Make targets use `build/cbor-debug`; run its tests with
 `ctest --test-dir build/cbor-debug --output-on-failure`. The default Softline
 build and local/web examples build independently of libcbor.

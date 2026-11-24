@@ -1920,8 +1920,8 @@ static int sl_codepoint_accepts_emoji_modifier(unsigned long cp) {
          cp == 0x261dUL || cp == 0x26f9UL || (cp >= 0x270aUL && cp <= 0x270dUL);
 }
 
-static size_t sl_utf8_cluster_len_width(const char *buf, size_t len, size_t pos,
-                                        int *width) {
+size_t sl_utf8_cluster_len_width(const char *buf, size_t len, size_t pos,
+                                 int *width) {
   size_t n;
   size_t step;
   unsigned long cp;
@@ -1995,7 +1995,7 @@ static size_t sl_utf8_next_cluster_len(const char *buf, size_t len,
   return sl_utf8_cluster_len_width(buf, len, pos, NULL);
 }
 
-static size_t sl_utf8_prev_cluster_len(const char *buf, size_t pos) {
+size_t sl_utf8_prev_cluster_len(const char *buf, size_t pos) {
   size_t scan;
   size_t last;
   size_t n;
@@ -7858,12 +7858,15 @@ static char *sl_readline_impl(sl_t *self, const char *prompt,
       if (impl->bracketed_paste) {
         if (key == SL_KEY_PASTE_END)
           impl->bracketed_paste = 0;
-        view_key = 1;
+        view_key =
+            sl_transcript_key(self, SL_KEY_UNKNOWN, paste_bytes, paste_len);
       } else if (key == SL_KEY_PASTE_BEGIN) {
         impl->bracketed_paste = 1;
         view_key = 1;
       } else {
-        view_key = sl_transcript_key(self, key);
+        if (key >= 128 && key < 256 && !replayed)
+          (void)sl_read_utf8_input(self, (char)key, paste_bytes, &paste_len);
+        view_key = sl_transcript_key(self, key, paste_bytes, paste_len);
       }
       if (view_key < 0 ||
           (view_key && sl_render_apply(self, render_prompt) != 0)) {

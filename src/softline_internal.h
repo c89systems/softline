@@ -266,7 +266,7 @@ void sl_terminal_reap(sl_impl_t *impl);
 void sl_terminal_cleanup(sl_impl_t *impl);
 void sl_terminal_abandon(sl_t *self);
 void sl_transcript_destroy(sl_t *self);
-int sl_transcript_key(sl_t *self, int key);
+int sl_transcript_key(sl_t *self, int key, const char *bytes, size_t length);
 int sl_transcript_paint(sl_t *self, int rows, int columns);
 int sl_transcript_leave(sl_t *self);
 int sl_output_replay_transcript(sl_t *self);
@@ -315,6 +315,8 @@ int sl_backend_recover_newest(sl_t *self);
 int64_t sl_queue_display_now(void);
 int sl_prompt_simulation_options_valid(const sl_prompt_simulation_options_t *);
 int sl_quoted_prompt_text_valid(const char *);
+size_t sl_utf8_cluster_len_width(const char *, size_t, size_t, int *);
+size_t sl_utf8_prev_cluster_len(const char *, size_t);
 int64_t sl_queue_display_start(const sl_impl_t *impl);
 int sl_queue_display_ready(const sl_impl_t *impl, int64_t started, int64_t now,
                            int64_t *deadline);

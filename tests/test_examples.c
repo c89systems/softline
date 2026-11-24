@@ -650,11 +650,23 @@ static void test_chat_transcript_replay(const char *path) {
   term_init(&t, fd, 80, 16);
   ASSERT_TRUE(wait_raw(&t, "\033[?2004h", CHAT_READY_TIMEOUT_MS) == 0,
               "editor missing");
+  ASSERT_TRUE(write(fd, "\024", 1) == 1 &&
+                  wait_raw(&t, "demo step 000032", 1500) == 0,
+              "initial transcript history missing");
+  view = t.raw_len;
+  ASSERT_TRUE(wait_raw_since(&t, view, "demo step 000033", 1500) == 0 &&
+                  wait_raw_since(&t, view, "demo step 000034", 1500) == 0,
+              "idle transcript did not append new rows");
+  ASSERT_TRUE(write(fd, "q", 1) == 1 &&
+                  wait_raw_after(&t, "demo step 000034", "\033[?1049l", 1500) ==
+                      0,
+              "viewer did not return to chat");
+  view = t.raw_len;
   ASSERT_TRUE(write(fd, "first\r", 6) == 6 &&
                   wait_screen(&t, "! Thinking...", 3000) == 0,
               "response did not start");
   ASSERT_TRUE(write(fd, "draft\024", 6) == 6 &&
-                  wait_raw(&t, "1/2 Run log", 3000) == 0,
+                  wait_raw_since(&t, view, "1/2  jkJKudgG scroll", 3000) == 0,
               "transcript did not open");
   view = t.raw_len;
   ASSERT_TRUE(wait_raw_since(&t, view, "Responses received: 1", 6000) == 0 &&

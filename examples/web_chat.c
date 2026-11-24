@@ -52,6 +52,8 @@ struct demo_web_chat {
   web_view_t *views, *simulation_target;
   unsigned long serial;
   unsigned long transcript_turns;
+  unsigned long transcript_step;
+  double next_transcript_step;
   char response[40], session[96];
   char response_timestamp[WEB_TIMESTAMP_SIZE];
   char *status;
@@ -221,40 +223,55 @@ static int service_image(web_view_t *v) {
   }
   return SL_OK;
 }
-static void transcript_frames(demo_web_chat_t *w, demo_www_peer_t *peer,
-                              int announce) {
+static void transcript_data(demo_www_peer_t *peer, int worker,
+                            const char *frame) {
+  sl_www_field_t fields[] = {
+      {"id", NULL, 0}, {"text", NULL, 0}, {"data", NULL, 0}};
+  char encoded[(DEMO_TRANSCRIPT_LINE + 2) / 3 * 4 + 1];
+  fields[0].value = worker ? "worker-screen" : "run-log";
+  fields[1].value = frame;
+  if (worker) {
+    fields[1].name = "encoding";
+    fields[1].value = "base64";
+    fields[2].value = encoded;
+    fields[2].length =
+        demo_www_base64((const unsigned char *)frame, strlen(frame), encoded);
+  }
+  (void)demo_www_reply(peer, "transcript_data", fields, worker ? 3 : 2);
+}
+
+static void transcript_frames(demo_web_chat_t *w, demo_www_peer_t *peer) {
+  char history[DEMO_TRANSCRIPT_HISTORY], worker[DEMO_TRANSCRIPT_LINE];
+  char rows[12], columns[12];
   int i;
+  (void)snprintf(rows, sizeof(rows), "%d", DEMO_TRANSCRIPT_ROWS);
+  (void)snprintf(columns, sizeof(columns), "%d", DEMO_TRANSCRIPT_COLUMNS);
+  demo_transcript_history(w->transcript_step, w->transcript_turns, history);
+  demo_transcript_worker(w->transcript_step, w->transcript_turns, 1, worker,
+                         sizeof(worker));
   for (i = 0; i < 2; ++i) {
-    char frame[160], encoded[216];
-    char rows[12], columns[12];
-    const char *id = i ? "worker-screen" : "run-log";
     sl_www_field_t open[] = {{"id", NULL, 0},
                              {"title", NULL, 0},
                              {"rows", NULL, 0},
                              {"columns", NULL, 0}};
-    sl_www_field_t text[] = {{"id", NULL, 0}, {"text", NULL, 0}};
-    sl_www_field_t vt[] = {
-        {"id", NULL, 0}, {"encoding", "base64", 0}, {"data", NULL, 0}};
-    open[0].value = text[0].value = vt[0].value = id;
-    if (announce) {
-      (void)snprintf(rows, sizeof(rows), "%d", DEMO_TRANSCRIPT_ROWS);
-      (void)snprintf(columns, sizeof(columns), "%d", DEMO_TRANSCRIPT_COLUMNS);
-      open[1].value = demo_transcript_titles[i];
-      open[2].value = rows;
-      open[3].value = columns;
-      (void)demo_www_reply(peer, "transcript_open", open, 4);
-    }
+    open[0].value = i ? "worker-screen" : "run-log";
+    open[1].value = demo_transcript_titles[i];
+    open[2].value = rows;
+    open[3].value = columns;
+    (void)demo_www_reply(peer, "transcript_open", open, 4);
     (void)demo_www_reply(peer, "transcript_reset", open, 1);
-    demo_transcript_frame(i, w->transcript_turns, frame, sizeof(frame));
-    if (i) {
-      vt[2].value = encoded;
-      vt[2].length =
-          demo_www_base64((const unsigned char *)frame, strlen(frame), encoded);
-      (void)demo_www_reply(peer, "transcript_data", vt, 3);
-    } else {
-      text[1].value = frame;
-      (void)demo_www_reply(peer, "transcript_data", text, 2);
-    }
+    transcript_data(peer, i, i ? worker : history);
+  }
+}
+
+static void transcript_append(demo_web_chat_t *w, const char *line) {
+  char worker[DEMO_TRANSCRIPT_LINE];
+  web_view_t *view;
+  demo_transcript_worker(w->transcript_step, w->transcript_turns, 0, worker,
+                         sizeof(worker));
+  for (view = w->views; view; view = view->next) {
+    transcript_data(view->peer, 0, line);
+    transcript_data(view->peer, 1, worker);
   }
 }
 
@@ -309,7 +326,7 @@ static int replay(void *context, void *peer, const char *after) {
   demo_www_peer_data(peer, v);
   f.value = w->session;
   (void)demo_www_reply(peer, "session", &f, 1);
-  transcript_frames(w, peer, 1);
+  transcript_frames(w, peer);
   {
     sl_www_field_t capabilities[3] = {{"edit", NULL, 0},
                                       {"terminal", NULL, 0},
@@ -786,6 +803,8 @@ demo_web_chat_t *demo_web_open(sl_t *editor, const demo_web_ops_t *ops,
   w->editor = editor;
   w->ops = *ops;
   w->context = context;
+  w->transcript_step = DEMO_TRANSCRIPT_SEED;
+  w->next_transcript_step = demo_monotonic_seconds() + DEMO_TRANSCRIPT_INTERVAL;
   if (demo_image_limit(&w->image_limit)) {
     free(w);
     errno = EINVAL;
@@ -846,6 +865,12 @@ int demo_web_tick(demo_web_chat_t *w) {
   for (v = w->views; v; v = v->next)
     if (service_image(v) != SL_OK)
       return -1;
+  if (w->views &&
+      demo_transcript_due(demo_monotonic_seconds(), &w->next_transcript_step)) {
+    char line[DEMO_TRANSCRIPT_LINE];
+    (void)demo_transcript_line(++w->transcript_step, line, sizeof(line));
+    transcript_append(w, line);
+  }
   return demo_www_poll(w->www, 0);
 }
 void demo_web_result(demo_web_chat_t *w, const sl_queue_result_t *result) {
@@ -901,6 +926,15 @@ int demo_web_timeout(demo_web_chat_t *w, int timeout_ms) {
   web_view_t *v;
   if (!w)
     return timeout_ms;
+  if (w->views) {
+    double now = demo_monotonic_seconds();
+    if (now >= 0) {
+      double remaining = w->next_transcript_step - now;
+      int tick = remaining <= 0 ? 0 : (int)(remaining * 1000) + 1;
+      if (timeout_ms < 0 || tick < timeout_ms)
+        timeout_ms = tick;
+    }
+  }
   for (v = w->views; v; v = v->next)
     if (v->image_id) {
       sl_image_paste_wait_t wait;
@@ -1180,13 +1214,13 @@ void demo_web_response(demo_web_chat_t *w, const void *bytes, size_t length) {
 
 void demo_web_response_end(demo_web_chat_t *w) {
   if (w && w->response[0]) {
-    web_view_t *view;
+    char line[64];
     demo_www_end(w->www, w->response);
     if (w->transcript_turns % 3 == 0)
       demo_web_command_sample(w, 1);
     w->response[0] = 0;
-    ++w->transcript_turns;
-    for (view = w->views; view; view = view->next)
-      transcript_frames(w, view->peer, 0);
+    (void)snprintf(line, sizeof(line), "Responses received: %lu\n",
+                   ++w->transcript_turns);
+    transcript_append(w, line);
   }
 }

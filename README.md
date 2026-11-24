@@ -53,7 +53,7 @@ cancellation, interruption, suspension and errors.
 | [Queue backends](docs/queue-backends.md) | An external queue authority, reconnects, and the opt-in libcbor integration |
 | [Image paste](docs/image-paste.md) | Linux Ctrl+V, streaming uploads, and host acknowledgement |
 | [Terminal handoff](docs/terminal-handoff-design.md) | Local and remote shells, PTY sessions, and raw-mode recovery |
-| [Transcripts](docs/transcripts.md) | Read-only native and browser views of background output |
+| [Transcripts](docs/transcripts.md) | Background output with native pager search and browser scrollback |
 | [Web frontend](docs/web-frontend.md) and [browser terminal](docs/web-terminal.md) | HTTP/WebSocket host integration, replay, and xterm.js |
 | [Lua API](lua/README.md) | Lua 5.5 editor methods and callback contracts |
 

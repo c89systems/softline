@@ -182,6 +182,9 @@ by the host's history owner. Bind them to the session epoch: the examples use
 expired cursors. A bare number never authorizes replay across host restarts.
 Replies may omit `seq`.
 
+See [read-only terminal transcripts](transcripts.md#web-handler) for
+`transcript_*` event fields, source geometry, and reconnect behavior.
+
 | Event | Fields and behavior |
 | --- | --- |
 | `session` | `id`: host epoch. `disable_auto_resend=1` disables automatic retries on same-epoch reconnects. The field defaults to `0`. |

@@ -201,7 +201,9 @@ int sl_www_cancel_prompt_simulation(sl_www_t *self, sl_www_write_t write,
  * with that id, and finish with end. Supply label and timestamp as display
  * text for assistant or note messages. Start a new message id when output
  * resumes after an intervening feed entry. See docs/web-frontend.md for the
- * event fields and their defaults.
+ * event fields and their defaults. See docs/transcripts.md for the
+ * transcript_open, transcript_data, transcript_resize, transcript_reset and
+ * transcript_remove events. The host announces each view before sending data.
  * @param write Required writer for a JSON payload without transport framing.
  * @param context Borrowed writer context.
  * @param type Event name. It and field names use 1 to 64 ASCII letters,

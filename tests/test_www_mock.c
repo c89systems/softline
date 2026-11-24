@@ -1118,6 +1118,9 @@ int main(int argc, char **argv) {
       !until(one, data, SL_WWW_FRAME_MAX + 1, "\"type\":\"transcript_open\"") &&
       strstr(data, "\"id\":\"run-log\""));
   CHECK(
+      !until(one, data, SL_WWW_FRAME_MAX + 1, "\"type\":\"transcript_data\"") &&
+      strstr(data, "demo step 000032"));
+  CHECK(
       !until(one, data, SL_WWW_FRAME_MAX + 1, "\"type\":\"transcript_open\"") &&
       strstr(data, "\"id\":\"worker-screen\""));
   CHECK(
@@ -1243,6 +1246,17 @@ int main(int argc, char **argv) {
     CHECK(!edited);
     failed = 0;
     goto cleanup;
+  }
+  {
+    const char *prefix = "\"text\":\"demo step ";
+    unsigned long first, second;
+    CHECK(!until(one, data, SL_WWW_FRAME_MAX + 1, prefix) &&
+          strstr(data, "\"type\":\"transcript_data\"") &&
+          strstr(data, "\"id\":\"run-log\"") &&
+          sscanf(strstr(data, prefix) + strlen(prefix), "%lu", &first) == 1);
+    CHECK(!until(one, data, SL_WWW_FRAME_MAX + 1, prefix) &&
+          sscanf(strstr(data, prefix) + strlen(prefix), "%lu", &second) == 1 &&
+          second == first + 1);
   }
   if (dual)
     CHECK(write_all(terminal_fd, "independent ANSI draft\022", 23) == 0);
