@@ -128,6 +128,13 @@ Softline does not select an alternate screen for handoff; a program in the PTY
 may use the terminal normally. Existing editor terminal acquisition remains
 responsible for reestablishing its prompt position on return.
 
+For a host-run foreground program such as an alternate-screen pager, suspend
+the editor and call `sl_output_stream_end_for_handoff()` after readline
+returns. This clears the former prompt frame and preserves the draft and
+transcript. After the program returns, call `sl_output_stream_begin()` and
+resume the editor. An ordinary application shutdown still uses
+`sl_output_stream_end()` and its configured exit policy.
+
 Only bounded transport/parser chunks and pending partial writes are retained.
 Backpressure stops further reads in the affected direction without preventing
 local escape handling. Do not accumulate a complete session or spool output.

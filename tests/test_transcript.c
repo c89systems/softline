@@ -576,6 +576,111 @@ static void drive_without_stream(sl_t *sl, void *context) {
   }
 }
 
+static int screen_rows_with(const fixture_t *f, const char *needle) {
+  int rows, row, matches = 0;
+  char text[128];
+  vterm_get_size(f->terminal, &rows, NULL);
+  for (row = 0; row < rows; ++row) {
+    screen_text(f, row, 0, text, sizeof(text));
+    if (strstr(text, needle))
+      ++matches;
+  }
+  return matches;
+}
+
+static void drive_handoff_close(sl_t *sl, void *context) {
+  fixture_t *f = context;
+  capture(f);
+  switch (f->phase) {
+  case 0:
+    advance(f, "draft\nsecond\033[D!\033[D");
+    break;
+  case 1:
+  case 2:
+    CHECK(!strcmp(sl_buffer(sl), "draft\nsecon!d") && sl_cursor(sl) == 11);
+    CHECK(screen_rows_with(f, "kept-output") == 1 &&
+          screen_rows_with(f, "queued") == 1 &&
+          screen_rows_with(f, "Ready.") == 1 &&
+          screen_rows_with(f, "FLAG") == 1 &&
+          screen_rows_with(f, "test> draft") == 1 &&
+          screen_rows_with(f, "secon!d") == 1);
+    if (f->phase == 1) {
+      CHECK(sl_output_stream_end_for_handoff(sl) == SL_ERROR_INVALID);
+      CHECK(sl_suspend(sl) == SL_OK);
+      advance(f, "");
+    } else {
+      CHECK(screen_rows_with(f, "Pager closed.") == 1);
+      advance(f, "\037");
+    }
+    break;
+  case 3:
+    CHECK(!strcmp(sl_buffer(sl), "draft\nsecond") && sl_cursor(sl) == 11);
+    CHECK(sl_set_status_message(sl, "Goodbye.") == SL_OK);
+    advance(f, "");
+    break;
+  case 4:
+    CHECK(screen_rows_with(f, "Goodbye.") == 1);
+    CHECK(sl_suspend(sl) == SL_OK);
+    advance(f, "");
+    break;
+  default:
+    CHECK(0);
+  }
+}
+
+static void test_handoff_close(fixture_t *f, sl_config_t *config,
+                               const struct termios *before) {
+  static const char pager[] = "\033[?1049h\033[2J\033[Hpager\033[?1049l";
+  const char *elements[] = {"FLAG"};
+  struct winsize size = {12, 20, 0, 0};
+  struct termios after;
+  sl_t *sl;
+  char *queued = NULL;
+  CHECK(!ioctl(f->master, TIOCSWINSZ, &size));
+  f->terminal = vterm_new(12, 20);
+  CHECK(f->terminal);
+  vterm_set_utf8(f->terminal, 1);
+  vterm_screen_enable_altscreen(vterm_obtain_screen(f->terminal), 1);
+  vterm_screen_reset(vterm_obtain_screen(f->terminal), 1);
+  f->phase = 0;
+  f->length = 0;
+  config->prompt_queue = 1;
+  config->prompt_queue_display_delay_ms = 0;
+  config->statusline = 1;
+  sl = sl_create_with_config(config);
+  CHECK(sl && sl_set_status_elements(sl, elements, 1) == SL_OK);
+  CHECK(sl_set_status_message(sl, "Ready.") == SL_OK &&
+        sl_prompt_queue_append(sl, "queued", 0, NULL) == SL_OK &&
+        sl_set_idle_callback(sl, drive_handoff_close, f) == SL_OK);
+  CHECK(sl_output_stream_begin(sl) == SL_OK &&
+        CHAT(sl, "kept-output\n") == SL_OK);
+  CHECK(!sl_readline(sl, "test> ") &&
+        sl_last_readline_status(sl) == SL_READLINE_SUSPENDED && f->phase == 2);
+  CHECK(sl_output_stream_end_for_handoff(sl) == SL_OK);
+  CHECK(!tcgetattr(config->input_fd, &after) &&
+        test_termios_equal(before, &after));
+  capture(f);
+  CHECK(screen_rows_with(f, "kept-output") == 1 &&
+        !screen_rows_with(f, "Ready.") && !screen_rows_with(f, "FLAG") &&
+        !screen_rows_with(f, "queued") && !screen_rows_with(f, "draft") &&
+        !screen_rows_with(f, "secon!d"));
+  CHECK(sl_prompt_queue_count(sl) == 1 &&
+        sl_prompt_queue_peek(sl, 0, &queued) == SL_OK &&
+        !strcmp(queued, "queued"));
+  sl_free_string(sl, queued);
+  CHECK(write(config->output_fd, pager, sizeof(pager) - 1) ==
+        (ssize_t)(sizeof(pager) - 1));
+  CHECK(sl_output_stream_begin(sl) == SL_OK &&
+        CHAT(sl, "Pager closed.\n") == SL_OK);
+  CHECK(!sl_readline(sl, "test> ") &&
+        sl_last_readline_status(sl) == SL_READLINE_SUSPENDED && f->phase == 5);
+  CHECK(sl_output_stream_end(sl) == SL_OK);
+  capture(f);
+  CHECK(screen_rows_with(f, "Goodbye.") == 1 && !screen_has(f, "draft", 0));
+  sl_destroy(sl);
+  vterm_free(f->terminal);
+}
+
 int main(void) {
   struct winsize size = {12, 80, 0, 0};
   struct termios before, after;
@@ -667,7 +772,10 @@ int main(void) {
   sl_free_string(sl, line);
   CHECK(sl_output_stream_end(sl) == SL_OK);
   sl_destroy(sl);
+  f.length = 0;
+  capture(&f);
   vterm_free(f.terminal);
+  test_handoff_close(&f, &config, &before);
   close(f.stop[1]);
   CHECK(!pthread_join(f.reader, NULL));
   CHECK(!pthread_mutex_destroy(&f.capture_lock));

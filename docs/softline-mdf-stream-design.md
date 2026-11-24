@@ -194,7 +194,12 @@ application-owned coordinates to return to the input cursor. Softline applies
 that separation to incremental producer writes and retains only the prompt
 frame for cell comparisons.
 `clear_prompt_on_exit = 1` selects clearing the whole prompt area and returning
-below the transcript. Ending a stream inside an active editor retains the
+below the transcript. For a foreground pager or another external terminal
+program, call `sl_output_stream_end_for_handoff()` after the editor returns.
+It applies the full-frame close for that call, preserving the draft and status
+values. Run the program, then call `sl_output_stream_begin()` before resuming
+the editor. A partial ANSI or UTF-8 sequence leaves the stream open for retry.
+Ending an ordinary stream inside an active editor retains the
 prompt and scroll region for later finite output or another stream. Closing
 the handle always restores terminal state. Non-TTY sessions emit no teardown
 controls. Ctrl-C restores unrestricted scroll margins, the bottom input cursor,

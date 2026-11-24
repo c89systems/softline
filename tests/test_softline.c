@@ -1851,13 +1851,14 @@ static void test_redirected_live_output_validates_stream(void) {
   sl = sl_create_with_config(&cfg);
   ASSERT_TRUE(sl && sl_output_stream_begin(sl) == SL_OK &&
                   sl_output_stream_write(sl, "\xc3", 1) == SL_OK &&
-                  sl_output_stream_end(sl) == SL_ERROR_INVALID &&
+                  sl_output_stream_end_for_handoff(sl) == SL_ERROR_INVALID &&
                   sl_output_stream_write(sl, "\xa4\033[31", 5) == SL_OK &&
-                  sl_output_stream_end(sl) == SL_ERROR_INVALID &&
+                  sl_output_stream_end_for_handoff(sl) == SL_ERROR_INVALID &&
                   sl_output_stream_write(sl, "m", 1) == SL_OK &&
                   sl_output_stream_write(sl, "\001", 1) == SL_ERROR_INVALID &&
                   sl_output_stream_write(sl, "X", 1) == SL_OK &&
-                  sl_output_stream_end(sl) == SL_OK,
+                  sl_output_stream_end_for_handoff(sl) == SL_OK &&
+                  sl_output_stream_end_for_handoff(sl) == SL_ERROR_INVALID,
               "redirected stream did not enforce byte protocol");
   ASSERT_TRUE(sl_output_stream_begin(sl) == SL_OK &&
                   sl_output_stream_write(sl, "\xf0\x80\x80\x80", 4) ==

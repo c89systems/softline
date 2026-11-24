@@ -4599,8 +4599,9 @@ retry:
   return rc;
 }
 
-static int sl_native_session_close(sl_t *self) {
+static int sl_native_session_close(sl_t *self, int for_handoff) {
   sl_impl_t *impl = sl_impl(self);
+  int clear_frame = for_handoff || impl->clear_prompt_on_exit;
   int prompt_row = -1;
   int i, row;
   if (impl->rendered_rows > 0) {
@@ -4619,7 +4620,7 @@ static int sl_native_session_close(sl_t *self) {
       (void)sl_native_observe_producer(self);
     }
   }
-  if (!impl->clear_prompt_on_exit && impl->rendered_rows > 0) {
+  if (!clear_frame && impl->rendered_rows > 0) {
     prompt_row = impl->rendered_top_row + impl->rendered_cursor_row;
     /* The cached frame separates editor cells from queue and status rows.
      * Clear only visible input rows and leave the rest of the screen intact. */
@@ -4632,7 +4633,7 @@ static int sl_native_session_close(sl_t *self) {
         return -1;
     }
   }
-  if (impl->clear_prompt_on_exit && sl_render_clear_active(self) != 0)
+  if (clear_frame && sl_render_clear_active(self) != 0)
     return -1;
   if (prompt_row >= sl_terminal_rows(impl))
     prompt_row = sl_terminal_rows(impl) - 1;
@@ -4691,7 +4692,7 @@ static int sl_render_finish(sl_t *self, int queue_dispatch) {
     if (impl->clear_prompt_on_exit && sl_render_clear_active(self) != 0)
       return -1;
     if (!impl->output_stream_active)
-      return sl_native_session_close(self);
+      return sl_native_session_close(self, 0);
     return 0;
   }
   if (impl->auto_scroll_pinned) {
@@ -5082,7 +5083,7 @@ static int sl_print_above_method_impl(sl_t *self, sl_stream_callback_t callback,
     if (sl_output_surface_reconcile(self, prompt_top) != 0)
       return SL_ERROR_IO;
     rc = sl_print_above_surface(self, callback, userdata);
-    if (sl_native_session_close(self) != 0)
+    if (sl_native_session_close(self, 0) != 0)
       rc = SL_ERROR_IO;
     sl_disable_raw(self);
     return rc;
@@ -5882,12 +5883,19 @@ static int sl_output_stream_write_quoted_prompt_method(sl_t *self,
   return result;
 }
 
-static int sl_output_stream_end_method(sl_t *self) {
+static int sl_output_stream_end_impl(sl_t *self, int for_handoff) {
   sl_impl_t *impl;
   int prompt_origin;
   impl = sl_impl(self);
   if (!impl || !impl->output_stream_active) {
     sl_set_error(self, "no live output stream is open");
+    return SL_ERROR_INVALID;
+  }
+  if (for_handoff &&
+      (impl->active_readline || impl->terminal_active || impl->history_busy ||
+       impl->watch_callback_depth || sl_backend_callback_active(impl) ||
+       sl_transcript_visible(self))) {
+    sl_set_error(self, "output handoff requires an idle editor");
     return SL_ERROR_INVALID;
   }
   if (impl->output_pending_len ||
@@ -5920,7 +5928,7 @@ static int sl_output_stream_end_method(sl_t *self) {
     if (sl_surface_native_exit_advances(impl->output_surface) &&
         impl->output_trailing_newlines < 2)
       impl->output_trailing_newlines++;
-    if (sl_native_session_close(self) != 0)
+    if (sl_native_session_close(self, for_handoff) != 0)
       return SL_ERROR_IO;
     sl_disable_raw(self);
     return sl_show_cursor(impl) == 0 ? SL_OK : SL_ERROR_IO;
@@ -5950,6 +5958,10 @@ static int sl_output_stream_end_method(sl_t *self) {
     return SL_ERROR_IO;
   }
   return SL_OK;
+}
+
+static int sl_output_stream_end_method(sl_t *self) {
+  return sl_output_stream_end_impl(self, 0);
 }
 
 static int sl_print_above_backlog(sl_t *self, sl_stream_callback_t callback,
@@ -8647,7 +8659,7 @@ static char *sl_readline_impl(sl_t *self, const char *prompt,
      */
     if (!impl->output_stream_active &&
         (sl_surface_is_native(impl->output_surface)
-             ? sl_native_session_close(self)
+             ? sl_native_session_close(self, 0)
              : sl_render_clear_active(self)) != 0) {
       failed = 1;
     } else {
@@ -8889,7 +8901,7 @@ static void sl_destroy_method(sl_t *self) {
     sl_terminal_cleanup(impl);
     sl_backend_destroy(self);
     if (sl_surface_is_native(impl->output_surface))
-      (void)sl_native_session_close(self);
+      (void)sl_native_session_close(self, 0);
     sl_release_auto_scroll_region(impl);
     sl_disable_raw(self);
     (void)sl_show_cursor(impl);
@@ -10916,6 +10928,10 @@ int sl_output_stream_end(sl_t *self) {
   if (!self || !self->output_stream_end)
     return SL_ERROR_INVALID;
   return self->output_stream_end(self);
+}
+
+int sl_output_stream_end_for_handoff(sl_t *self) {
+  return sl_output_stream_end_impl(self, 1);
 }
 
 int sl_output_stream_write_quoted_prompt(sl_t *self, const char *text) {

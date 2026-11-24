@@ -2016,13 +2016,25 @@ int sl_output_stream_write(sl_t *self, const char *bytes, size_t length);
  * clear_prompt_on_exit selects clearing the whole prompt area and returning
  * below output instead. Without a prompt, return below output.
  * Closing an idle native session also releases terminal input ownership.
- * Applications may run a foreground child and then output_stream_begin() to
- * probe its final cursor and create a fresh prompt, keeping handle history
- * and settings. This handoff must run outside active editor callbacks.
- * The application owns child execution.
  * Incomplete ANSI/UTF-8 returns SL_ERROR_INVALID and leaves the session open.
+ * @see sl_output_stream_end_for_handoff
  */
 int sl_output_stream_end(sl_t *self);
+
+/** End an idle output session before running a foreground terminal program.
+ * Clear the native queue, status and input rows and place the cursor below
+ * output. Preserve transcript cells, scrollback and the editor's draft,
+ * cursor, undo, history, queue, edit and status state. The idle native close
+ * releases terminal input ownership and applies the full-frame policy for
+ * this call only. The host runs the program, then calls
+ * sl_output_stream_begin() before resuming the same editor.
+ * @param self Editor handle. Call on its owner thread between editor calls.
+ * @return SL_OK on success, SL_ERROR_INVALID for an active editor, closed
+ * stream or incomplete ANSI/UTF-8, or SL_ERROR_IO on terminal I/O failure.
+ * Validation failure leaves the stream open.
+ * @see sl_suspend
+ * @see sl_output_stream_end */
+int sl_output_stream_end_for_handoff(sl_t *self);
 
 /** Write a submitted prompt as a themed quote into an open output stream.
  * Word-wrap at the current output width and prefix every visible row. Add only

@@ -50,6 +50,7 @@ sl_next_prompt
 sl_output_stream_begin
 sl_output_stream_reconcile
 sl_output_stream_end
+sl_output_stream_end_for_handoff
 sl_output_stream_write
 sl_output_stream_write_quoted_prompt
 sl_print_above
