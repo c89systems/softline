@@ -4176,9 +4176,8 @@ static int sl_native_reconcile_rendered_frame(sl_t *self, int width,
     int space =
         height - impl->rendered_height - line_rows - (offset - old_offset);
     int available = height - 1 - (top + offset);
-    /* Native reflow adds rows before the prompt; viewport growth or row
-     * contraction can restore only available terminal history. Existing
-     * blank rows below the cursor are preserved. No cells are replayed. */
+    /* Native reflow adds rows before the prompt. The terminal can restore
+     * history into the space revealed by growth or row contraction. */
     if (height < impl->rendered_height) {
       /* Height shrink retains the old physical cursor row, clamped to the
        * new screen, even when column reflow moves its logical row. */
@@ -4191,15 +4190,18 @@ static int sl_native_reconcile_rendered_frame(sl_t *self, int width,
     if (space > available)
       space = available;
     if (space > 0) {
-      int restored =
-          sl_surface_native_history_growth(impl->output_surface, space);
+      int restored = 0;
+      if (impl->active_prompt || height <= impl->rendered_height)
+        restored =
+            sl_surface_native_history_growth(impl->output_surface, space);
       top += restored;
       if (height > impl->rendered_height && restored < space) {
         int last = span - 1 - offset;
         int below = height - (top + span);
-        /* Use the retained prompt's physical cursor to anchor the existing
-         * cells. Indexing past the bottom returns any extra pulled lines to
-         * scrollback, so our lower bound becomes their exact displacement. */
+        /* Index from the frame's last row through the space below it. For
+         * a retained frame start with zero restored rows: the user may
+         * have cleared or disabled the terminal's history. Any extra rows
+         * the terminal pulled back are returned to history at the bottom. */
         if (below > 0 &&
             (sl_write_cursor_down(impl->output_fd, last) != 0 ||
              sl_surface_index_full_screen(impl->output_fd, below) != 0))
