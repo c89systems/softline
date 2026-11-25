@@ -1078,6 +1078,19 @@ static int sl_handoff_endpoint_matches(const sl_impl_t *impl, int rows,
          impl->terminal_recovery_col <= width;
 }
 
+static int sl_clear_handoff_frame(sl_impl_t *impl, int rows) {
+  int i;
+  for (i = 0; i < impl->terminal_recovery_frame_count; i++) {
+    int row = impl->terminal_recovery_frame_top + i;
+    if (row >= 0 && row < rows &&
+        (sl_write_cursor_pos(impl->output_fd, row, 0) != 0 ||
+         sl_clear_prompt_row(impl) != 0))
+      return -1;
+  }
+  impl->terminal_recovery_frame_count = 0;
+  return 0;
+}
+
 static int sl_output_surface_reconcile(sl_t *self, int prompt_top) {
   sl_impl_t *impl = sl_impl(self);
   int width;
@@ -1097,6 +1110,7 @@ static int sl_output_surface_reconcile(sl_t *self, int prompt_top) {
   if (!impl->output_surface) {
     int row, col, observed, flags = -1;
     int recovering = impl->terminal_recovery_pending;
+    int saved_endpoint = recovering && impl->terminal_recovery_rows;
     int was_raw = impl->raw_active;
     if (sl_enable_raw(self) != 0)
       return -1;
@@ -1123,29 +1137,35 @@ static int sl_output_surface_reconcile(sl_t *self, int prompt_top) {
         goto restore_startup;
       /* A reply can describe a cursor already moved by a partial close or a
        * previous recovery. Use the endpoint saved before those writes. */
-      if (impl->terminal_recovery_rows) {
+      if (saved_endpoint) {
         if (!sl_handoff_endpoint_matches(impl, rows, width))
           goto restore_startup;
         row = impl->terminal_recovery_row;
         col = impl->terminal_recovery_col;
-      } else {
+      } else if (impl->terminal_recovery_display) {
         impl->terminal_recovery_row = row;
         impl->terminal_recovery_col = col;
         impl->terminal_recovery_rows = rows;
         impl->terminal_recovery_width = width;
       }
-      if (sl_reset_scroll_region(impl->output_fd) != 0 ||
-          sl_write_cursor_pos(impl->output_fd, row,
-                              col == width ? width - 1 : col) != 0 ||
-          sl_wstr(impl->output_fd, "\033[?25h") != 0)
+      if (impl->terminal_recovery_frame_count &&
+          (impl->terminal_recovery_frame_height != rows ||
+           impl->terminal_recovery_frame_width != width))
+        goto restore_startup;
+      if (impl->terminal_recovery_display &&
+          (sl_reset_scroll_region(impl->output_fd) != 0 ||
+           sl_clear_handoff_frame(impl, rows) != 0 ||
+           sl_write_cursor_pos(impl->output_fd, row,
+                               col == width ? width - 1 : col) != 0 ||
+           sl_wstr(impl->output_fd, "\033[?25h") != 0))
         goto restore_startup;
     }
-    /* Base quote separation on the append endpoint, which can differ from
-     * the cursor reported after a failed close. */
-    if (observed > 0 && col == 0 && !impl->native_cursor_valid &&
-        impl->output_trailing_newlines == 0)
+    /* At a saved producer position the newline count is already known.
+     * Column zero alone cannot distinguish CR from LF. */
+    if (!saved_endpoint && observed > 0 && col == 0 &&
+        !impl->native_cursor_valid && impl->output_trailing_newlines == 0)
       impl->output_trailing_newlines = 1;
-    if ((impl->native_cursor_valid || recovering) && col > 0)
+    if (!saved_endpoint && (impl->native_cursor_valid || recovering) && col > 0)
       impl->output_trailing_newlines = 0;
     impl->output_surface = sl_surface_create_native(
         impl->output_fd, width, prompt_top, row, col,
@@ -1160,6 +1180,7 @@ static int sl_output_surface_reconcile(sl_t *self, int prompt_top) {
     }
     if (impl->output_surface && recovering) {
       impl->terminal_recovery_pending = 0;
+      impl->terminal_recovery_display = 0;
       impl->terminal_recovery_rows = 0;
       impl->cursor_hidden = 0;
     }
@@ -4662,11 +4683,19 @@ retry:
   return rc;
 }
 
-static void sl_save_handoff_endpoint(sl_impl_t *impl) {
+static void sl_save_handoff_frame(sl_impl_t *impl) {
+  impl->terminal_recovery_frame_top = impl->rendered_top_row;
+  impl->terminal_recovery_frame_count = impl->rendered_rows;
+  impl->terminal_recovery_frame_height = impl->rendered_height;
+  impl->terminal_recovery_frame_width = impl->rendered_width;
+}
+
+static void sl_save_handoff_display(sl_impl_t *impl) {
   sl_surface_native_position(impl->output_surface, &impl->terminal_recovery_row,
                              &impl->terminal_recovery_col);
   sl_surface_geometry(impl->output_surface, &impl->terminal_recovery_width,
                       NULL, &impl->terminal_recovery_rows);
+  sl_save_handoff_frame(impl);
 }
 
 static int sl_native_session_close(sl_t *self, int for_handoff) {
@@ -4676,7 +4705,7 @@ static int sl_native_session_close(sl_t *self, int for_handoff) {
   int prompt_row = -1;
   int i, row;
   if (handoff)
-    sl_save_handoff_endpoint(impl);
+    sl_save_handoff_display(impl);
   if (impl->rendered_rows > 0) {
     int result = 1;
     for (i = 0; i < 3 && result == 1; i++)
@@ -4694,7 +4723,7 @@ static int sl_native_session_close(sl_t *self, int for_handoff) {
     }
   }
   if (handoff)
-    sl_save_handoff_endpoint(impl);
+    sl_save_handoff_display(impl);
   if (!clear_frame && impl->rendered_rows > 0) {
     prompt_row = impl->rendered_top_row + impl->rendered_cursor_row;
     /* The cached frame separates editor cells from queue and status rows.
@@ -4710,6 +4739,8 @@ static int sl_native_session_close(sl_t *self, int for_handoff) {
   }
   if (clear_frame && sl_render_clear_active(self) != 0)
     return -1;
+  if (handoff && clear_frame)
+    impl->terminal_recovery_frame_count = 0;
   if (prompt_row >= sl_terminal_rows(impl))
     prompt_row = sl_terminal_rows(impl) - 1;
   sl_surface_native_position(impl->output_surface, &row, NULL);
@@ -4724,6 +4755,7 @@ static int sl_native_session_close(sl_t *self, int for_handoff) {
   if (sl_surface_native_finish(impl->output_surface, prompt_row) != 0)
     return -1;
   impl->terminal_recovery_rows = 0;
+  impl->terminal_recovery_frame_count = 0;
   impl->native_cursor_below = sl_terminal_rows(impl) - 1 - row;
   impl->native_cursor_valid = 1;
   impl->native_history_rows =
@@ -4745,13 +4777,18 @@ void sl_terminal_abandon(sl_t *self) {
   if (sl_surface_is_native(impl->output_surface) || impl->raw_active ||
       impl->terminal_active)
     impl->terminal_recovery_pending = 1;
+  if (sl_surface_is_native(impl->output_surface)) {
+    impl->terminal_recovery_display = 1;
+    impl->native_cursor_valid = 0;
+    if (!impl->terminal_recovery_rows)
+      sl_save_handoff_frame(impl);
+  }
   sl_output_discard_backlog(impl);
   sl_disable_raw(self);
   sl_surface_discard(impl->output_surface);
   impl->output_surface = NULL;
   impl->output_stream_active = 0;
   impl->auto_scroll_pinned = 0;
-  impl->native_cursor_valid = 0;
   impl->cursor_position_probe = 0;
   sl_render_store_clear(impl);
   sl_set_error(self,
@@ -9004,16 +9041,22 @@ static void sl_destroy_method(sl_t *self) {
       (void)sl_native_session_close(self, 0);
     sl_release_auto_scroll_region(impl);
     sl_disable_raw(self);
-    if (impl->cursor_hidden || impl->terminal_recovery_pending) {
+    if (impl->cursor_hidden || impl->terminal_recovery_display) {
       int flags = sl_output_nonblocking(impl->output_fd);
       if (flags >= 0) {
-        if (impl->terminal_recovery_pending &&
-            sl_wstr(impl->output_fd, "\030\033[r") == 0 &&
-            sl_handoff_endpoint_matches(impl, sl_terminal_rows(impl),
-                                        sl_terminal_columns(impl)))
-          (void)sl_write_cursor_pos(impl->output_fd,
-                                    impl->terminal_recovery_row,
-                                    impl->terminal_recovery_col);
+        if (impl->terminal_recovery_display) {
+          if (sl_handoff_endpoint_matches(impl, sl_terminal_rows(impl),
+                                          sl_terminal_columns(impl))) {
+            if (sl_wstr(impl->output_fd, "\030\033[r") == 0)
+              (void)sl_write_cursor_pos(impl->output_fd,
+                                        impl->terminal_recovery_row,
+                                        impl->terminal_recovery_col);
+          } else {
+            /* The editor is going away. Pair save and restore in this one
+             * best-effort write so resetting margins keeps the cursor. */
+            (void)sl_wstr(impl->output_fd, "\030\0337\033[r\0338");
+          }
+        }
         (void)sl_show_cursor(impl);
         (void)fcntl(impl->output_fd, F_SETFL, flags);
       }

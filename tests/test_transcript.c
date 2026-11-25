@@ -842,6 +842,16 @@ static void test_handoff_cursor_recovery(fixture_t *f,
   handoff_test_master = f->master;
   handoff_output = WRITABLE;
   CURSOR_REPLIES_REAL(1);
+  if (failure == FAIL_AFTER_HIDE && !destroy) {
+    f->length = 0;
+    capture(f);
+    f->terminal = vterm_new(12, 20);
+    CHECK(f->terminal);
+    vterm_set_utf8(f->terminal, 1);
+    vterm_screen_reset(vterm_obtain_screen(f->terminal), 1);
+    CHECK(sl_set_status_message(sl, "Waiting") == SL_OK &&
+          sl_prompt_queue_append(sl, "queued prompt", 0, NULL) == SL_OK);
+  }
   CHECK(sl && flags >= 0 && sl_output_stream_begin(sl) == SL_OK);
   if (failure == FAIL_AFTER_HIDE) {
     f->phase = 0;
@@ -859,20 +869,33 @@ static void test_handoff_cursor_recovery(fixture_t *f,
   capture(f);
   if (failure == FAIL_AFTER_HIDE)
     CHECK(strstr(f->output, "\033[?25l") && !strstr(f->output, "\033[?25h"));
+  if (f->terminal) {
+    CHECK(screen_rows_with(f, "test> draft") == 1);
+    CHECK(screen_rows_with(f, "Waiting") == 1);
+    CHECK(screen_rows_with(f, "queued prompt") == 1);
+  }
   CHECK(!tcgetattr(config->input_fd, &after) &&
         test_termios_equal(before, &after));
   CHECK(fcntl(config->output_fd, F_GETFL) == flags);
   if (destroy) {
+    struct winsize resized = {12, 21, 0, 0}, original = {12, 20, 0, 0};
     f->length = 0;
     handoff_output = destroy == 1 ? BLOCKED_DESTROY : WRITABLE;
+    if (destroy == 3)
+      CHECK(!ioctl(f->master, TIOCSWINSZ, &resized));
     sl_destroy(sl);
     CHECK(fcntl(config->output_fd, F_GETFL) == flags);
     if (destroy == 1) {
       CHECK(handoff_output == BLOCKED);
     } else {
       capture(f);
-      CHECK(strstr(f->output, "\033[r") && strstr(f->output, "\033[8;1H") &&
-            strstr(f->output, "\033[?25h"));
+      CHECK(strstr(f->output, "\033[r") && strstr(f->output, "\033[?25h"));
+      if (destroy == 3) {
+        CHECK(strstr(f->output, "\0337\033[r\0338"));
+        CHECK(!ioctl(f->master, TIOCSWINSZ, &original));
+      } else {
+        CHECK(strstr(f->output, "\033[8;1H"));
+      }
     }
     handoff_test_fd = -1;
     CURSOR_REPLIES_REAL(0);
@@ -902,6 +925,17 @@ static void test_handoff_cursor_recovery(fixture_t *f,
   CHECK(sl_output_stream_begin(sl) == SL_OK && handoff_queries == queries + 1);
   capture(f);
   CHECK(strstr(f->output, "\033[8;1H") && strstr(f->output, "\033[?25h"));
+  if (f->terminal) {
+    CHECK(CHAT(sl, "fresh output") == SL_OK);
+    f->length = 0;
+    capture(f);
+    CHECK(screen_rows_with(f, "fresh output") == 1);
+    CHECK(!screen_rows_with(f, "draft") && !screen_rows_with(f, "Waiting") &&
+          !screen_rows_with(f, "queued prompt"));
+    CHECK(!strcmp(sl_buffer(sl), "draft") && sl_prompt_queue_count(sl) == 1);
+    vterm_free(f->terminal);
+    f->terminal = NULL;
+  }
   CHECK(fcntl(config->output_fd, F_GETFL) == flags);
   CHECK(sl_output_stream_end(sl) == SL_OK);
   sl_destroy(sl);
@@ -915,6 +949,7 @@ static void test_input_disconnect_during_close(void) {
   int input, output_master, output;
   sl_config_t config;
   sl_t *sl;
+  char bytes[256];
   CHECK(!openpty(&handoff_test_master, &input, NULL, NULL, &size));
   CHECK(!openpty(&output_master, &output, NULL, NULL, &size));
   CHECK(!tcgetattr(output, &before));
@@ -931,7 +966,12 @@ static void test_input_disconnect_during_close(void) {
   CHECK(handoff_test_master == -1 && !tcgetattr(output, &after) &&
         test_termios_equal(&before, &after));
   CHECK(sl_output_stream_begin(sl) == SL_ERROR_IO);
+  CHECK(!fcntl(output_master, F_SETFL, O_NONBLOCK));
+  while (read(output_master, bytes, sizeof(bytes)) > 0) {
+  }
   sl_destroy(sl);
+  CHECK(read(output_master, bytes, sizeof(bytes)) < 0 &&
+        (errno == EAGAIN || errno == EWOULDBLOCK));
   close(output);
   close(output_master);
   close(input);
@@ -940,7 +980,8 @@ static void test_input_disconnect_during_close(void) {
 }
 
 static void test_handoff_quote_spacing(fixture_t *f, const sl_config_t *config,
-                                       enum handoff_output failure) {
+                                       enum handoff_output failure,
+                                       int carriage_return) {
   static const char prior[] = "\033[1;1Hprior output\033[8;1H";
   sl_t *sl = sl_create_with_config(config);
   handoff_test_fd = config->output_fd;
@@ -957,7 +998,9 @@ static void test_handoff_quote_spacing(fixture_t *f, const sl_config_t *config,
         write(config->output_fd, prior, sizeof(prior) - 1) ==
             (ssize_t)(sizeof(prior) - 1) &&
         sl_output_stream_begin(sl) == SL_OK && CHAT(sl, "producer") == SL_OK);
-  handoff_cursor_reply = "\033[8;9R";
+  if (carriage_return)
+    CHECK(CHAT(sl, "\r") == SL_OK);
+  handoff_cursor_reply = carriage_return ? "\033[8;1R" : "\033[8;9R";
   handoff_output = failure;
   CHECK(sl_output_stream_end_for_handoff(sl) == SL_ERROR_IO);
   CHECK(handoff_output == BLOCKED);
@@ -1104,8 +1147,10 @@ int main(void) {
   test_handoff_cursor_recovery(&f, &config, &before, FAIL_AFTER_HIDE, 1);
   test_input_disconnect_during_close();
   test_handoff_cursor_recovery(&f, &config, &before, FAIL_AFTER_HIDE, 2);
-  test_handoff_quote_spacing(&f, &config, FAIL_FINISH);
-  test_handoff_quote_spacing(&f, &config, FAIL_AFTER_MARGIN_RESET);
+  test_handoff_cursor_recovery(&f, &config, &before, FAIL_AFTER_HIDE, 3);
+  test_handoff_quote_spacing(&f, &config, FAIL_FINISH, 0);
+  test_handoff_quote_spacing(&f, &config, FAIL_AFTER_MARGIN_RESET, 0);
+  test_handoff_quote_spacing(&f, &config, FAIL_FINISH, 1);
 #endif
   close(f.stop[1]);
   CHECK(!pthread_join(f.reader, NULL));
