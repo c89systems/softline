@@ -106,9 +106,9 @@ and [remote queue settings](docs/queue-backends.md#two-terminal-demo).
 ## Terminal-native chat
 
 Use a persistent output session to stream above a bottom-anchored prompt.
-The renderer owns formatting and the terminal owns scrollback. Softline owns
-prompt placement and updates only its rows. Feed writes consume bounded
-chunks without waiting for cursor reports.
+The renderer owns formatting and the terminal owns scrollback. Softline
+tracks the output position, anchors the prompt at the bottom and updates its
+owned rows without querying the terminal cursor.
 
 ```c
 sl_output_stream_begin(sl);

@@ -1,7 +1,6 @@
 #define _GNU_SOURCE
 #define _POSIX_C_SOURCE 200809L
 
-#include "silent_cursor_probe.h"
 #include "softline/softline.h"
 
 #include <assert.h>
@@ -1746,6 +1745,11 @@ static void vt_apply(struct vt_screen *screen, const char *bytes) {
       p += 2;
       continue;
     }
+    if (*p == '\033' && p[1] == 'D') {
+      vt_lf(screen);
+      p += 2;
+      continue;
+    }
     if (*p == '\033' && p[1] == '[') {
       p = vt_csi(screen, p + 2);
       continue;
@@ -2244,9 +2248,9 @@ static void test_native_output_without_reported_size(void) {
               "fallback geometry output missing");
   vt_init(&screen, 24, 80);
   vt_apply(&screen, output);
-  ASSERT_TRUE(strncmp(screen.cells[0], "ONE", 3) == 0 &&
-                  strncmp(screen.cells[1], "TWO", 3) == 0 && screen.row == 2 &&
-                  screen.col == 0,
+  ASSERT_TRUE(strncmp(screen.cells[21], "ONE", 3) == 0 &&
+                  strncmp(screen.cells[22], "TWO", 3) == 0 &&
+                  screen.row == 23 && screen.col == 0,
               "fallback geometry lost its output row between producer spans");
   sl_destroy(sl);
   close(slave_fd);
@@ -7539,7 +7543,6 @@ static void test_normal_prompt_pins_at_bottom_for_live_output(void) {
   size_t terminal_len;
   ssize_t n;
   int status;
-  int replied;
   int tries;
   int prompts_after_second;
   int first_row;
@@ -7592,20 +7595,15 @@ static void test_normal_prompt_pins_at_bottom_for_live_output(void) {
   close(result_pipe[1]);
   terminal_len = 0;
   terminal[0] = '\0';
-  replied = 0;
   tries = 0;
   while (!contains_bytes(terminal, "first-live") && tries < 100) {
     n = read_some_with_timeout(master_fd, buf, sizeof(buf));
     if (n > 0)
       append_terminal_bytes(terminal, &terminal_len, sizeof(terminal), buf, n);
-    if (!replied && contains_bytes(terminal, "\033[6n")) {
-      ASSERT_TRUE(write(master_fd, "\033\033[5;4R", 7) == 7,
-                  "nested Escape and cursor report write failed");
-      replied = 1;
-    }
     tries++;
   }
-  ASSERT_TRUE(replied, "normal prompt did not request cursor position");
+  ASSERT_TRUE(!contains_bytes(terminal, "\033[6n"),
+              "live prompt requested cursor position");
   ASSERT_TRUE(contains_bytes(terminal, "first-live"),
               "first live message missing");
   ASSERT_TRUE(count_bytes(terminal, "p> ") == 1,
@@ -7753,16 +7751,13 @@ static void test_pinned_stream_failure_restores_prompt_cursor(void) {
   terminal_len = 0;
   terminal[0] = '\0';
   tries = 0;
-  while (!contains_bytes(terminal, "\033[6n") && tries < 100) {
+  while (!contains_bytes(terminal, "p> ") && tries < 100) {
     n = read_some_with_timeout(master_fd, buf, sizeof(buf));
     if (n > 0)
       append_terminal_bytes(terminal, &terminal_len, sizeof(terminal), buf, n);
     tries++;
   }
-  ASSERT_TRUE(contains_bytes(terminal, "\033[6n"),
-              "pinned stream did not request cursor position");
-  ASSERT_TRUE(write(master_fd, "\033[5;4R", 6) == 6,
-              "cursor report write failed");
+  ASSERT_TRUE(contains_bytes(terminal, "p> "), "pinned prompt missing");
   n = read_some_with_timeout(ready_pipe[0], result, sizeof(result));
   ASSERT_TRUE(n == 1 && result[0] == 'R',
               "failing stream did not report its callback error");
@@ -7796,9 +7791,8 @@ static void test_pinned_stream_failure_restores_prompt_cursor(void) {
   PASS();
 }
 
-static void test_cursor_probe_preserves_concurrent_queue_input(void) {
+static void test_live_prompt_preserves_concurrent_queue_input(void) {
   static const char input[] =
-      "\033[9999999999;9999999999R"
       "queued-012345678901234567890123456789012345\tok\033[13;5u";
   int master_fd;
   int slave_fd;
@@ -7813,7 +7807,7 @@ static void test_cursor_probe_preserves_concurrent_queue_input(void) {
   int status;
   int tries;
 
-  TEST("cursor probe preserves queued input and Ctrl-Enter");
+  TEST("pinned prompt preserves queued input and Ctrl-Enter");
   memset(&ws, 0, sizeof(ws));
   ws.ws_col = 20;
   ws.ws_row = 5;
@@ -7858,18 +7852,18 @@ static void test_cursor_probe_preserves_concurrent_queue_input(void) {
   terminal_len = 0;
   terminal[0] = '\0';
   tries = 0;
-  while (!contains_bytes(terminal, "\033[6n") && tries < 100) {
+  while (!contains_bytes(terminal, "p> ") && tries < 100) {
     n = read_some_with_timeout(master_fd, buf, sizeof(buf));
     if (n > 0)
       append_terminal_bytes(terminal, &terminal_len, sizeof(terminal), buf, n);
     tries++;
   }
-  ASSERT_TRUE(contains_bytes(terminal, "\033[6n"),
-              "cursor-position probe was not requested");
-  ASSERT_TRUE(
-      write(master_fd, input, sizeof(input) - 1) ==
-          (ssize_t)(sizeof(input) - 1),
-      "concurrent malformed cursor report and queue input write failed");
+  ASSERT_TRUE(contains_bytes(terminal, "p> "), "pinned prompt missing");
+  ASSERT_TRUE(!contains_bytes(terminal, "\033[6n"),
+              "pinned prompt requested cursor position");
+  ASSERT_TRUE(write(master_fd, input, sizeof(input) - 1) ==
+                  (ssize_t)(sizeof(input) - 1),
+              "concurrent queue input write failed");
   tries = 0;
   n = 0;
   while (n == 0 && tries < 50) {
@@ -7887,7 +7881,7 @@ static void test_cursor_probe_preserves_concurrent_queue_input(void) {
   ASSERT_TRUE(WIFEXITED(status) && WEXITSTATUS(status) == 0,
               "child editor failed");
   ASSERT_TRUE(strcmp(result, "ok") == 0,
-              "cursor probe did not preserve queued Ctrl-Enter input");
+              "pinned prompt did not preserve queued Ctrl-Enter input");
   PASS();
 }
 
@@ -10259,7 +10253,7 @@ static void retained_shrink_idle(sl_t *sl, void *userdata) {
     goto finish;
   }
   retained_growth_snapshot(state);
-  if (strncmp(state->screen.cells[0], "TRANSCRIPT", 10) != 0 ||
+  if (vt_count(&state->screen, "TRANSCRIPT") != 1 ||
       strncmp(state->screen.cells[7], "> x", 3) != 0 ||
       state->screen.row != 7 || state->screen.col != 3 ||
       sl_set_buffer(sl, "three\nfour") != SL_OK ||
@@ -10268,7 +10262,7 @@ static void retained_shrink_idle(sl_t *sl, void *userdata) {
     goto finish;
   }
   retained_growth_snapshot(state);
-  if (strncmp(state->screen.cells[0], "TRANSCRIPT", 10) != 0 ||
+  if (vt_count(&state->screen, "TRANSCRIPT") != 1 ||
       strncmp(state->screen.cells[6], "> three", 7) != 0 ||
       strncmp(state->screen.cells[7], "  four", 6) != 0 ||
       sl_output_stream_begin(sl) != SL_OK) {
@@ -10484,8 +10478,9 @@ static void test_live_output_prompt_growth_preserves_history(void) {
   if (!vt_contains(&screen, "TWO") || !vt_contains(&screen, "THREE") ||
       !vt_contains(&screen, "SEVEN"))
     vt_dump(&screen);
-  ASSERT_TRUE(screen.history_count == 1 &&
-                  strncmp(screen.history[0], "ONE", 3) == 0 &&
+  ASSERT_TRUE(screen.history_count >= 1 &&
+                  strncmp(screen.history[screen.history_count - 1], "ONE", 3) ==
+                      0 &&
                   strncmp(screen.cells[0], "TWO", 3) == 0 &&
                   strncmp(screen.cells[1], "THREE", 5) == 0 &&
                   strncmp(screen.cells[2], "FOUR", 4) == 0 &&
@@ -11130,8 +11125,8 @@ static void test_normal_prompt_pins_at_bottom_for_live_output(void) {
   printf("SKIP\n");
   tests_passed++;
 }
-static void test_cursor_probe_preserves_concurrent_queue_input(void) {
-  TEST("cursor probe preserves concurrent queue input");
+static void test_live_prompt_preserves_concurrent_queue_input(void) {
+  TEST("pinned prompt preserves concurrent queue input");
   printf("SKIP\n");
   tests_passed++;
 }
@@ -11380,13 +11375,11 @@ int main(int argc, char **argv) {
   test_live_output_end_restores_unbounded_cursor();
   test_unbounded_finite_output_preserves_active_prompt();
   test_idle_callback_prints_above_active_prompt();
-  CURSOR_REPLIES_REAL(1);
   test_normal_prompt_pins_at_bottom_for_live_output();
 #if SL_TEST_PTY
   test_pinned_stream_failure_restores_prompt_cursor();
 #endif
-  test_cursor_probe_preserves_concurrent_queue_input();
-  CURSOR_REPLIES_REAL(0);
+  test_live_prompt_preserves_concurrent_queue_input();
   test_utf8_input_and_backspace();
   test_utf8_swedish_input_is_rendered_as_full_sequences();
   test_unicode_width_wraps_japanese_and_emoji();

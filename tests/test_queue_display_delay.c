@@ -251,7 +251,7 @@ static int run(int scenario, int native) {
   int failed = 1, status, sent = 0, changed = 0, finished = 0, updates = 0;
   pid_t pid = -1;
   char *output = calloc(1, 65536);
-  size_t used = 0, scanned = 0;
+  size_t used = 0;
   double deadline = milliseconds() + 3000, started = 0, first = -1, second = -1;
   double appended = -1;
   struct winsize size = {24, 100, 0, 0};
@@ -308,17 +308,12 @@ static int run(int scenario, int native) {
     if (fds[1].revents & POLLIN)
       REQUIRE(read(events[0], &event, sizeof(event)) == (ssize_t)sizeof(event));
     if ((fds[0].revents & POLLIN) || event.kind == 'P') {
-      const char *query;
       ssize_t count;
       while ((count = read(master, output + used, 65535 - used)) > 0) {
         used += (size_t)count;
         REQUIRE(used < 65535);
       }
       output[used] = 0;
-      while ((query = strstr(output + scanned, "\033[6n")) != NULL) {
-        REQUIRE(write(master, "\033[1;1R", 6) == 6);
-        scanned = (size_t)(query - output) + 4;
-      }
     }
     if (!sent && strstr(output, "delay> ")) {
       REQUIRE(write(commands[1], "S", 1) == 1);

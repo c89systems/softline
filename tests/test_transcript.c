@@ -23,12 +23,6 @@
 #include <unistd.h>
 #include <vterm.h>
 
-#ifdef SOFTLINE_TEST_SILENT_CURSOR_PROBE
-static ssize_t handoff_test_write(int fd, const void *bytes, size_t length);
-#define SOFTLINE_TEST_CURSOR_WRITE handoff_test_write
-#endif
-#include "silent_cursor_probe.h"
-
 #define CHECK(expression)                                                      \
   do {                                                                         \
     if (!(expression)) {                                                       \
@@ -47,6 +41,7 @@ enum { CHAT_BACKLOG_LIMIT = 256 * 1024, CAPTURE_LIMIT = 16384 };
 typedef struct fixture {
   sl_transcript_id_t log, worker;
   int master, phase, handoff, viewer_idle_ticks;
+  int handoff_history;
   double queue_started;
   size_t length;
   char output[CAPTURE_LIMIT];
@@ -594,6 +589,21 @@ static int screen_rows_with(const fixture_t *f, const char *needle) {
   return matches;
 }
 
+static int track_handoff_history(int cols, const VTermScreenCell *cells,
+                                 void *context) {
+  static const char marker[] = "kept-output";
+  fixture_t *f = context;
+  size_t i;
+  if (cols < (int)sizeof(marker) - 1)
+    return 1;
+  for (i = 0; i < sizeof(marker) - 1; ++i) {
+    if (cells[i].chars[0] != (unsigned char)marker[i])
+      return 1;
+  }
+  ++f->handoff_history;
+  return 1;
+}
+
 static void drive_handoff_close(sl_t *sl, void *context) {
   fixture_t *f = context;
   capture(f);
@@ -604,7 +614,7 @@ static void drive_handoff_close(sl_t *sl, void *context) {
   case 1:
   case 2:
     CHECK(!strcmp(sl_buffer(sl), "draft\nsecon!d") && sl_cursor(sl) == 11);
-    CHECK(screen_rows_with(f, "kept-output") == 1 &&
+    CHECK(screen_rows_with(f, "kept-output") + f->handoff_history == 1 &&
           screen_rows_with(f, "queued") == 1 &&
           screen_rows_with(f, "Ready.") == 1 &&
           screen_rows_with(f, "FLAG") == 1 &&
@@ -637,6 +647,8 @@ static void drive_handoff_close(sl_t *sl, void *context) {
 static void test_handoff_close(fixture_t *f, sl_config_t *config,
                                const struct termios *before) {
   static const char pager[] = "\033[?1049h\033[2J\033[Hpager\033[?1049l";
+  static const VTermScreenCallbacks screen_callbacks = {
+      .sb_pushline = track_handoff_history};
   const char *elements[] = {"FLAG"};
   struct winsize size = {12, 20, 0, 0};
   struct termios after;
@@ -646,6 +658,9 @@ static void test_handoff_close(fixture_t *f, sl_config_t *config,
   f->terminal = vterm_new(12, 20);
   CHECK(f->terminal);
   vterm_set_utf8(f->terminal, 1);
+  f->handoff_history = 0;
+  vterm_screen_set_callbacks(vterm_obtain_screen(f->terminal),
+                             &screen_callbacks, f);
   vterm_screen_enable_altscreen(vterm_obtain_screen(f->terminal), 1);
   vterm_screen_reset(vterm_obtain_screen(f->terminal), 1);
   f->phase = 0;
@@ -727,7 +742,6 @@ static void test_failed_handoff_close(fixture_t *f, const sl_config_t *config,
   CHECK(sl_output_stream_end_for_handoff(sl) == SL_ERROR_INVALID);
 
   CHECK(!ioctl(f->master, TIOCSWINSZ, &normal));
-  keys(f, "\033[2;1R");
   CHECK(sl_output_stream_begin(sl) == SL_OK);
   line = sl_readline(sl, "test> ");
   CHECK(line && !strcmp(line, "drafXt") && f->phase == 3);
@@ -762,28 +776,28 @@ static void test_disconnected_handoff_close(void) {
   close(input_master);
 }
 
-#ifdef SOFTLINE_TEST_SILENT_CURSOR_PROBE
+#ifdef SOFTLINE_TEST_HANDOFF_WRITE
 enum handoff_output {
   WRITABLE,
-  FAIL_QUERY,
   FAIL_AFTER_HIDE,
   BLOCKED,
   BLOCKED_DESTROY,
-  NO_REPLY,
   DISCONNECT_INPUT,
   FAIL_FINISH,
   FAIL_AFTER_MARGIN_RESET
 };
 static enum handoff_output handoff_output;
-static int handoff_test_fd = -1, handoff_test_master, handoff_queries;
-static const char *handoff_cursor_reply = "\033[8;1R";
+static int handoff_test_fd = -1, handoff_test_master;
 
-static ssize_t handoff_test_write(int fd, const void *bytes, size_t length) {
-  int query, finish;
+ssize_t __real_write(int, const void *, size_t);
+ssize_t __wrap_write(int, const void *, size_t);
+
+ssize_t __wrap_write(int fd, const void *bytes, size_t length) {
+  int finish;
   ssize_t written;
   if (fd != handoff_test_fd)
     return __real_write(fd, bytes, length);
-  query = length == 4 && !memcmp(bytes, "\033[6n", length);
+  CHECK(!(length == 4 && !memcmp(bytes, "\033[6n", length)));
   finish = length >= 7 && !memcmp(bytes, "\033[r\033[0m", 7);
   if (handoff_output == BLOCKED_DESTROY) {
     int flags = fcntl(fd, F_GETFL);
@@ -795,8 +809,7 @@ static ssize_t handoff_test_write(int fd, const void *bytes, size_t length) {
     CHECK(length == 6 && !memcmp(bytes, "\033[?25h", length));
     handoff_output = BLOCKED;
   }
-  if (handoff_output == BLOCKED || (query && handoff_output == FAIL_QUERY) ||
-      (finish && handoff_output == FAIL_FINISH)) {
+  if (handoff_output == BLOCKED || (finish && handoff_output == FAIL_FINISH)) {
     handoff_output = BLOCKED;
     errno = EAGAIN;
     return -1;
@@ -814,14 +827,6 @@ static ssize_t handoff_test_write(int fd, const void *bytes, size_t length) {
   written = __real_write(fd, bytes, length);
   if (finish && handoff_output == DISCONNECT_INPUT)
     CHECK(written == (ssize_t)length);
-  if (query && written == 4) {
-    ++handoff_queries;
-    if (handoff_output != NO_REPLY) {
-      size_t reply_length = strlen(handoff_cursor_reply);
-      CHECK(__real_write(handoff_test_master, handoff_cursor_reply,
-                         reply_length) == (ssize_t)reply_length);
-    }
-  }
   /* Let the real hide reach the PTY, then fail each subsequent write until
    * the test makes the output writable again. */
   if (handoff_output == FAIL_AFTER_HIDE && written == 6 && length == 6 &&
@@ -836,12 +841,11 @@ static void test_handoff_cursor_recovery(fixture_t *f,
                                          enum handoff_output failure,
                                          int destroy) {
   struct termios after;
-  int queries, flags = fcntl(config->output_fd, F_GETFL);
+  int flags = fcntl(config->output_fd, F_GETFL);
   sl_t *sl = sl_create_with_config(config);
   handoff_test_fd = config->output_fd;
   handoff_test_master = f->master;
   handoff_output = WRITABLE;
-  CURSOR_REPLIES_REAL(1);
   if (failure == FAIL_AFTER_HIDE && !destroy) {
     f->length = 0;
     capture(f);
@@ -893,38 +897,22 @@ static void test_handoff_cursor_recovery(fixture_t *f,
       if (destroy == 3) {
         CHECK(strstr(f->output, "\0337\033[r\0338"));
         CHECK(!ioctl(f->master, TIOCSWINSZ, &original));
-      } else {
-        CHECK(strstr(f->output, "\033[8;1H"));
       }
     }
     handoff_test_fd = -1;
-    CURSOR_REPLIES_REAL(0);
     return;
   }
   CHECK(sl_output_stream_begin(sl) == SL_ERROR_IO);
   CHECK(!tcgetattr(config->input_fd, &after) &&
         test_termios_equal(before, &after));
 
-  handoff_output = NO_REPLY;
-  CURSOR_REPLIES_REAL(0);
-  queries = handoff_queries;
-  f->length = 0;
-  CHECK(sl_output_stream_begin(sl) == SL_ERROR_IO &&
-        handoff_queries == queries + 1);
-  capture(f);
-  CHECK(strstr(f->output, "\033[6n") && !strstr(f->output, "\033[r") &&
-        !strstr(f->output, "\033[1;1H"));
-  CHECK(!tcgetattr(config->input_fd, &after) &&
-        test_termios_equal(before, &after));
   CHECK(sl_output_stream_write(sl, "x", 1) == SL_ERROR_INVALID);
 
-  CURSOR_REPLIES_REAL(1);
   handoff_output = WRITABLE;
-  queries = handoff_queries;
   f->length = 0;
-  CHECK(sl_output_stream_begin(sl) == SL_OK && handoff_queries == queries + 1);
+  CHECK(sl_output_stream_begin(sl) == SL_OK);
   capture(f);
-  CHECK(strstr(f->output, "\033[8;1H") && strstr(f->output, "\033[?25h"));
+  CHECK(strstr(f->output, "\033[?25h"));
   if (f->terminal) {
     CHECK(CHAT(sl, "fresh output") == SL_OK);
     f->length = 0;
@@ -940,7 +928,6 @@ static void test_handoff_cursor_recovery(fixture_t *f,
   CHECK(sl_output_stream_end(sl) == SL_OK);
   sl_destroy(sl);
   handoff_test_fd = -1;
-  CURSOR_REPLIES_REAL(0);
 }
 
 static void test_input_disconnect_during_close(void) {
@@ -958,7 +945,6 @@ static void test_input_disconnect_during_close(void) {
   config.output_fd = output;
   handoff_test_fd = output;
   handoff_output = WRITABLE;
-  CURSOR_REPLIES_REAL(1);
   sl = sl_create_with_config(&config);
   CHECK(sl && sl_output_stream_begin(sl) == SL_OK);
   handoff_output = DISCONNECT_INPUT;
@@ -976,7 +962,6 @@ static void test_input_disconnect_during_close(void) {
   close(output_master);
   close(input);
   handoff_test_fd = -1;
-  CURSOR_REPLIES_REAL(0);
 }
 
 enum recovered_output {
@@ -990,15 +975,14 @@ enum recovered_output {
 static void test_recovered_output(fixture_t *f, const sl_config_t *config,
                                   enum handoff_output failure,
                                   enum recovered_output action) {
-  static const char prior[] = "\033[1;1Hprior output\033[8;1H";
-  static const char full_row[] = "12345678901234567890";
+  static const char prior[] = "\033[6;1Hprior output";
+  static const char full_row[] = "1234567890123456789é";
   int wrap = action == STYLE_BEFORE_WRAP || action == STYLE_BEFORE_NEWLINE;
   int carriage_return = action == QUOTE_AFTER_CR || action == HANDOFF_AFTER_CR;
   sl_t *sl = sl_create_with_config(config);
   handoff_test_fd = config->output_fd;
   handoff_test_master = f->master;
   handoff_output = WRITABLE;
-  CURSOR_REPLIES_REAL(1);
   f->length = 0;
   capture(f);
   f->terminal = vterm_new(12, 20);
@@ -1012,17 +996,12 @@ static void test_recovered_output(fixture_t *f, const sl_config_t *config,
   CHECK((wrap ? CHAT(sl, full_row) : CHAT(sl, "producer")) == SL_OK);
   if (carriage_return)
     CHECK(CHAT(sl, "\r") == SL_OK);
-  handoff_cursor_reply = wrap              ? "\033[8;20R"
-                         : carriage_return ? "\033[8;1R"
-                                           : "\033[8;9R";
   handoff_output = failure;
   CHECK(sl_output_stream_end_for_handoff(sl) == SL_ERROR_IO);
   CHECK(handoff_output == BLOCKED);
   if (failure == FAIL_AFTER_MARGIN_RESET) {
     struct winsize resized = {13, 20, 0, 0}, original = {12, 20, 0, 0};
-    /* Both the close and a reopen write DECSTBM and fail before
-     * restoring the cursor. The next report genuinely describes row one. */
-    handoff_cursor_reply = "\033[1;1R";
+    /* Both the close and a reopen can stop just after resetting margins. */
     handoff_output = WRITABLE;
     CHECK(!ioctl(f->master, TIOCSWINSZ, &resized));
     CHECK(sl_output_stream_begin(sl) == SL_ERROR_IO);
@@ -1048,11 +1027,12 @@ static void test_recovered_output(fixture_t *f, const sl_config_t *config,
   capture(f);
   {
     char text[128];
-    screen_text(f, 0, 0, text, sizeof(text));
-    CHECK(!strcmp(text, "prior output"));
-    screen_text(f, 7, 0, text, sizeof(text));
+    CHECK(screen_rows_with(f, "prior output") == 1);
+    screen_text(f, action == HANDOFF_AFTER_CR || wrap ? 10 : 7, 0, text,
+                sizeof(text));
     CHECK(!strcmp(text, wrap ? full_row : "producer"));
-    screen_text(f, 8, 0, text, sizeof(text));
+    screen_text(f, action == HANDOFF_AFTER_CR || wrap ? 11 : 8, 0, text,
+                sizeof(text));
     if (action == HANDOFF_AFTER_CR || wrap) {
       CHECK(!strcmp(text, "X"));
     } else {
@@ -1062,8 +1042,6 @@ static void test_recovered_output(fixture_t *f, const sl_config_t *config,
     }
   }
   handoff_test_fd = -1;
-  handoff_cursor_reply = "\033[8;1R";
-  CURSOR_REPLIES_REAL(0);
   if (action != HANDOFF_AFTER_CR)
     CHECK(sl_output_stream_end(sl) == SL_OK);
   sl_destroy(sl);
@@ -1170,8 +1148,8 @@ int main(void) {
   test_handoff_close(&f, &config, &before);
   test_failed_handoff_close(&f, &config, &before);
   test_disconnected_handoff_close();
-#ifdef SOFTLINE_TEST_SILENT_CURSOR_PROBE
-  test_handoff_cursor_recovery(&f, &config, &before, FAIL_QUERY, 0);
+#ifdef SOFTLINE_TEST_HANDOFF_WRITE
+  test_handoff_cursor_recovery(&f, &config, &before, FAIL_FINISH, 0);
   test_handoff_cursor_recovery(&f, &config, &before, FAIL_AFTER_HIDE, 0);
   test_handoff_cursor_recovery(&f, &config, &before, FAIL_AFTER_HIDE, 1);
   test_input_disconnect_during_close();

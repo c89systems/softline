@@ -231,11 +231,6 @@ static int sl_theme_color_style(sl_prompt_theme_t theme, sl_theme_color_t color,
                                 int italic, char *style, size_t size);
 static int sl_try_pin_scroll_region(sl_t *self);
 static void sl_refresh_scroll_region(sl_t *self);
-static int sl_query_cursor_row(sl_t *self);
-static int sl_read_cursor_report(sl_t *self, int request);
-static int sl_cursor_report_begin(sl_t *self, struct termios *original);
-static int sl_cursor_report_end(sl_t *self, const struct termios *original,
-                                int temporary);
 static int sl_enable_raw(sl_t *self);
 static int sl_disable_raw(sl_t *self);
 static void sl_output_discard_backlog(sl_impl_t *impl);
@@ -905,6 +900,18 @@ static int sl_set_scroll_region(int fd, int top, int bottom) {
 
 static int sl_reset_scroll_region(int fd) { return sl_wstr(fd, "\033[r"); }
 
+/* Start on a known blank row without erasing existing terminal contents. */
+static int sl_terminal_anchor_bottom(sl_impl_t *impl, int rows) {
+  int fd = impl->output_fd;
+  if (sl_reset_scroll_region(fd) != 0 || sl_wstr(fd, "\033[65535;1H") != 0)
+    return -1;
+  while (rows-- > 0) {
+    if (sl_wstr(fd, "\033D") != 0)
+      return -1;
+  }
+  return 0;
+}
+
 static void sl_release_auto_scroll_region(sl_impl_t *impl) {
   if (!impl || !impl->auto_scroll_pinned)
     return;
@@ -1053,21 +1060,6 @@ static int sl_output_nonblocking(int fd) {
   return flags;
 }
 
-/* Only query a cursor that is still physically owned by the producer. */
-static int sl_native_observe_producer(sl_t *self) {
-  sl_impl_t *impl = sl_impl(self);
-  int observed;
-  if (!impl || impl->rendered_rows > 0 ||
-      !sl_surface_native_cursor_live(impl->output_surface))
-    return -1;
-  observed = sl_query_cursor_row(self);
-  if (observed > 0)
-    sl_surface_native_observe(impl->output_surface, sl_terminal_columns(impl),
-                              sl_terminal_rows(impl), observed - 1,
-                              impl->probed_cursor_col);
-  return observed;
-}
-
 static int sl_handoff_endpoint_matches(const sl_impl_t *impl, int rows,
                                        int width) {
   return impl->terminal_recovery_rows == rows &&
@@ -1108,69 +1100,47 @@ static int sl_output_surface_reconcile(sl_t *self, int prompt_top) {
     return -1;
   }
   if (!impl->output_surface) {
-    int row, col, observed, flags = -1;
+    int rows = sl_terminal_rows(impl);
+    int row = rows - 1, col = 0, flags = -1;
+    int history = impl->native_history_rows;
     int recovering = impl->terminal_recovery_pending;
-    int saved_endpoint = recovering && impl->terminal_recovery_rows;
+    int saved_endpoint = impl->terminal_recovery_display;
     int was_raw = impl->raw_active;
     if (sl_enable_raw(self) != 0)
       return -1;
     if (recovering) {
       flags = sl_output_nonblocking(impl->output_fd);
-      /* Cancel a partial control before asking for the physical cursor. */
+      /* Cancel any incomplete control left by a short write. */
       if (flags < 0 || sl_wstr(impl->output_fd, "\030") != 0)
         goto restore_startup;
-      impl->cursor_position_probe = 0;
     }
-    observed = sl_query_cursor_row(self);
-    if (recovering && observed <= 0)
-      goto restore_startup;
-    col = observed > 0 ? impl->probed_cursor_col : 0;
-    row = observed > 0 ? observed - 1
-          : impl->native_cursor_valid
-              ? sl_terminal_rows(impl) - 1 - impl->native_cursor_below
-              : 0;
-    if (row < 0)
-      row = 0;
-    if (recovering) {
-      int rows = sl_terminal_rows(impl);
-      if (observed > rows || col >= width || width != sl_terminal_columns(impl))
+    if (saved_endpoint) {
+      if (!sl_handoff_endpoint_matches(impl, rows, width) ||
+          (impl->terminal_recovery_frame_count &&
+           (impl->terminal_recovery_frame_height != rows ||
+            impl->terminal_recovery_frame_width != width)))
         goto restore_startup;
-      /* A reply can describe a cursor already moved by a partial close or a
-       * previous recovery. Use the endpoint saved before those writes. */
-      if (saved_endpoint) {
-        if (!sl_handoff_endpoint_matches(impl, rows, width))
-          goto restore_startup;
-        row = impl->terminal_recovery_row;
-        col = impl->terminal_recovery_col;
-      } else if (impl->terminal_recovery_display) {
-        impl->terminal_recovery_row = row;
-        impl->terminal_recovery_col = col;
-        impl->terminal_recovery_rows = rows;
-        impl->terminal_recovery_width = width;
-        impl->terminal_recovery_line_open = col > 0;
-      }
-      if (impl->terminal_recovery_frame_count &&
-          (impl->terminal_recovery_frame_height != rows ||
-           impl->terminal_recovery_frame_width != width))
+      row = impl->terminal_recovery_row;
+      col = impl->terminal_recovery_col;
+      if (sl_reset_scroll_region(impl->output_fd) != 0 ||
+          sl_clear_handoff_frame(impl, rows) != 0 ||
+          sl_write_cursor_pos(impl->output_fd, row,
+                              col == width ? width - 1 : col) != 0)
         goto restore_startup;
-      if (impl->terminal_recovery_display &&
-          (sl_reset_scroll_region(impl->output_fd) != 0 ||
-           sl_clear_handoff_frame(impl, rows) != 0 ||
-           sl_write_cursor_pos(impl->output_fd, row,
-                               col == width ? width - 1 : col) != 0 ||
-           sl_wstr(impl->output_fd, "\033[?25h") != 0))
+    } else if (impl->native_cursor_valid &&
+               impl->native_cursor_height == rows &&
+               impl->native_cursor_width == width) {
+      row = impl->native_cursor_row;
+    } else {
+      if (sl_terminal_anchor_bottom(impl, 1) != 0)
         goto restore_startup;
-    }
-    /* At a saved producer position the newline count is already known.
-     * Column zero alone cannot distinguish CR from LF. */
-    if (!saved_endpoint && observed > 0 && col == 0 &&
-        !impl->native_cursor_valid && impl->output_trailing_newlines == 0)
+      history = 1;
       impl->output_trailing_newlines = 1;
-    if (!saved_endpoint && (impl->native_cursor_valid || recovering) && col > 0)
-      impl->output_trailing_newlines = 0;
+    }
+    if (recovering && sl_wstr(impl->output_fd, "\033[?25h") != 0)
+      goto restore_startup;
     impl->output_surface = sl_surface_create_native(
-        impl->output_fd, width, prompt_top, row, col,
-        impl->native_cursor_valid ? impl->native_history_rows : -1);
+        impl->output_fd, width, prompt_top, row, col, history);
     sl_surface_set_osc8(impl->output_surface, impl->osc8.enabled);
     if (saved_endpoint)
       sl_surface_native_recover_line(impl->output_surface,
@@ -1190,35 +1160,11 @@ static int sl_output_surface_reconcile(sl_t *self, int prompt_top) {
       sl_disable_raw(self);
     return impl->output_surface ? 0 : -1;
   }
-  /* A readline width hint cannot move a live, full-terminal producer cursor. */
-  if (sl_surface_native_cursor_live(impl->output_surface) &&
-      prompt_top == sl_terminal_rows(impl) &&
-      sl_surface_matches(impl->output_surface, width, prompt_top))
-    return 0;
-  /* A changed output region homes the hardware cursor, even if the prompt
-   * text is unchanged. Its cached cell comparison must still restore it. */
+  /* Changing the scroll region homes the cursor. Restore the editor cursor
+   * on the next paint even if all of its cells are unchanged. */
   if (!sl_surface_matches(impl->output_surface, width, prompt_top))
     impl->rendered_cursor_valid = 0;
-  {
-    int observed = sl_native_observe_producer(self);
-    int col, row, result;
-    if (impl->output_reconcile_active && observed <= 0 &&
-        sl_surface_native_cursor_live(impl->output_surface)) {
-      sl_set_error(
-          self, "terminal did not provide a cursor report for reconciliation");
-      return -1;
-    }
-    sl_surface_native_position(impl->output_surface, NULL, &col);
-    result = sl_surface_resize(impl->output_surface, width, prompt_top);
-    if (result == 0 && observed > 0) {
-      /* Margin changes home the hardware cursor. Retain the observed column
-       * and the producer row after any actual prompt growth. */
-      sl_surface_native_position(impl->output_surface, &row, NULL);
-      sl_surface_native_observe(impl->output_surface, width,
-                                sl_terminal_rows(impl), row, col);
-    }
-    return result;
-  }
+  return sl_surface_resize(impl->output_surface, width, prompt_top);
 }
 
 static tcflag_t sl_native_output_flags(tcflag_t flags) {
@@ -2761,6 +2707,13 @@ static int sl_render_reflow_row(const char *text, size_t len, int width,
     }
     pos += step;
   }
+  /* Trailing style escapes and a cursor just beyond the text do not create
+   * a physical row. The terminal clamps that cursor to the rightmost cell. */
+  if (cursor_row && *cursor_row >= rows) {
+    *cursor_row = rows - 1;
+    if (cursor_column)
+      *cursor_column = width - 1;
+  }
   return rows;
 }
 
@@ -4202,9 +4155,8 @@ static int sl_native_reconcile_rendered_frame(sl_t *self, int width,
                                               int height) {
   sl_impl_t *impl = sl_impl(self);
   struct winsize size;
-  int span, height_only, old_offset, offset, observed;
+  int span, height_only, old_offset, offset;
   int column, editor_offset;
-  int old_below;
   if (!sl_surface_is_native(impl->output_surface) || impl->rendered_rows == 0 ||
       (!sl_native_resize_pending(impl) && impl->rendered_width == width &&
        impl->rendered_height == height))
@@ -4212,43 +4164,13 @@ static int sl_native_reconcile_rendered_frame(sl_t *self, int width,
   span = impl->rendered_rows;
   height_only = impl->rendered_width == width;
   offset = old_offset = impl->rendered_cursor_row;
-  observed = impl->cursor_position_probe == 1 || impl->output_reconcile_active
-                 ? sl_query_cursor_row(self)
-                 : 0;
-  if (impl->output_reconcile_active && observed <= 0) {
-    sl_set_error(self,
-                 "terminal did not provide a cursor report for reconciliation");
-    return -1;
-  }
-  /* A retained frame can remain above the new bottom after terminal growth.
-   * Its cached top and height identify the physical cursor we last painted. */
-  old_below = impl->rendered_height - 1 - (impl->rendered_top_row + old_offset);
   if (ioctl(impl->output_fd, TIOCGWINSZ, &size) == 0 &&
       (size.ws_col != width || size.ws_row != height))
     return 1;
   if (!height_only)
     sl_render_reflow_geometry(impl, width, &span, &offset, &column,
                               &editor_offset);
-  /* A terminal may clamp a cursor at the old right edge to the last cell.
-   * Honor the observed position rather than the predicted reflow row. */
-  if (!height_only && observed > 0 && impl->rendered_cursor_col > 0 &&
-      impl->rendered_cursor_col % width == 0 &&
-      impl->probed_cursor_col == width - 1)
-    offset--;
-  if (observed > 0) {
-    int observed_below = height - observed;
-    if (height_only)
-      sl_surface_native_history_shift(
-          impl->output_surface, observed - 1 - offset - impl->rendered_top_row);
-    sl_surface_native_prompt_reflow(
-        impl->output_surface, observed_below - old_below + offset - old_offset);
-    impl->rendered_top_row = observed - 1 - offset;
-  } else {
-    /* No input-owned cursor observation is available in a feed. This is an
-     * endpoint estimate, not a model of the preceding transcript: earlier
-     * hard-ended lines may have reflowed as well. Do not retain those lines
-     * or wait here. See "Review exception: unobserved retained-frame resize"
-     * in docs/softline-mdf-stream-design.md. */
+  {
     int line_rows = sl_surface_native_reflow_rows(impl->output_surface, width);
     int top = impl->rendered_top_row + line_rows;
     int space =
@@ -4268,8 +4190,22 @@ static int sl_native_reconcile_rendered_frame(sl_t *self, int width,
     }
     if (space > available)
       space = available;
-    if (space > 0)
-      top += sl_surface_native_history_growth(impl->output_surface, space);
+    if (space > 0) {
+      int restored =
+          sl_surface_native_history_growth(impl->output_surface, space);
+      top += restored;
+      if (height > impl->rendered_height && restored < space) {
+        int last = span - 1 - offset;
+        int below = height - (top + span);
+        /* Use the retained prompt's physical cursor to anchor the existing
+         * cells. Indexing past the bottom returns any extra pulled lines to
+         * scrollback, so our lower bound becomes their exact displacement. */
+        if (below > 0 &&
+            (sl_write_cursor_down(impl->output_fd, last) != 0 ||
+             sl_surface_index_full_screen(impl->output_fd, below) != 0))
+          return -1;
+      }
+    }
     if (top + offset >= height)
       top -= top + offset - height + 1;
     sl_surface_native_history_shift(impl->output_surface,
@@ -4280,15 +4216,18 @@ static int sl_native_reconcile_rendered_frame(sl_t *self, int width,
     impl->rendered_top_row = top;
   }
   if (!height_only &&
-      sl_render_store_reflow(
-          impl, width, height, impl->rendered_top_row, span, offset,
-          observed > 0 ? impl->probed_cursor_col : column, editor_offset) != 0)
+      sl_render_store_reflow(impl, width, height, impl->rendered_top_row, span,
+                             offset, column, editor_offset) != 0)
     return -1;
   impl->rendered_height = height;
-  impl->rendered_cursor_valid =
-      observed > 0 && impl->probed_cursor_col == impl->rendered_cursor_col;
+  impl->rendered_cursor_valid = 0;
+  /* Retained rows can sit above the bottom after sparse viewport growth.
+   * The producer's margins must still exclude their actual cells. */
   if (sl_output_surface_reconcile(
-          self, sl_prompt_top(impl, sl_output_prompt_rows(impl))) != 0)
+          self,
+          !impl->active_prompt && height_only && impl->rendered_top_row >= 2
+              ? impl->rendered_top_row
+              : sl_prompt_top(impl, sl_output_prompt_rows(impl))) != 0)
     return -1;
   impl->rendered_width = width;
   if (ioctl(impl->output_fd, TIOCGWINSZ, &size) == 0 &&
@@ -4393,6 +4332,15 @@ static int sl_render_apply_absolute(sl_t *self, sl_render_t *render) {
       (impl->output_stream_active || sl_surface_is_native(impl->output_surface))
           ? sl_prompt_top(impl, sl_output_prompt_rows(impl))
           : top;
+  /* An explicit repaint can update a retained frame in place after growth.
+   * The next readline will re-anchor it at the bottom for editing. */
+  if (impl->output_reconcile_active && !impl->active_prompt &&
+      impl->rendered_rows == visible && impl->rendered_top_row >= 2 &&
+      impl->rendered_top_row < top) {
+    top = impl->rendered_top_row;
+    if (transcript_top > top)
+      transcript_top = top;
+  }
   if ((impl->output_stream_active || impl->output_surface) &&
       (!impl->output_surface ||
        !sl_surface_matches(impl->output_surface, width, transcript_top))) {
@@ -4406,8 +4354,6 @@ static int sl_render_apply_absolute(sl_t *self, sl_render_t *render) {
       return -1;
     }
   }
-  if (impl->rendered_rows == 0)
-    (void)sl_native_observe_producer(self);
   if (impl->render_reset) {
     if (sl_surface_is_native(impl->output_surface)) {
       if (sl_surface_native_restore_region(impl->output_surface) != 0)
@@ -4582,6 +4528,19 @@ retry:
     sl_set_error(self, "failed to format prompt viewport");
     return -1;
   }
+  if (impl->live_scroll_region && !sl_prompt_uses_absolute_rows(impl) &&
+      impl->rendered_rows == 0 && isatty(impl->input_fd) &&
+      isatty(impl->output_fd)) {
+    int rows = sl_terminal_rows(impl);
+    if (sl_terminal_anchor_bottom(impl, render.count < rows ? render.count
+                                                            : rows) != 0) {
+      sl_render_free(&render);
+      sl_set_error(self, "failed to reserve rows for the live prompt");
+      return -1;
+    }
+    impl->auto_scroll_pinned = 1;
+    impl->native_cursor_valid = 0;
+  }
   if (sl_prompt_uses_absolute_rows(impl)) {
     rc = sl_render_apply_absolute(self, &render);
     if (rc == 0) {
@@ -4595,27 +4554,19 @@ retry:
       sl_set_error(self, "failed to write prompt terminal output");
     return rc;
   }
+  impl->native_cursor_valid = 0;
   width = sl_terminal_width(impl);
   resizing_width = impl->rendered_rows > 0 && impl->rendered_width != width;
   if (impl->rendered_rows > 0 &&
       (resizing_width || impl->rendered_height != sl_terminal_height(impl))) {
     int columns = sl_terminal_columns(impl);
     int height = sl_terminal_height(impl);
-    int span, offset, column, editor_offset, observed, top;
+    int span, offset, column, editor_offset;
     /* Locate the old frame after terminal reflow. The new layout's row count
      * says nothing about which old row contains the hardware cursor. */
     sl_render_reflow_geometry(impl, columns, &span, &offset, &column,
                               &editor_offset);
-    observed = sl_query_cursor_row(self);
-    /* A cursor just beyond the text can be clamped to the final cell rather
-     * than reflowed onto another row. Use the physical report in that case. */
-    if (observed > 0 && impl->rendered_cursor_col > 0 &&
-        impl->rendered_cursor_col % columns == 0 &&
-        impl->probed_cursor_col == columns - 1)
-      offset--;
-    top = observed > 0 ? observed - 1 - offset : 0;
-    if (sl_render_store_reflow(impl, columns, height, top, span, offset,
-                               observed > 0 ? impl->probed_cursor_col : column,
+    if (sl_render_store_reflow(impl, columns, height, 0, span, offset, column,
                                editor_offset) != 0) {
       sl_render_free(&render);
       sl_set_error(self, "failed to reconcile readline prompt after resize");
@@ -4718,14 +4669,9 @@ static int sl_native_session_close(sl_t *self, int for_handoff) {
     if (result != 0)
       return -1;
   }
-  if (impl->rendered_rows == 0) {
-    if (sl_native_resize_pending(impl)) {
-      if (sl_output_surface_reconcile(self, sl_terminal_rows(impl)) != 0)
-        return -1;
-    } else {
-      (void)sl_native_observe_producer(self);
-    }
-  }
+  if (impl->rendered_rows == 0 && sl_native_resize_pending(impl) &&
+      sl_output_surface_reconcile(self, sl_terminal_rows(impl)) != 0)
+    return -1;
   if (handoff)
     sl_save_handoff_display(impl);
   if (!clear_frame && impl->rendered_rows > 0) {
@@ -4760,8 +4706,10 @@ static int sl_native_session_close(sl_t *self, int for_handoff) {
     return -1;
   impl->terminal_recovery_rows = 0;
   impl->terminal_recovery_frame_count = 0;
-  impl->native_cursor_below = sl_terminal_rows(impl) - 1 - row;
-  impl->native_cursor_valid = 1;
+  impl->native_cursor_row = row;
+  impl->native_cursor_height = sl_terminal_rows(impl);
+  impl->native_cursor_width = sl_terminal_columns(impl);
+  impl->native_cursor_valid = !handoff;
   impl->native_history_rows =
       sl_surface_native_history_rows(impl->output_surface);
   impl->cursor_hidden = 0;
@@ -4773,7 +4721,7 @@ static int sl_native_session_close(sl_t *self, int for_handoff) {
 
 /* Release terminal input ownership when handoff cannot finish rendering.
  * Retire the UI state while keeping the draft, undo and queue continuation.
- * A later begin acquires a fresh physical cursor and surface. */
+ * A later begin restores the saved frame and append point. */
 void sl_terminal_abandon(sl_t *self) {
   sl_impl_t *impl = sl_impl(self);
   if (!impl)
@@ -4785,7 +4733,9 @@ void sl_terminal_abandon(sl_t *self) {
     impl->terminal_recovery_display = 1;
     impl->native_cursor_valid = 0;
     if (!impl->terminal_recovery_rows)
-      sl_save_handoff_frame(impl);
+      sl_save_handoff_display(impl);
+    impl->native_history_rows =
+        sl_surface_native_history_rows(impl->output_surface);
   }
   sl_output_discard_backlog(impl);
   sl_disable_raw(self);
@@ -4793,7 +4743,6 @@ void sl_terminal_abandon(sl_t *self) {
   impl->output_surface = NULL;
   impl->output_stream_active = 0;
   impl->auto_scroll_pinned = 0;
-  impl->cursor_position_probe = 0;
   sl_render_store_clear(impl);
   sl_set_error(self,
                "terminal handoff failed; reopen when the terminal is usable");
@@ -5168,8 +5117,6 @@ static int sl_print_above_surface(sl_t *self, sl_stream_callback_t callback,
                             impl->rendered_top_row + impl->rendered_cursor_row,
                             impl->rendered_cursor_col) != 0)
     result = SL_ERROR_IO;
-  if (!impl->active_prompt)
-    (void)sl_native_observe_producer(self);
   if (!impl->active_prompt &&
       sl_write_frame_cursor(impl, sl_terminal_rows(impl), prompt_top, 0) != 0) {
     sl_set_error(self, "failed to position cursor after finite output");
@@ -5207,9 +5154,6 @@ static int sl_print_above_method_impl(sl_t *self, sl_stream_callback_t callback,
     sl_disable_raw(self);
     return rc;
   }
-  if (!sl_prompt_uses_absolute_rows(impl) && impl->live_scroll_region &&
-      impl->active_prompt)
-    (void)sl_try_pin_scroll_region(self);
   if (sl_prompt_uses_absolute_rows(impl)) {
     prompt_rows = sl_surface_is_native(impl->output_surface)
                       ? sl_output_prompt_rows(impl)
@@ -5308,7 +5252,7 @@ static int sl_print_above_method(sl_t *self, sl_stream_callback_t callback,
   impl->output_write_active = previous;
   if (result == SL_OK && impl->active_prompt && impl->live_scroll_region &&
       !sl_prompt_uses_absolute_rows(impl))
-    impl->scroll_region_probe_pending = 1;
+    impl->scroll_region_pin_pending = 1;
   return result;
 }
 
@@ -5426,11 +5370,7 @@ static int sl_output_stream_reconcile_method(sl_t *self) {
   if (sl_transcript_visible(self) || !isatty(impl->input_fd) ||
       !isatty(impl->output_fd))
     return SL_OK;
-  /* This explicit owner operation may observe input. Never enter it from a
-   * producer feed, and leave its incremental UTF-8/SGR validator untouched. */
   impl->output_reconcile_active = 1;
-  if (impl->cursor_position_probe < 0)
-    impl->cursor_position_probe = 0;
   if (impl->rendered_rows > 0)
     result = sl_render_apply(self, impl->active_prompt ? impl->active_prompt
                                                        : impl->retained_prompt);
@@ -5473,7 +5413,7 @@ static void sl_output_track_tail(sl_impl_t *impl, const char *bytes,
 
 /* SIGINT/EOF can restore raw mode while retaining a native stream. Borrow
  * only its output flags for this write, including when input and output share
- * a TTY temporarily acquired for a cursor report. Never flush queued input. */
+ * a TTY whose modes it does not own. Never flush queued input. */
 static int sl_output_write_native(sl_t *self, const char *bytes, size_t length,
                                   int row) {
   sl_impl_t *impl = sl_impl(self);
@@ -6251,14 +6191,13 @@ static sl_watch_t *sl_watch_find(sl_impl_t *impl, sl_watch_id_t id) {
   return NULL;
 }
 
-static ssize_t sl_pending_input_take(sl_impl_t *impl, char *ch) {
-  if (!impl || !ch || impl->pending_input_len == 0)
+static int sl_pending_input_take(sl_impl_t *impl, char *ch) {
+  if (impl->pending_input_len == 0)
     return 0;
   *ch = impl->pending_input[0];
-  if (impl->pending_input_len > 1)
-    memmove(impl->pending_input, impl->pending_input + 1,
-            impl->pending_input_len - 1);
   impl->pending_input_len--;
+  memmove(impl->pending_input, impl->pending_input + 1,
+          impl->pending_input_len);
   return 1;
 }
 
@@ -6300,7 +6239,7 @@ retry:
   if (sl_image_prepare(self, &image_wait) != SL_OK)
     return -1;
   errno = 0;
-  if (sl_pending_input_take(impl, ch) == 1)
+  if (sl_pending_input_take(impl, ch))
     return 1;
   sl_terminal_reap(impl);
   count = 1;
@@ -6437,15 +6376,12 @@ retry:
     }
   }
   /* A callback that completes this prompt leaves all concurrently received
-   * input for the next prompt. This must precede the buffered-input check and
-   * fresh probe below because either may consume a byte. */
+   * input for the next prompt. */
   if (impl->request_submit || impl->request_cancel || impl->request_suspend) {
     errno = 0;
     return 0;
   }
-  /* A callback may probe the terminal and preserve input received during the
-   * probe. That buffered byte takes precedence over the stale poll snapshot. */
-  if (sl_pending_input_take(impl, ch) == 1)
+  if (sl_pending_input_take(impl, ch))
     return 1;
   /* The terminal may also become ready while a watch callback runs. The poll
    * snapshot predates that callback, so refresh terminal readiness before an
@@ -6481,39 +6417,6 @@ static ssize_t sl_read_available_byte(sl_t *self, char *ch) {
   return sl_read_input_byte(self, ch, 0);
 }
 
-static int sl_pending_input_append(sl_impl_t *impl, const char *text,
-                                   size_t len) {
-  size_t needed;
-  size_t cap;
-  char *next;
-  if (!impl || !text)
-    return -1;
-  if (len == 0)
-    return 0;
-  if (len > (size_t)-1 - impl->pending_input_len)
-    return -1;
-  needed = impl->pending_input_len + len;
-  if (needed > impl->pending_input_cap) {
-    cap = impl->pending_input_cap ? impl->pending_input_cap
-                                  : SL_PENDING_INPUT_MAX;
-    while (cap < needed) {
-      if (cap > (size_t)-1 / 2) {
-        cap = needed;
-        break;
-      }
-      cap *= 2;
-    }
-    next = (char *)realloc(impl->pending_input, cap);
-    if (!next)
-      return -1;
-    impl->pending_input = next;
-    impl->pending_input_cap = cap;
-  }
-  memcpy(impl->pending_input + impl->pending_input_len, text, len);
-  impl->pending_input_len += len;
-  return 0;
-}
-
 static int sl_decimal_append_int(int *value, char ch) {
   int digit;
   if (!value || ch < '0' || ch > '9')
@@ -6525,217 +6428,26 @@ static int sl_decimal_append_int(int *value, char ch) {
   return 0;
 }
 
-/* Read a Device Status Report cursor-position reply while preserving any user
- * input that happens to arrive first. A terminal that does not support DSR is
- * simply left on the ordinary readline rendering path. */
-static int sl_read_cursor_report(sl_t *self, int request) {
-  sl_impl_t *impl;
-  char candidate[SL_PENDING_INPUT_MAX];
-  size_t candidate_len;
-  struct timeval started;
-  int row;
-  int col;
-  int have_row;
-  int have_col;
-  impl = sl_impl(self);
-  if (!impl || impl->cursor_position_probe < 0 || !isatty(impl->input_fd) ||
-      !isatty(impl->output_fd))
-    return -1;
-  if (request && sl_wstr(impl->output_fd, "\033[6n") != 0)
-    return SL_ERROR_IO;
-  if (gettimeofday(&started, NULL) != 0) {
-    impl->cursor_position_probe = -1;
-    return -1;
-  }
-  candidate_len = 0;
-  for (;;) {
-    struct timeval now;
-    long elapsed_ms;
-    int timeout_ms;
-    char ch;
-    ssize_t n;
-    int valid;
-    size_t i;
-    size_t restart;
-    if (gettimeofday(&now, NULL) != 0)
-      break;
-    elapsed_ms = (long)(now.tv_sec - started.tv_sec) * 1000L +
-                 (long)(now.tv_usec - started.tv_usec) / 1000L;
-    if (elapsed_ms >= 100L)
-      break;
-    timeout_ms = 100 - (int)elapsed_ms;
-    n = sl_read_terminal_byte(impl, &ch, timeout_ms);
-    if (n != 1)
-      break;
-    if (candidate_len == 0 && ch != '\033') {
-      if (sl_pending_input_append(impl, &ch, 1) != 0)
-        goto preserve_failed;
-      continue;
-    }
-    if (candidate_len >= sizeof(candidate)) {
-      if (sl_pending_input_append(impl, candidate, candidate_len) != 0 ||
-          sl_pending_input_append(impl, &ch, 1) != 0)
-        goto preserve_failed;
-      candidate_len = 0;
-      continue;
-    }
-    candidate[candidate_len++] = ch;
-    valid = 1;
-    row = 0;
-    col = 0;
-    have_row = 0;
-    have_col = 0;
-    if (candidate[0] != '\033')
-      valid = 0;
-    if (valid && candidate_len > 1 && candidate[1] != '[')
-      valid = 0;
-    i = 2;
-    while (valid && i < candidate_len && candidate[i] >= '0' &&
-           candidate[i] <= '9') {
-      if (sl_decimal_append_int(&row, candidate[i]) != 0) {
-        valid = 0;
-        break;
-      }
-      have_row = 1;
-      i++;
-    }
-    if (valid && i < candidate_len && candidate[i] != ';')
-      valid = 0;
-    if (valid && i < candidate_len) {
-      i++;
-      while (i < candidate_len && candidate[i] >= '0' && candidate[i] <= '9') {
-        if (sl_decimal_append_int(&col, candidate[i]) != 0) {
-          valid = 0;
-          break;
-        }
-        have_col = 1;
-        i++;
-      }
-      if (i < candidate_len && candidate[i] != 'R')
-        valid = 0;
-      else if (i < candidate_len)
-        i++;
-    }
-    if (!valid || i < candidate_len) {
-      restart = candidate_len;
-      for (i = candidate_len; i > 1; i--) {
-        if (candidate[i - 1] == '\033') {
-          restart = i - 1;
-          break;
-        }
-      }
-      if (sl_pending_input_append(impl, candidate, restart) != 0)
-        goto preserve_failed;
-      if (restart < candidate_len) {
-        memmove(candidate, candidate + restart, candidate_len - restart);
-        candidate_len -= restart;
-      } else {
-        candidate_len = 0;
-      }
-      continue;
-    }
-    if (have_row && have_col && i == candidate_len &&
-        candidate[candidate_len - 1] == 'R') {
-      if (row > 0 && col > 0) {
-        impl->cursor_position_probe = 1;
-        impl->probed_cursor_col = col - 1;
-        return row;
-      }
-      break;
-    }
-  }
-  if (sl_pending_input_append(impl, candidate, candidate_len) != 0)
-    goto preserve_failed;
-  impl->cursor_position_probe = -1;
-  return -1;
-
-preserve_failed:
-  sl_set_error(self, "failed to preserve input during cursor probe");
-  impl->cursor_position_probe = -1;
-  return -1;
-}
-
-/* A returning signal handler leaves the session's input restored. Cursor
- * reports must still be read without echo or canonical line buffering. */
-static int sl_cursor_report_begin(sl_t *self, struct termios *original) {
-  sl_impl_t *impl = sl_impl(self);
-  struct termios query;
-  if (impl->raw_active)
-    return 0;
-  if (tcgetattr(impl->input_fd, original) != 0) {
-    sl_set_error(self, "failed to read input attributes for cursor report");
-    return -1;
-  }
-  query = *original;
-  query.c_iflag &= ~(BRKINT | ICRNL | INPCK | ISTRIP | IXON);
-  query.c_cflag |= CS8;
-  query.c_lflag &= ~(ECHO | ICANON | IEXTEN | ISIG);
-  query.c_cc[VMIN] = 0;
-  query.c_cc[VTIME] = 1;
-  /* Preserve queued user input while changing the report-reading mode. */
-  if (tcsetattr(impl->input_fd, TCSANOW, &query) != 0) {
-    sl_set_error(self, "failed to acquire input for cursor report");
-    return -1;
-  }
-  return 1;
-}
-
-static int sl_cursor_report_end(sl_t *self, const struct termios *original,
-                                int temporary) {
-  sl_impl_t *impl = sl_impl(self);
-  if (temporary && tcsetattr(impl->input_fd, TCSANOW, original) != 0) {
-    sl_set_error(self, "failed to restore input after cursor report");
-    return -1;
-  }
-  return 0;
-}
-
-static int sl_query_cursor_row(sl_t *self) {
-  sl_impl_t *impl = sl_impl(self);
-  struct termios original;
-  int temporary, result;
-  if (!impl || impl->output_write_active || impl->cursor_position_probe < 0 ||
-      !isatty(impl->input_fd) || !isatty(impl->output_fd))
-    return -1;
-  temporary = sl_cursor_report_begin(self, &original);
-  if (temporary < 0)
-    return -1;
-  result = sl_read_cursor_report(self, 1);
-  if (sl_cursor_report_end(self, &original, temporary) != 0)
-    return -1;
-  return result;
-}
-
 static int sl_try_pin_scroll_region(sl_t *self) {
-  sl_impl_t *impl;
-  int cursor_row;
-  int prompt_top;
-  int prompt_bottom;
-  impl = sl_impl(self);
+  sl_impl_t *impl = sl_impl(self);
   if (!impl || !impl->live_scroll_region || impl->auto_scroll_pinned ||
-      !impl->active_prompt || impl->rendered_rows < 1)
+      !impl->active_prompt || impl->rendered_rows < 1 ||
+      !isatty(impl->input_fd) || !isatty(impl->output_fd))
     return 0;
-  cursor_row = sl_query_cursor_row(self);
-  if (cursor_row < 1)
-    return 0;
-  prompt_top = cursor_row - 1 - impl->rendered_cursor_row;
-  prompt_bottom = prompt_top + impl->rendered_rows - 1;
-  if (prompt_top < 0 || prompt_bottom < sl_terminal_height(impl) - 1)
-    return 0;
-  impl->auto_scroll_pinned = 1;
-  impl->rendered_top_row = prompt_top;
-  impl->rendered_height = sl_terminal_rows(impl);
-  return 1;
+  /* Clearing our relative frame lets the next paint reserve known rows. */
+  if (sl_render_clear_active(self) != 0)
+    return -1;
+  return sl_render_apply(self, impl->active_prompt);
 }
 
 /* Late ordinary-readline ownership is acquired between producer callbacks,
  * never within a feed call. Multiple writes in one callback stay immediate. */
 static void sl_refresh_scroll_region(sl_t *self) {
   sl_impl_t *impl = sl_impl(self);
-  if (!impl || impl->output_write_active ||
-      !impl->scroll_region_probe_pending || sl_transcript_visible(self))
+  if (!impl || impl->output_write_active || !impl->scroll_region_pin_pending ||
+      sl_transcript_visible(self))
     return;
-  impl->scroll_region_probe_pending = 0;
+  impl->scroll_region_pin_pending = 0;
   if (impl->live_scroll_region && !sl_prompt_uses_absolute_rows(impl))
     (void)sl_try_pin_scroll_region(self);
 }
@@ -7949,11 +7661,7 @@ static char *sl_readline_impl(sl_t *self, const char *prompt,
   }
   impl->readline_suspended = 0;
   memset(&impl->suspended_search, 0, sizeof(impl->suspended_search));
-  /* Acquire optional scroll-region ownership before invoking producers.
-   * Feed callbacks themselves never perform a terminal round trip. */
-  impl->scroll_region_probe_pending = 0;
-  if (impl->live_scroll_region && !sl_prompt_uses_absolute_rows(impl))
-    (void)sl_try_pin_scroll_region(self);
+  impl->scroll_region_pin_pending = 0;
   done = 0;
   eof = 0;
   cancelled = 0;
@@ -9079,12 +8787,12 @@ static void sl_destroy_method(sl_t *self) {
     sl_surface_destroy(impl->output_surface);
     free(impl->history_edit);
     sl_history_search_cleanup(self, &impl->suspended_search);
-    free(impl->pending_input);
     free(impl->retained_prompt);
     sl_edit_destroy(&impl->edit);
     sl_completion_reset(&impl->completion);
     free(impl->completion.providers);
     free(impl->buf);
+    free(impl->pending_input);
     free(impl);
   }
   free(self);
@@ -9234,10 +8942,10 @@ static int sl_set_live_scroll_region_method(sl_t *self, int enabled) {
     return SL_ERROR_INVALID;
   }
   if (!enabled)
-    impl->scroll_region_probe_pending = 0;
+    impl->scroll_region_pin_pending = 0;
   else if (!impl->live_scroll_region && impl->active_prompt &&
            !sl_prompt_uses_absolute_rows(impl))
-    impl->scroll_region_probe_pending = 1;
+    impl->scroll_region_pin_pending = 1;
   if (!enabled && impl->auto_scroll_pinned) {
     if (sl_render_clear_active(self) != 0) {
       sl_set_error(self, "failed to leave live scroll region");

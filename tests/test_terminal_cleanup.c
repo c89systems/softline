@@ -58,22 +58,9 @@ static int adapter(void *context, sl_terminal_event_t *event) {
     ++p->closed;
   return SL_OK;
 }
-/* Only cursor-report framing is retained by this terminal fixture. */
 static void drain(int master) {
-  static const char query[] = "\033[6n";
   char bytes[2048];
-  size_t i;
-  ssize_t got = read(master, bytes, sizeof(bytes));
-  static size_t matched;
-  for (i = 0; got > 0 && i < (size_t)got; ++i) {
-    matched = bytes[i] == query[matched] ? matched + 1
-              : bytes[i] == '\033'       ? 1
-                                         : 0;
-    if (matched == sizeof(query) - 1) {
-      (void)write(master, "\033[1;1R", 6);
-      matched = 0;
-    }
-  }
+  (void)read(master, bytes, sizeof(bytes));
 }
 static int backpressure(int entry) {
   int master, slave, notice[2], control[2], report[2], status, received;

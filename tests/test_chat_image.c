@@ -374,7 +374,7 @@ static void stop_view(sl_t *sl, void *context) {
 }
 static int default_status_unchanged(sl_t *sl, int master) {
   char output[8192];
-  size_t used = 0, scanned = 0;
+  size_t used = 0;
   ssize_t count;
   pid_t child;
   int status = 0, failed = 1;
@@ -394,7 +394,6 @@ static int default_status_unchanged(sl_t *sl, int master) {
   output[0] = 0;
   do {
     struct pollfd ready;
-    const char *query;
     pid_t done;
     ready.fd = master;
     ready.events = POLLIN;
@@ -413,11 +412,6 @@ static int default_status_unchanged(sl_t *sl, int master) {
     output[used] = 0;
     if (used + 1 == sizeof(output))
       break;
-    while ((query = strstr(output + scanned, "\033[6n")) != NULL) {
-      if (write(master, "\033[1;1R", 6) != 6)
-        goto cleanup;
-      scanned = (size_t)(query - output) + 4;
-    }
     done = waitpid(child, &status, WNOHANG);
     if (done == child) {
       child = -1;

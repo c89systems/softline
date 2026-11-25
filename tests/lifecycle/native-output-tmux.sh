@@ -34,6 +34,7 @@ live_resize() {
 capture_runner() {
   local destination=$1 command deadline captured
   printf -v command 'exec %q %q' "$BASH" "$work/runner"
+  run clear-history -t unicode:0.0
   run respawn-pane -k -t unicode:0.0 "$command"
   deadline=$((SECONDS + 5))
   while [[ $(run display-message -p -t unicode:0.0 '#{pane_dead}') != 1 ]]; do
@@ -51,11 +52,11 @@ capture_runner() {
 render() {
   local text=$1 chunk=$2 destination=$3
   {
-    printf '#!/usr/bin/env bash\nset -euo pipefail\n'
+    printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail' "printf '\\033[2J\\033[H'"
     if ((chunk)); then
       printf 'exec %q --chunks %q %q\n' "$fixture" "$text" "$chunk"
     else
-      printf 'printf '\''%%s\\r\\n'\'' %q\n' "$text"
+      printf 'printf '\''\\033[r\\033[65535;1H\\033D%%s\\r\\n'\'' %q\n' "$text"
     fi
   } > "$work/runner"
   capture_runner "$destination"
@@ -79,7 +80,11 @@ for text in "${texts[@]}"; do
   mapfile -t chunks < <(printf '%s\n' 1 4 8 "$length" | sort -nu)
   for chunk in "${chunks[@]}"; do
     render "$text" "$chunk" "$work/actual"
-    cmp "$work/expected" "$work/actual" || { echo "tmux mismatch: chunk=$chunk source=$text" >&2; exit 1; }
+    cmp "$work/expected" "$work/actual" || {
+      diff -u "$work/expected" "$work/actual" >&2 || :
+      echo "tmux mismatch: chunk=$chunk source=$text" >&2
+      exit 1
+    }
   done
 done
 
@@ -155,18 +160,24 @@ done
 
 run resize-window -t unicode:0 -x 60 -y 24
 check_quotes() {
-  local label=$1 initial=$2 between=$3 outside=$4 expected=$5 row
+  local label=$1 initial=$2 between=$3 outside=$4 expected=$5
   {
     printf '#!/usr/bin/env bash\nset -euo pipefail\n'
     printf 'exec %q --quote-spacing %q %q %q\n' "$fixture" "$initial" "$between" "$outside"
   } > "$work/runner"
   capture_runner "$work/actual"
-  # Quotes end in two LFs; command substitution trimmed only empty screen rows.
-  row=$(printf '%s\n' "$expected" | wc -l)
-  printf '%s\n%s,0\n' "$expected" "$((row + 1))" > "$work/expected"
-  cmp "$work/expected" "$work/actual" || {
+  # The first stream starts at the bottom of the existing viewport. The
+  # preexisting text survives, and every separator after FIRST stays exact.
+  printf '%s\n' "$expected" | sed -n '/^> FIRST$/,$p' > "$work/expected"
+  sed '$d' "$work/actual" | sed -n '/^> FIRST$/,$p' > "$work/quotes"
+  if [[ -n $initial ]]; then
+    diff -u <(printf '%s\n' "$initial" | sed '/^$/d') \
+      <(sed '/^> FIRST$/,$d; /^$/d' "$work/actual")
+  fi
+  [[ $(tail -1 "$work/actual") == 23,0 ]]
+  cmp "$work/expected" "$work/quotes" || {
     echo "Quote spacing mismatch: $label" >&2
-    diff -u "$work/expected" "$work/actual" >&2 || :
+    diff -u "$work/expected" "$work/quotes" >&2 || :
     exit 1
   }
   echo "Quote spacing passed: $label"
@@ -206,6 +217,11 @@ for kind in unfinished boundary cr unicode wrap close; do
   live_step s
   printf i >&8
   live_ack
+  # Grow and clear the draft to move the producer above the rows that will
+  # survive the next shrink. A fresh native stream starts at the bottom.
+  live_step b
+  live_step r
+  live_step e
   live_step r
   live_resize 5
   live_resize 4

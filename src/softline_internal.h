@@ -152,13 +152,15 @@ typedef struct sl_impl {
   struct sl_output_backlog *output_backlog;
   int input_fd;
   int output_fd;
+  /* Input handed back by a terminal relay as it exits. */
+  char *pending_input;
+  size_t pending_input_len;
   int screen_width;
   int live_scroll_region;
   int clear_prompt_on_exit;
   int auto_scroll_pinned;
-  int scroll_region_probe_pending;
+  int scroll_region_pin_pending;
   int output_stream_active;
-  /* Feed calls never wait for a terminal cursor-position reply. */
   int output_write_active;
   int output_trailing_newlines;
   int output_ansi_state;
@@ -167,11 +169,9 @@ typedef struct sl_impl {
   char output_pending[SL_OSC8_MAX_BYTES];
   size_t output_pending_len;
   sl_surface_t *output_surface;
-  int cursor_position_probe;
-  int probed_cursor_col;
-  /* Last native teardown position, for terminals without cursor reports. */
+  /* Append point after an ordinary stream close. */
   int native_cursor_valid;
-  int native_cursor_below;
+  int native_cursor_row, native_cursor_height, native_cursor_width;
   int native_history_rows; /* Viewport shifts only; no transcript storage. */
   char *buf;
   size_t len;
@@ -255,9 +255,6 @@ typedef struct sl_impl {
   int request_queue_dispatch;
   int plain_pending;
   char plain_pending_ch;
-  char *pending_input;
-  size_t pending_input_len;
-  size_t pending_input_cap;
   sl_readline_status_t last_readline_status;
   sl_idle_callback_t idle_callback;
   void *idle_userdata;

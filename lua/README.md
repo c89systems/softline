@@ -373,25 +373,19 @@ live scroll regions, status lines, and spinners are off; the theme is
 - `sl:output_stream_reconcile()` observes a settled resize before synchronous
   producer continuation, outside feeds on the owner thread. It preserves draft,
   cursor, queue, history, status, queued input, terminal modes and split stream
-  parsing while repainting only owned prompt cells. A required cursor reply
-  waits up to 100 ms; failure returns `nil, error`. An open stream is required;
+  parsing while updating owned prompt cells. A terminal I/O failure returns
+  `nil, error`. An open stream is required;
   redirected sessions are a no-op. Check success before resuming output.
 - `sl:output_stream_begin()` opens one persistent output session above the
-  prompt. Transcript output starts at the existing terminal cursor; the editable
-  prompt starts at the bottom. Physical resize preserves the terminal's native
-  prompt position; only prompt layout changes update its cells. Producer bytes
-  pass through unchanged. Before the first frame, output uses the full terminal and
+  prompt. A fresh native session starts at the bottom and preserves existing
+  text in the terminal and its scrollback. Producer bytes pass through unchanged. Before the first frame, output uses the full terminal and
   leaves its cursor in place between writes, preserving native autowrap and
-  Unicode clusters. Cursor reports occur at ownership and resize boundaries.
-  Feed calls have no intentional delay and never request or wait for cursor
-  replies, including during resize. Local scalar cell widths, shared with prompt
+  Unicode clusters. Softline uses terminal dimensions and tracked geometry
+  through resize and handoff. Local scalar cell widths, shared with prompt
   layout, track cursor advances. Terminal Unicode versions and cluster shaping
   can differ from the Unicode 16.0 accounting.
-  The delta fallback cannot infer earlier hard-ended ASCII reflow or unknown
-  terminal history if a retained prompt resizes without an input-owned observation,
-  including after readline returns. The active input loop observes resize
-  before dispatching producer watches. This delta fallback is deliberately
-  immediate; see the stream design's unobserved retained-frame resize exception.
+  Earlier hard-ended output can change its visible row count when the terminal
+  reflows on width changes. Softline tracks its own prompt and append point.
   With chat visible, output reaches the terminal directly without buffering
   glyph spans or grapheme tails. Physical resize can race an in-flight VT batch
   and misplace even ASCII output. The unpaused VTE diagnostic
@@ -450,8 +444,8 @@ live scroll regions, status lines, and spinners are off; the theme is
   `sl:output_stream_begin()` before resuming editing. An incomplete ANSI or
   UTF-8 sequence returns `nil, softline.ERROR_INVALID` and leaves the session
   open for the remaining bytes. On `nil, softline.ERROR_IO`, the session
-  closes and releases terminal input ownership. Reopening after a native I/O
-  failure requires a cursor-position reply before restoring the terminal UI.
+  closes and releases terminal input ownership. Reopening restores the saved
+  output position and clears surviving prompt rows at matching dimensions.
 - `sl:output_stream_end()` ends the producer session without finishing an
   external renderer document. While an editor is active it retains the
   prompt and scroll region for later finite output or another stream. Otherwise
@@ -461,9 +455,9 @@ live scroll regions, status lines, and spinners are off; the theme is
   `clear_prompt_on_exit = true` clears the whole prompt area and returns below
   the transcript. With no rendered prompt it returns below output.
   Closing an idle native session also releases terminal
-  input ownership. Reopening a closed native session probes the cursor again.
-  A nonzero column restarts quote separation for an unfinished externally
-  written line. Otherwise known spacing remains. Non-TTY output adds no
+  input ownership. An ordinary close and reopen retain the tracked position
+  while Softline owns terminal output. Use the handoff close before handing
+  terminal output to another writer. Non-TTY output adds no
   teardown controls. If the last write left an ANSI or UTF-8 sequence
   incomplete, it returns `nil, softline.ERROR_INVALID` and keeps the session
   open so the missing bytes can be supplied. Only one session may be open per

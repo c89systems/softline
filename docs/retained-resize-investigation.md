@@ -12,11 +12,10 @@ Its producer acknowledges a FIFO barrier after all 500 partial-line characters
 have been emitted. The driver verifies those cells before resizing and releasing
 the next write, excluding a resize racing the producer.
 
-The repair is `sl_output_stream_reconcile()`, called on the owner thread after
-resize settles and before synchronous output resumes. It observes and repaints
-the owned frame without entering/cancelling readline, changing input state,
-waiting inside feeds or retaining/replaying transcript bytes. Check its result:
-a missing cursor report returns `SL_ERROR_IO`. C receiver/free-function and Lua
+The repair introduced `sl_output_stream_reconcile()` for the owner thread after
+resize settles and before synchronous output resumes. It originally queried the
+cursor to locate the frame. Current reconciliation uses the tracked frame and
+PTY dimensions and preserves queued input. C receiver/free-function and Lua
 methods are equivalent. The repair originally required rebuilding consumers for
 ABI 1, one increment from released v0.10.0's ABI 0, because the receiver gained
 a method. Current consumers must use the current matching header/library pair.
@@ -32,9 +31,9 @@ ctest --test-dir build/debug -R '^(softline_retained_.*|softline_reconcile|softl
 These tests cover partial/complete ASCII producer lines, shrink/growth, custom
 prompts, status, early/late drafts, watch/yield controls and all 120 original
 producer rows appearing unchanged exactly once. PTY protocol checks cover draft
-and cursor, queue, history, readline status, terminal modes, type-ahead before a
-cursor reply, split UTF-8/SGR, missing replies, retry and off-TTY forwarding.
-The feed-latency gate continues to reject any cursor request inside a feed.
+and cursor, queue, history, readline status, terminal modes, type-ahead, split
+UTF-8/SGR and off-TTY forwarding. PTY capture rejects cursor queries through
+stream setup, resize reconciliation, writes and close.
 
 For diagnosis of callers omitting reconciliation, the standalone suite remains:
 

@@ -87,6 +87,7 @@ for filled in 1 0; do
     printf -v recording 'exec cat > %q' "$work/output"
     run pipe-pane -t retained:0.0 "$recording"
     resize 80 30
+    step c
     before=$(run display-message -p -t retained:0.0 '#{cursor_y},#{cursor_x}')
     case $kind in ansi) step a ;; utf8) step u ;; invalid) step v ;; esac
     after=$(run display-message -p -t retained:0.0 '#{cursor_y},#{cursor_x}')
@@ -99,6 +100,7 @@ for filled in 1 0; do
     wait_for unchanged || { echo "Transcript changed: $kind filled=$filled, cursor $before -> $after" >&2; exit 1; }
     wait_for test -s output
     ! LC_ALL=C grep -Fq $'\033[6n' output
+    ! LC_ALL=C grep -Fq $'\033[6n' reconciliation
     case $kind in ansi) step A ;; utf8) step U ;; esac
     step p
     snapshot actual

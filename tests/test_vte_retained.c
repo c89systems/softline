@@ -42,6 +42,7 @@ static int start_session(struct session *g, const char *fixture,
                          const char *build, const char *mode,
                          const char *source, int filled, int homed, int tabs,
                          int rows, const char *prompt) {
+  static const char initial_boundary[] = "\033[r\033[65535;1H\033D";
   char prior[4096];
   size_t used = 0;
   int master, slave, index;
@@ -70,6 +71,9 @@ static int start_session(struct session *g, const char *fixture,
     if (output_parsed(&g->actual, -1) || output_parsed(&g->direct, -1))
       return 1;
   }
+  v.feed(g->direct.terminal, initial_boundary, sizeof(initial_boundary) - 1);
+  if (output_parsed(&g->direct, -1))
+    return 1;
   if (snprintf(g->work, sizeof(g->work), "%s/vte-retained.XXXXXX", build) >=
           (int)sizeof(g->work) ||
       !mkdtemp(g->work))

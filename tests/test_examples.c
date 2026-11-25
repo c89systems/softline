@@ -88,7 +88,7 @@ static void term_init(struct terminal *t, int fd, int cols, int rows) {
 static void term_scroll(struct terminal *t) {
   int row;
   t->region_scrolls++;
-  if (t->scroll_top == 0 && t->scroll_bottom == t->rows - 1) {
+  if (t->scroll_top == 0) {
     memcpy(t->history[t->scrolls % 128u], t->cells[0], (size_t)t->cols + 1);
     t->scrolls++;
   }
@@ -119,6 +119,27 @@ static void term_resize(struct terminal *t, int cols, int rows) {
       memset(t->cells[row] + old_cols, ' ', (size_t)(cols - old_cols));
     t->cells[row][cols] = 0;
   }
+  if (rows > old_rows) {
+    int pulled = rows - old_rows;
+    if ((unsigned int)pulled > t->scrolls)
+      pulled = (int)t->scrolls;
+    if (pulled > 0) {
+      memmove(t->cells + pulled, t->cells,
+              (size_t)old_rows * sizeof(t->cells[0]));
+      t->scrolls -= (unsigned int)pulled;
+      for (row = 0; row < pulled; ++row) {
+        const char *old = t->history[(t->scrolls + (unsigned int)row) % 128u];
+        size_t used = strlen(old);
+        if (used > (size_t)cols)
+          used = (size_t)cols;
+        memcpy(t->cells[row], old, used);
+        memset(t->cells[row] + used, ' ', (size_t)cols - used);
+        t->cells[row][cols] = 0;
+      }
+      t->row += pulled;
+      t->saved_row += pulled;
+    }
+  }
   t->cols = cols;
   t->rows = rows;
   t->scroll_bottom = rows - 1;
@@ -141,15 +162,6 @@ static void term_csi(struct terminal *t, char final) {
   part = strchr(t->csi, ';');
   b = part ? atoi(part + 1) : 0;
   switch (final) {
-  case 'n':
-    if (a == 6) {
-      char reply[48];
-      int count = snprintf(reply, sizeof(reply), "\033[%d;%dR", t->row + 1,
-                           t->col < t->cols ? t->col + 1 : t->cols);
-      if (count > 0 && count < (int)sizeof(reply))
-        (void)write(t->fd, reply, (size_t)count);
-    }
-    break;
   case 'r':
     t->region_updates++;
     t->scroll_top = a > 0 ? a - 1 : 0;
@@ -264,6 +276,11 @@ static void term_feed(struct terminal *t, const char *bytes, size_t len) {
       } else if (ch == '8') {
         t->row = t->saved_row < t->rows ? t->saved_row : t->rows - 1;
         t->col = t->saved_col <= t->cols ? t->saved_col : t->cols - 1;
+      } else if (ch == 'D') {
+        if (t->row == t->scroll_bottom)
+          term_scroll(t);
+        else if (t->row < t->rows - 1)
+          t->row++;
       }
       t->escape = ch == '[' ? 2 : 0;
       if (t->escape == 2)
@@ -1389,6 +1406,10 @@ static int frame_producer_ready(sl_t *sl, const sl_watch_event_t *event,
     result = sl_prompt_queue_append(sl, queued[byte - 1], 0, NULL);
     if (result == SL_OK)
       result = sl_set_status_message(sl, "notice");
+  } else if (byte == 5) {
+    result = sl_set_buffer(sl, "1\n2\n3\n4\n5\n6\n7\n8");
+  } else if (byte == 6) {
+    result = sl_set_buffer(sl, "");
   } else if (byte == '-') {
     char *line = NULL;
     result = sl_prompt_queue_take(sl, 0, &line);
@@ -1719,7 +1740,7 @@ test_queue_after_output_fills_prompt_region(sl_prompt_theme_t theme) {
   struct winsize ws;
   struct frame_producer producer;
   int fd, slave, commands[2], ack[2], i;
-  int transcript_rows;
+  int transcript_rows, sparse_row;
   unsigned int scrolls;
   size_t mark;
   char transcript[MAX_ROWS][MAX_COLS + 1];
@@ -1782,15 +1803,24 @@ test_queue_after_output_fills_prompt_region(sl_prompt_theme_t theme) {
   ASSERT_TRUE(wait_screen(&t, "> ", 3000) == 0, "initial prompt missing");
   ASSERT_TRUE(t.scroll_bottom == 11 && strstr(t.cells[12], "fixture"),
               "empty queue or status message reserved unused rows");
+  ASSERT_TRUE(frame_exchange(&t, commands[1], ack[0], 5) == 0 &&
+                  frame_exchange(&t, commands[1], ack[0], '#') == 0,
+              "failed to grow the draft above the producer");
+  sparse_row = t.scroll_bottom;
+  ASSERT_TRUE(sparse_row < 9 &&
+                  frame_exchange(&t, commands[1], ack[0], 6) == 0 &&
+                  frame_exchange(&t, commands[1], ack[0], '!') == 0,
+              "failed to create available output rows");
+  scrolls = t.region_scrolls;
   ASSERT_TRUE(frame_exchange(&t, commands[1], ack[0], 'p') == 0 &&
                   frame_exchange(&t, commands[1], ack[0], 1) == 0 &&
-                  t.scroll_bottom == 9 && t.region_scrolls == 0 &&
-                  t.cells[0][0] == 'p',
+                  t.scroll_bottom == 9 && t.region_scrolls == scrolls &&
+                  t.cells[sparse_row][0] == 'p',
               "prompt growth scrolled output despite available space");
   ASSERT_TRUE(frame_exchange(&t, commands[1], ack[0], '-') == 0 &&
                   frame_exchange(&t, commands[1], ack[0], '!') == 0 &&
-                  t.scroll_bottom == 11 && t.region_scrolls == 0 &&
-                  t.cells[0][0] == 'p',
+                  t.scroll_bottom == 11 && t.region_scrolls == scrolls &&
+                  t.cells[sparse_row][0] == 'p',
               "sparse prompt shrink moved output or retained unused rows");
   ASSERT_TRUE(frame_exchange(&t, commands[1], ack[0], '@') == 0,
               "output did not fill its region");

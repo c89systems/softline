@@ -1149,7 +1149,7 @@ struct sl {
   /** Enable or disable bottom-pinned scroll-region output for ordinary
    * readline. The setting applies to subsequent print_above() calls; native
    * chat always uses its own scroll region. Acquisition occurs at startup or
-   * between producer callbacks, without requesting cursor replies in feeds. */
+   * between producer callbacks. */
   int (*set_live_scroll_region)(sl_t *self, int enabled);
   /** Register or clear the per-handle idle callback. */
   int (*set_idle_callback)(sl_t *self, sl_idle_callback_t callback,
@@ -1338,13 +1338,14 @@ struct sl {
   int (*watch_clear)(sl_t *self);
   /**
    * Open one live output session on this editor's owner thread.
-   * The caller owns the producer and renderer lifecycle.
+   * A new native terminal owner starts on a fresh bottom row. An ordinary
+   * close and reopen can reuse the tracked append point.
    */
   int (*output_stream_begin)(sl_t *self);
   /**
-   * Observe a settled resize before resuming synchronous output.
-   * Requires an open stream. A missing required cursor report returns
-   * `SL_ERROR_IO`.
+   * Reconcile a settled resize before resuming synchronous output. Requires
+   * an open stream. Uses terminal dimensions and the tracked prompt geometry.
+   * Terminal I/O failure returns `SL_ERROR_IO`.
    */
   int (*output_stream_reconcile)(sl_t *self);
   /**
@@ -1647,8 +1648,8 @@ int sl_history_search_active(const sl_t *self);
 int sl_set_screen_width(sl_t *self, int width);
 
 /** Enable or disable bottom-pinned scroll-region output for ordinary readline.
- * Disabled by default. Ownership is checked at startup and between producer
- * callbacks and acquired once the prompt reaches the terminal bottom.
+ * Disabled by default. Ownership begins at startup or between producer
+ * callbacks. The editor reserves its frame at the bottom of the terminal.
  * Multiple feeds within one callback remain immediate and acquire ownership
  * at the next input-owned boundary. Native chat uses its own scroll region
  * regardless of this setting. */
@@ -1977,21 +1978,21 @@ int sl_cancel(sl_t *self);
 int sl_suspend(sl_t *self);
 
 /** Write callback-produced chunks above the active prompt. Ordinary readline
- * clears and redraws by default, or uses an
- * enabled live scroll region once the prompt reaches the terminal bottom.
+ * clears and redraws by default, or uses the configured live scroll region.
  * Native chat retains its prompt frame after a live session and reconciles
  * physical resize before writing each callback-produced chunk. Finite output
- * cannot overlap an open live session. The unobserved-resize limits documented
- * for output_stream_write() also apply when resize occurs inside this producer
- * callback. Feed calls never wait for cursor replies. Failed native finite
- * output discards partial ANSI/UTF-8 bytes; later calls start cleanly. */
+ * cannot overlap an open live session. The resize limits of
+ * output_stream_write() also apply inside this producer callback. Failed native
+ * finite output discards partial ANSI/UTF-8 bytes; later calls start cleanly.
+ */
 int sl_print_above(sl_t *self, sl_stream_callback_t callback, void *userdata);
 
 /** Start a persistent output session on self's editor-owner thread. The
  * caller owns its producer, wakeup, renderer, and document lifecycle. A
- * native transcript starts at the current cursor; the editable prompt is
- * initially at the bottom. Physical resize preserves the terminal's prompt
- * position; unchanged cells and the cursor remain untouched. Before that frame,
+ * new native session starts on a fresh bottom row when the prior append point
+ * is unknown, including after a foreground handoff. Existing text remains in
+ * the terminal and its scrollback. The editor anchors its prompt at the bottom.
+ * Before that frame,
  * output uses the full terminal and leaves the producer cursor in place
  * between writes. Redirected streams validate and forward producer bytes
  * without terminal layout controls.
@@ -2007,23 +2008,23 @@ int sl_print_above(sl_t *self, sl_stream_callback_t callback, void *userdata);
  * Rapid tmux resizes can leave its grid ahead of the reported PTY size while
  * output is emitted; exact output during that interval is not guaranteed.
  * Returns SL_ERROR_INVALID if a session is already open.
- * Reopening a closed native session probes the cursor again. A nonzero column
- * restarts quote separation for an unfinished externally written line;
- * otherwise known spacing remains. An active editor keeps its
- * continuation state. With a read-only viewer selected, opening a stream
+ * An ordinary close and reopen keep the tracked append point and quote
+ * spacing while Softline has exclusive terminal output. Use the handoff close
+ * before letting another writer use the terminal. With a read-only viewer
+ * selected, opening a stream
  * defers chat display until the user returns. */
 int sl_output_stream_begin(sl_t *self);
 
-/** Observe a settled resize and repaint the retained prompt before producer
+/** Reconcile a settled resize and update the retained prompt before producer
  * continuation. Call on the owner thread outside producer feeds. An open
  * session is required; invalid/reentrant calls return SL_ERROR_INVALID.
  * Preserves draft/cursor, queue/history/status, queued input, terminal modes
  * and split UTF-8/SGR parsing. It touches only the owned prompt frame.
- * A required cursor report waits at most 100 ms; failure returns SL_ERROR_IO.
- * Do not resume output assuming reconciliation after failure. No-op off-TTY.
+ * Terminal I/O failure returns SL_ERROR_IO. No-op off-TTY.
  * With a read-only transcript selected, return immediately and reconcile the
  * terminal when chat returns, before displaying the backlog.
- * Call before the first write after resize; feeds remain observation-free. */
+ * Call before the first write after resize to update layout independently
+ * of producer activity. */
 int sl_output_stream_reconcile(sl_t *self);
 
 /** Forward length bytes to the live output session. While a read-only
@@ -2048,10 +2049,9 @@ int sl_output_stream_reconcile(sl_t *self);
  * tails. Terminal Unicode versions and cluster shaping can differ from the
  * Unicode 16.0 accounting. Wrapping remains producer/terminal-owned. A physical
  * resize can race the VT write and misplace even ASCII output; this is an
- * accepted concurrency limit. A retained frame resized without an input-owned
- * observation, including after readline returns, uses a delta estimate. Earlier
- * hard-ended ASCII reflow or unknown terminal history can misplace continuation
- * even after resize settles. The active input loop observes resize before
+ * accepted concurrency limit. Native width reflow of earlier hard-ended lines
+ * can change their visible row count beyond the tracked endpoint geometry.
+ * The active input loop observes resize before
  * dispatching producer watches. Synchronous producers use
  * sl_output_stream_reconcile() after resize settles and before the next feed.
  * Feeds never observe input or model transcript text. Width reflow of an
@@ -2062,9 +2062,8 @@ int sl_output_stream_reconcile(sl_t *self);
  * the cursor handoff. This hard row boundary can remain split after width
  * growth, and a Unicode cluster split there may lose its attachment. At the
  * bottom output margin, native reflow differs between terminals; width growth
- * may leave a continuation on a separate row. A last-column report cannot
- * distinguish Unicode pending wrap from a cursor before the final cell;
- * continuation can overwrite that cell. These are intentional opaque-feed
+ * may leave a continuation on a separate row. Pending wrap is tracked from
+ * the producer's cell widths. These are intentional opaque-feed
  * limits. Transcript cells are never reconstructed, cleared or replayed to
  * compensate. */
 int sl_output_stream_write(sl_t *self, const char *bytes, size_t length);
@@ -2097,11 +2096,10 @@ int sl_output_stream_end(sl_t *self);
  * Returns `SL_OK` on success, `SL_ERROR_INVALID` for an unavailable editor,
  * closed stream or incomplete ANSI/UTF-8. An open stream stays open on
  * validation failure. On `SL_ERROR_IO`, the stream closes and terminal
- * input ownership is released. Reopening after a native I/O failure requires
- * a fresh cursor-position reply before resetting margins and visibility.
- * If teardown moved the cursor or left prompt rows visible, recovery uses
- * the saved geometry at the same terminal dimensions. It clears surviving
- * prompt rows before accepting more output. */
+ * input ownership is released. Reopening uses the saved producer endpoint
+ * and prompt geometry to restore margins, visibility and surviving frame
+ * rows. Recovery of this geometry requires the same terminal dimensions.
+ * The editor clears surviving prompt rows before accepting more output. */
 int sl_output_stream_end_for_handoff(sl_t *self);
 
 /** Write a submitted prompt as a themed quote into an open output stream.

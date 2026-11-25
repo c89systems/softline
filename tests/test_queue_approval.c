@@ -1,5 +1,4 @@
 #define _DEFAULT_SOURCE
-#include "silent_cursor_probe.h"
 #include <fcntl.h>
 #include <poll.h>
 #include <pty.h>
@@ -529,7 +528,6 @@ static int edit_case(enum edit_kind kind, int native) {
       CHECK(sl_set_status_busy(sl, 1) == SL_OK);
   }
   if (native) {
-    CHECK(write(state.master, "\033[1;1R", 6) == 6);
     CHECK(sl_output_stream_begin(sl) == SL_OK);
   }
   if (kind == IDLE_APPROVE || kind == APPROVE_BUSY || kind == AUTO_IDLE)
@@ -779,7 +777,6 @@ static int edit_order_case(int position, enum order_mutation mutation,
   CHECK(sl_prompt_queue_set_mode(sl, (size_t)position,
                                  SL_PROMPT_QUEUE_MODE_STEER) == SL_OK);
   if (native) {
-    CHECK(write(state.master, "\033[1;1R", 6) == 6);
     CHECK(sl_output_stream_begin(sl) == SL_OK);
   }
   CHECK(sl_watch_add(sl, state.wake[0], SL_WATCH_READ, order_ready, &state,

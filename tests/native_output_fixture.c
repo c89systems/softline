@@ -146,7 +146,8 @@ static int quote_spacing(const char *initial, const char *between,
   if (result == SL_OK)
     result = sl_output_stream_write_quoted_prompt(sl, "SECOND");
   if (result == SL_OK)
-    result = sl_output_stream_end(sl);
+    result = *outside ? sl_output_stream_end_for_handoff(sl)
+                      : sl_output_stream_end(sl);
   if (result == SL_OK && (tcgetattr(STDIN_FILENO, &after) != 0 ||
                           !same_input_mode(&before, &after) ||
                           write(STDOUT_FILENO, outside, strlen(outside)) !=
@@ -364,7 +365,11 @@ static int live_gate_watch(sl_t *sl, const sl_watch_event_t *event,
                 sl_prompt_queue_append(sl, "queued for reset", 0, NULL) == SL_OK
             ? SL_OK
             : SL_ERROR;
-  } else if (command == 'x')
+  } else if (command == 'b')
+    gate->result = sl_set_buffer(sl, "1\n2\n3\n4\n5\n6\n7\n8\n9\n10");
+  else if (command == 'e')
+    gate->result = sl_set_buffer(sl, "");
+  else if (command == 'x')
     gate->done = 1;
   else
     gate->result = gated_fragment(sl, command);

@@ -139,18 +139,19 @@ input rows. Prior output, scrollback, and editor state are preserved. If a
 partial ANSI or UTF-8 sequence prevents close, finish the sequence and retry
 before handing over the terminal. If output is blocked or the native TTY
 disconnects, the close returns `SL_ERROR_IO` and releases terminal input
-ownership without waiting for drainage. Reopening after a native I/O failure
-requires a cursor-position reply before resetting the margins and restoring
-cursor visibility. If teardown may have moved the cursor, recovery uses the
-saved producer endpoint at the same terminal dimensions. Recovery retains
+ownership without waiting for drainage. Reopening after a partial display
+close restores margins and cursor visibility using the saved producer endpoint
+at the same terminal dimensions. Recovery retains
 unfinished lines and keeps a right-edge wrap pending through styling-only
-writes. It clears surviving prompt rows before accepting new output. A missing
-reply or changed dimensions that invalidate the saved geometry return
+writes. It clears surviving prompt rows before accepting new output. Changed
+dimensions that invalidate the saved geometry return
 `SL_ERROR_IO` with the stream closed.
 Destroying an editor with unfinished display cleanup attempts to restore
 full-screen scrolling and show the cursor without blocking.
 After a successful handoff and return from the program, call
-`editor->output_stream_begin(editor)` and resume the same editor.
+`editor->output_stream_begin(editor)` and resume the same editor. The stream
+establishes a new bottom row, preserving the program's output in the terminal
+and its scrollback.
 `sl_output_stream_end_for_handoff()` is the equivalent free function. Use
 `output_stream_end` for application shutdown with the configured exit policy.
 

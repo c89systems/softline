@@ -1,5 +1,4 @@
 #define _DEFAULT_SOURCE
-#include "silent_cursor_probe.h"
 #include <fcntl.h>
 #include <poll.h>
 #include <pty.h>

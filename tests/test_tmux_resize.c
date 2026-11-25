@@ -243,6 +243,8 @@ static int fixture_case(const char *tmux, const char *fixture,
       native_cursor = atoi(cursor);
       t.expected_prompt = height - 1;
       owned = owned_row(&native, 0);
+      if (flags & GROW)
+        CHECK(capture(&t, &prefix, 1, 0) == 0);
       CHECK(recorded_frame(&t, 0, raw, sizeof(raw)) == 0);
       mark = recording_size(&t);
       CHECK(write(t.command_fd, "b", 1) == 1);
@@ -269,8 +271,22 @@ static int fixture_case(const char *tmux, const char *fixture,
         }
         shifted = live_row >= retained ? live_row - retained + 1 : 0;
       }
-      CHECK(rows_equal(&actual, 0, &native, shifted, retained));
-      if (flags & GROW) {
+      CHECK(recorded_frame(&t, mark, raw, sizeof(raw)) == 0);
+      CHECK(!strstr(raw, "\033[6n"));
+      if ((flags & GROW) && strstr(raw, "\033D")) {
+        /* Relative indexing can return pulled rows to history. Compare
+         * the whole transcript instead of just the visible portion. */
+        CHECK(capture(&t, &history, 1, 0) == 0);
+        count = owned_row(&prefix, 0);
+        while (count > 0 && !nonblank(prefix.rows[count - 1]))
+          --count;
+        CHECK(rows_equal(&history, 0, &prefix, 0, count));
+        for (index = count; index < owned_row(&history, 0); ++index)
+          CHECK(!nonblank(history.rows[index]));
+      } else {
+        CHECK(rows_equal(&actual, 0, &native, shifted, retained));
+      }
+      if ((flags & GROW) && !strstr(raw, "\033D")) {
         /* Moving the owned frame must leave its old rows empty, while the
          * output prefix above it remains byte-for-byte native content. */
         for (index = owned; index <= native_cursor && index < actual_owned;
@@ -281,7 +297,6 @@ static int fixture_case(const char *tmux, const char *fixture,
                              ? actual_owned - native_cursor - 1
                              : 0));
       }
-      CHECK(recorded_frame(&t, mark, raw, sizeof(raw)) == 0);
       if (flags & QUOTED) {
         CHECK(capture(&t, &history, 1, 0) == 0);
         snprintf(submitted, sizeof(submitted), "> %s", quote[document]);
@@ -553,7 +568,7 @@ static int cursor_input(struct terminal *t, const struct grid *g) {
          row == last && column == (int)strlen(g->rows[last]) && visible == 1;
 }
 static int wait_example(struct terminal *t, const char *marker,
-                        const char *tail, size_t mark, int cpr, int cursor,
+                        const char *tail, size_t mark, int resized, int cursor,
                         int complete) {
   struct grid g;
   char raw[65536], text[65536];
@@ -570,11 +585,13 @@ static int wait_example(struct terminal *t, const char *marker,
           !strcmp(g.rows[last] + strlen(g.rows[last]) - strlen(tail), tail))) &&
         (!cursor || cursor_input(t, &g)) &&
         (!complete || !strstr(text, "Reasoning"))) {
-      if (!cpr)
+      if (!resized)
         return 0;
       if (recording(t, mark, raw, sizeof(raw)))
         return 1;
       if (strstr(raw, "\033[6n"))
+        return 1;
+      if (strstr(raw, "\033[65535;"))
         return 0;
     }
     delay(.02);
@@ -643,6 +660,7 @@ static int example_case(const char *tmux, const char *example,
   delay(.1);
   CHECK(recording(&t, 0, raw, sizeof(raw)) == 0);
   CHECK(!strstr(raw, "\033[?25l"));
+  CHECK(!strstr(raw, "\033[6n"));
   CHECK(query(&t, "#{cursor_y}", exit_row, sizeof(exit_row)) == 0);
   CHECK(command(&t, NULL, 0, "send-keys", "-t", t.pane, "C-u",
                 (const char *)NULL) == 0);

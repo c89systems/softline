@@ -17,6 +17,8 @@ int sl_surface_native_reflow_rows(const sl_surface_t *surface, int width);
 int sl_surface_native_history_rows(const sl_surface_t *surface);
 int sl_surface_native_history_growth(const sl_surface_t *surface, int rows);
 void sl_surface_native_history_shift(sl_surface_t *surface, int rows);
+/* Preserve the current cursor while releasing margins, then index forward. */
+int sl_surface_index_full_screen(int fd, int rows);
 void sl_surface_native_position(const sl_surface_t *surface, int *row,
                                 int *col);
 int sl_surface_native_exit_advances(const sl_surface_t *surface);
@@ -45,15 +47,8 @@ void sl_surface_set_osc8(sl_surface_t *surface, int enabled);
 int sl_surface_hyperlink_active(const sl_surface_t *surface);
 int sl_surface_validated_hyperlink_active(const sl_surface_t *surface);
 int sl_surface_matches(const sl_surface_t *surface, int width, int height);
-/* While the hardware cursor belongs to the producer, writes need no cursor
- * command. Observe its position before moving away; frame commands release it.
- * Reports record endpoints; Unicode/tab glyph layout is never reconstructed.
+/* Frame commands move the hardware cursor away from the tracked append point.
  */
-int sl_surface_native_cursor_live(const sl_surface_t *surface);
-void sl_surface_native_observe(sl_surface_t *surface, int width, int rows,
-                               int row, int col);
-/* Record the terminal endpoint; never attribute a report to Unicode glyphs. */
-void sl_surface_native_observe_write(sl_surface_t *surface, int row, int col);
 void sl_surface_native_release_cursor(sl_surface_t *surface);
 /* Reassert existing output margins without changing producer/parser state.
  * Homes the hardware cursor; the input owner must restore its cursor. */

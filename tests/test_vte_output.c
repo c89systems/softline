@@ -1,4 +1,5 @@
 #include "vte_output_sync.h"
+static const char initial_boundary[] = "\033[r\033[65535;1H\033D";
 struct frames {
   struct snapshot normal, grown;
 };
@@ -22,6 +23,7 @@ static int render(const char *fixture, const char *source, int chunk,
     }
   }
   if (chunk == 0) {
+    v.feed(s.terminal, initial_boundary, sizeof(initial_boundary) - 1);
     for (i = 0; source[i] && used + 4 < sizeof(direct); ++i) {
       if (source[i] == '\n')
         direct[used++] = '\r';
@@ -101,7 +103,9 @@ static int render(const char *fixture, const char *source, int chunk,
     if (handoff) {
       long row, column;
       v.cursor(s.terminal, &column, &row);
-      if (column != 0 || row != v.rows(s.terminal) - 1) {
+      if (column != 0 ||
+          row - (long)v.adjustment_value(v.adjustment(s.terminal)) !=
+              v.rows(s.terminal) - 1) {
         fprintf(stderr, "Editor exit cursor changed: (%ld,%ld)\n", row, column);
         failed = 1;
         goto cleanup;
@@ -195,6 +199,11 @@ static int unicode_render(const char *fixture, const char *trace,
       used += (size_t)snprintf(prior + used, sizeof(prior) - used,
                                "existing row %03d\r\n", index);
     v.feed(s.terminal, prior, (long)used);
+    if (output_parsed(&s, -1))
+      goto cleanup;
+  }
+  if (!strcmp(mode, "direct")) {
+    v.feed(s.terminal, initial_boundary, sizeof(initial_boundary) - 1);
     if (output_parsed(&s, -1))
       goto cleanup;
   }
@@ -434,6 +443,7 @@ static int without_cpr(const char *fixture) {
   if (capture(fixture, "--consecutive-streams", NULL, bytes, sizeof(bytes)))
     goto cleanup;
   v.feed(actual.terminal, bytes, (long)strlen(bytes));
+  v.feed(expected.terminal, initial_boundary, sizeof(initial_boundary) - 1);
   v.feed(expected.terminal, "FIRST\r\nSECOND\r\nTHIRD\r\n", 22);
   pump();
   a = snapshot(&actual, 0);
@@ -516,9 +526,12 @@ static int interrupted(const char *fixture, const char *disposition) {
   if (output_closed(&s, deadline))
     goto cleanup;
   current = transcript(&s);
-  failed = !sent || !WIFEXITED(status) || WEXITSTATUS(status) != 0 ||
-           strcmp(current.text, "AFTER INTERRUPT\n") || current.row != 1 ||
-           current.column != 0;
+  {
+    size_t padding = strspn(current.text, "\n");
+    failed = !sent || !WIFEXITED(status) || WEXITSTATUS(status) != 0 ||
+             strcmp(current.text + padding, "AFTER INTERRUPT\n") ||
+             current.row != (long)padding + 1 || current.column != 0;
+  }
 cleanup:
   if (failed)
     fprintf(stderr, "Interrupt restoration failed: %s\n", disposition);

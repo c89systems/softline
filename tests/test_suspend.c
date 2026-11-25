@@ -1,5 +1,4 @@
 #define _DEFAULT_SOURCE
-#include "silent_cursor_probe.h"
 #include <pty.h>
 #include <softline/softline.h>
 #include <stdio.h>

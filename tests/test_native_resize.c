@@ -375,7 +375,7 @@ static int owned_cursor_resize_case(void) {
   (void)drain(master, bytes, sizeof(bytes));
   failed = sl_surface_native_write(surface, "hello", 5, -1, 0) != 0;
   (void)drain(master, bytes, sizeof(bytes));
-  /* A cursor report may be unavailable. The terminal still retains the
+  /* The terminal retains the
    * physical producer cursor even when the stored bottom delta is clipped. */
   size.ws_row = 6;
   failed |= ioctl(master, TIOCSWINSZ, &size) != 0 ||
@@ -392,7 +392,7 @@ static int owned_cursor_resize_case(void) {
   return failed;
 }
 
-static int observed_unicode_case(int newline, int handoff) {
+static int tracked_unicode_case(int newline, int handoff) {
   static const char flag[] = "\360\237\207\270\360\237\207\252";
   struct winsize size;
   sl_surface_t *surface;
@@ -411,39 +411,27 @@ static int observed_unicode_case(int newline, int handoff) {
   failed = sl_surface_native_write(surface, flag, sizeof(flag) - 1,
                                    handoff ? -1 : 11, 2) != 0;
   (void)drain(master, bytes, sizeof(bytes));
-  if (handoff) {
-    failed |= strstr(bytes, "\033[6n") != NULL;
-    sl_surface_native_observe(surface, 40, 12, 0, 2);
-  } else {
-    failed |= strstr(bytes, "\033[6n") != NULL;
-    sl_surface_native_observe_write(surface, 0, 2);
-  }
+  failed |= strstr(bytes, "\033[6n") != NULL;
   sl_surface_native_position(surface, &row, &col);
   failed |= row != 0 || col != 2;
   if (newline) {
     failed |=
         sl_surface_native_write(surface, "\nX", 2, handoff ? -1 : 11, 2) != 0;
-    /* A previous line's width can change its observed row, but must not
-     * become part of this new line's column after growth. */
-    if (handoff)
-      sl_surface_native_observe(surface, 40, 12, 2, 1);
-    else
-      sl_surface_native_observe_write(surface, 2, 1);
   }
   size.ws_col = 60;
   failed |= ioctl(master, TIOCSWINSZ, &size) != 0 ||
             sl_surface_resize(surface, 60, handoff ? 12 : 10) != 0;
   sl_surface_native_position(surface, &row, &col);
-  failed |= row != (newline ? 2 : 0) || col != (newline ? 1 : 2);
+  failed |= row != (newline ? 1 : 0) || col != (newline ? 1 : 2);
   sl_surface_destroy(surface);
   close(slave);
   close(master);
   if (failed)
-    fprintf(stderr, "observed Unicode endpoint drifted after growth\n");
+    fprintf(stderr, "tracked Unicode endpoint drifted after growth\n");
   return failed;
 }
 
-static int observed_opaque_endpoint_case(void) {
+static int tracked_opaque_endpoint_case(void) {
   static const char wide[] = "\344\270\255";
   static const char narrow[] = "\360\237\217\263";
   char source[29 + sizeof(wide) - 1 + sizeof(narrow) - 1 + 1];
@@ -466,9 +454,6 @@ static int observed_opaque_endpoint_case(void) {
     return 1;
   }
   failed = sl_surface_native_write(surface, source, sizeof(source), 11, 2) != 0;
-  /* Only the aggregate terminal endpoint is authoritative. There is no
-   * glyph-width callback or span reconstruction after changing the width. */
-  sl_surface_native_observe_write(surface, 0, 33);
   size.ws_col = 30;
   failed |= ioctl(master, TIOCSWINSZ, &size) != 0 ||
             sl_surface_resize(surface, 30, 10) != 0;
@@ -482,7 +467,7 @@ static int observed_opaque_endpoint_case(void) {
   return failed;
 }
 
-static int observed_geometry_case(void) {
+static int tracked_geometry_case(void) {
   struct winsize size;
   sl_surface_t *surface;
   int master, slave, failed, row, col;
@@ -491,28 +476,27 @@ static int observed_geometry_case(void) {
   size.ws_row = 12;
   if (openpty(&master, &slave, NULL, NULL, &size) != 0)
     return 1;
-  surface = sl_surface_create_native(slave, 40, 12, 0, 0, -1);
+  surface = sl_surface_create_native(slave, 40, 12, 0, 0, 0);
   if (!surface)
     return 1;
   failed = sl_surface_native_write(surface, "ABC", 3, -1, 0) != 0;
-  /* The terminal may move the viewport during physical height growth. That
-   * observed row change must not add six rows to the logical text width. */
-  sl_surface_native_observe(surface, 40, 18, 6, 3);
-  size.ws_col = 60;
   size.ws_row = 18;
+  failed |= ioctl(master, TIOCSWINSZ, &size) != 0 ||
+            sl_surface_resize(surface, 40, 18) != 0;
+  size.ws_col = 60;
   failed |= ioctl(master, TIOCSWINSZ, &size) != 0 ||
             sl_surface_resize(surface, 60, 18) != 0;
   sl_surface_native_position(surface, &row, &col);
-  failed |= row != 6 || col != 3;
+  failed |= row != 0 || col != 3;
   sl_surface_destroy(surface);
   close(slave);
   close(master);
   if (failed)
-    fprintf(stderr, "observed physical resize changed the logical column\n");
+    fprintf(stderr, "physical resize changed the logical column\n");
   return failed;
 }
 
-static int observed_pending_wrap_case(int handoff) {
+static int tracked_pending_wrap_case(int handoff) {
   char source[40];
   struct winsize size;
   sl_surface_t *surface;
@@ -528,10 +512,6 @@ static int observed_pending_wrap_case(int handoff) {
     return 1;
   failed = sl_surface_native_write(surface, source, sizeof(source),
                                    handoff ? -1 : 11, 2) != 0;
-  if (handoff)
-    sl_surface_native_observe(surface, 40, 12, 0, 39);
-  else
-    sl_surface_native_observe_write(surface, 0, 39);
   sl_surface_native_position(surface, &row, &col);
   failed |= row != 0 || col != 40;
   size.ws_col = 80;
@@ -543,7 +523,7 @@ static int observed_pending_wrap_case(int handoff) {
   close(slave);
   close(master);
   if (failed)
-    fprintf(stderr, "observed pending wrap kept an uncorrected row count\n");
+    fprintf(stderr, "tracked pending wrap kept an uncorrected row count\n");
   return failed;
 }
 
@@ -614,14 +594,14 @@ int main(void) {
   failed |= clipped_tab_case(0);
   failed |= clipped_tab_case(1);
   failed |= owned_cursor_resize_case();
-  failed |= observed_unicode_case(0, 0);
-  failed |= observed_unicode_case(1, 0);
-  failed |= observed_unicode_case(0, 1);
-  failed |= observed_unicode_case(1, 1);
-  failed |= observed_opaque_endpoint_case();
-  failed |= observed_geometry_case();
-  failed |= observed_pending_wrap_case(0);
-  failed |= observed_pending_wrap_case(1);
+  failed |= tracked_unicode_case(0, 0);
+  failed |= tracked_unicode_case(1, 0);
+  failed |= tracked_unicode_case(0, 1);
+  failed |= tracked_unicode_case(1, 1);
+  failed |= tracked_opaque_endpoint_case();
+  failed |= tracked_geometry_case();
+  failed |= tracked_pending_wrap_case(0);
+  failed |= tracked_pending_wrap_case(1);
   failed |= hyperlink_wrap_case("\033]8;;https://xyz.test/\033\\", "X");
   failed |= hyperlink_wrap_case("\033]8;;https://example.org/\007", "\n");
   failed |= hyperlink_wrap_case("\033]8;;https://example.org/\033\\", "\r");

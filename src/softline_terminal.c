@@ -54,7 +54,6 @@ static int preserve_input(sl_impl_t *impl, const char *bytes, size_t length) {
   memmove(data + length, data, impl->pending_input_len);
   memcpy(data, bytes, length);
   impl->pending_input_len += length;
-  impl->pending_input_cap = impl->pending_input_len;
   return SL_OK;
 }
 static int input_bytes(sl_impl_t *impl, terminal_relay_t *r, const char *bytes,
