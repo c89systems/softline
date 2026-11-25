@@ -979,13 +979,20 @@ static int sl_terminal_rows(sl_impl_t *impl) {
   return 24;
 }
 
-static int sl_terminal_width(sl_impl_t *impl) {
-  if (impl->auto_scroll_pinned || sl_surface_is_native(impl->output_surface) ||
+static int sl_wrap_width(sl_impl_t *impl, int columns) {
+  if (sl_surface_is_native(impl->output_surface) ||
       (impl->output_stream_active && isatty(impl->input_fd) &&
        isatty(impl->output_fd)))
-    return sl_terminal_columns(impl);
-  return impl->screen_width > 0 ? impl->screen_width
-                                : sl_terminal_columns(impl);
+    return columns;
+  if (impl->screen_width == 0 ||
+      (impl->screen_width > columns && impl->live_scroll_region &&
+       isatty(impl->input_fd) && isatty(impl->output_fd)))
+    return columns;
+  return impl->screen_width;
+}
+
+static int sl_terminal_width(sl_impl_t *impl) {
+  return sl_wrap_width(impl, sl_terminal_columns(impl));
 }
 
 static int sl_terminal_height(sl_impl_t *impl) {
@@ -4238,6 +4245,41 @@ static int sl_native_reconcile_rendered_frame(sl_t *self, int width,
   return 0;
 }
 
+static int sl_clear_relative_rows(sl_impl_t *impl, int rows) {
+  int i;
+  for (i = 0; i < rows; i++) {
+    if (sl_wstr(impl->output_fd, "\r\033[0K") != 0)
+      return -1;
+    if (i + 1 < rows && sl_write_cursor_down(impl->output_fd, 1) != 0)
+      return -1;
+  }
+  return 0;
+}
+
+/* The terminal may have reflowed or displaced the old pinned frame. Erase
+ * from its live cursor, then scroll only if the new frame needs more rows. */
+static int sl_clear_resized_pinned_frame(sl_impl_t *impl, int width, int height,
+                                         int new_rows) {
+  int rows = impl->rendered_rows;
+  int offset = impl->rendered_cursor_row;
+  int column, editor_offset;
+  int fd = impl->output_fd;
+  if (width != impl->rendered_width)
+    sl_render_reflow_geometry(impl, width, &rows, &offset, &column,
+                              &editor_offset);
+  if (rows > height)
+    rows = height;
+  if (new_rows > height)
+    new_rows = height;
+  if (sl_surface_index_full_screen(fd, 0) != 0 ||
+      sl_write_cursor_up(fd, offset) != 0 || sl_wstr(fd, "\r\0337") != 0 ||
+      sl_clear_relative_rows(impl, rows) != 0 || sl_wstr(fd, "\0338") != 0 ||
+      sl_surface_index_full_screen(fd, new_rows - 1) != 0)
+    return -1;
+  sl_render_store_clear(impl);
+  return 0;
+}
+
 static int sl_render_apply_absolute(sl_t *self, sl_render_t *render) {
   sl_impl_t *impl;
   int visible;
@@ -4246,8 +4288,6 @@ static int sl_render_apply_absolute(sl_t *self, sl_render_t *render) {
   int top;
   int old_rows;
   int old_top;
-  int clear_top;
-  int clear_bottom;
   int current_row;
   int current_col;
   int i;
@@ -4270,9 +4310,9 @@ static int sl_render_apply_absolute(sl_t *self, sl_render_t *render) {
     width = size.ws_col;
   } else {
     height = sl_terminal_height(impl);
-    width = sl_terminal_width(impl);
+    width = sl_terminal_columns(impl);
   }
-  if (render->width != width)
+  if (render->width != sl_wrap_width(impl, width))
     return 1;
   /* Stream creation must page the frame before its surface exists. */
   if (impl->output_stream_active ||
@@ -4288,26 +4328,11 @@ static int sl_render_apply_absolute(sl_t *self, sl_render_t *render) {
     if (result != 0)
       return result;
   }
-  if (!impl->output_stream_active && !impl->output_surface &&
-      impl->rendered_rows > 0 &&
-      (impl->rendered_width != width || impl->rendered_height != height)) {
-    clear_top = 0;
-    clear_bottom = sl_terminal_bottom(impl);
-    if (impl->auto_scroll_pinned) {
-      clear_top = impl->rendered_top_row;
-      clear_bottom = clear_top + impl->rendered_rows - 1;
-      if (clear_top < 0)
-        clear_top = 0;
-      if (clear_bottom > sl_terminal_bottom(impl))
-        clear_bottom = sl_terminal_bottom(impl);
-    }
-    for (i = clear_top; i <= clear_bottom; i++) {
-      if (sl_write_frame_cursor(impl, height, i, 0) != 0 ||
-          sl_clear_prompt_row(impl) != 0)
-        return -1;
-    }
-    sl_render_store_clear(impl);
-  }
+  if (impl->auto_scroll_pinned && !impl->output_stream_active &&
+      !impl->output_surface && impl->rendered_rows > 0 &&
+      (impl->rendered_width != width || impl->rendered_height != height) &&
+      sl_clear_resized_pinned_frame(impl, width, height, render->count) != 0)
+    return -1;
   visible = render->count;
   if ((impl->output_stream_active ||
        sl_surface_is_native(impl->output_surface)) &&
@@ -4766,6 +4791,7 @@ static int sl_render_finish(sl_t *self, int queue_dispatch) {
     return 0;
   }
   if (impl->auto_scroll_pinned) {
+    int last = impl->rendered_top_row + impl->rendered_rows - 1;
     if (queue_dispatch && sl_prompt_queue_enabled(impl)) {
       int top;
       top = impl->rendered_top_row;
@@ -4780,8 +4806,9 @@ static int sl_render_finish(sl_t *self, int queue_dispatch) {
       return 0;
     }
     sl_release_auto_scroll_region(impl);
-    if (sl_write_line_break(impl) != 0) {
-      sl_set_error(self, "failed to write final newline");
+    if (sl_write_cursor_pos(impl->output_fd, last, 0) != 0 ||
+        sl_write_line_break(impl) != 0) {
+      sl_set_error(self, "failed to advance below pinned prompt");
       return -1;
     }
     sl_render_store_clear(impl);
@@ -4853,15 +4880,9 @@ static int sl_render_clear_active(sl_t *self) {
   }
   rows = impl->rendered_rows;
   if (sl_wchar(impl->output_fd, '\r') != 0 ||
-      sl_write_cursor_up(impl->output_fd, impl->rendered_cursor_row) != 0)
+      sl_write_cursor_up(impl->output_fd, impl->rendered_cursor_row) != 0 ||
+      sl_clear_relative_rows(impl, rows) != 0)
     return -1;
-  for (i = 0; i < rows; i++) {
-    if (sl_wstr(impl->output_fd, "\r\033[0K") != 0)
-      return -1;
-    if (i + 1 < rows && (sl_write_cursor_down(impl->output_fd, 1) != 0 ||
-                         sl_wchar(impl->output_fd, '\r') != 0))
-      return -1;
-  }
   if (sl_write_cursor_up(impl->output_fd, rows - 1) != 0 ||
       sl_wchar(impl->output_fd, '\r') != 0)
     return -1;
@@ -8533,6 +8554,7 @@ static char *sl_readline_impl(sl_t *self, const char *prompt,
   }
   impl->active_prompt = prompt;
   if (interrupted) {
+    int was_pinned = impl->auto_scroll_pinned;
     sl_backend_cancel_waiting(impl);
     /* Stop execution before releasing an owned edit hold. STOP has its own
      * bounded request slot, so cleanup cannot crowd it out. */
@@ -8551,12 +8573,12 @@ static char *sl_readline_impl(sl_t *self, const char *prompt,
     sl_disable_bracketed_paste(impl);
     sl_disable_raw(self);
     sl_set_readline_status(self, SL_READLINE_INTERRUPTED);
-    if (sl_surface_is_native(impl->output_surface)) {
-      /* Signal handlers and the shell must see unrestricted terminal rows. */
+    /* Signal handlers and the shell must see unrestricted terminal rows. */
+    if (sl_surface_is_native(impl->output_surface))
       sl_reset_scroll_region(impl->output_fd);
+    if (was_pinned || sl_surface_is_native(impl->output_surface))
       (void)sl_write_frame_cursor(impl, sl_terminal_rows(impl),
                                   sl_terminal_rows(impl) - 1, 0);
-    }
     raise(SIGINT);
     if (sl_surface_is_native(impl->output_surface)) {
       /* A returning handler keeps the output session available. */
@@ -8600,8 +8622,7 @@ static char *sl_readline_impl(sl_t *self, const char *prompt,
     failed = 1;
   impl->bracketed_paste = 0;
   sl_disable_bracketed_paste(impl);
-  /* The native session owns terminal input between prompts too, so cursor
-   * reports remain readable until output_stream_end restores the terminal. */
+  /* The native session keeps terminal input ownership between prompts. */
   if ((!queue_dispatch && !sl_surface_is_native(impl->output_surface)) || eof ||
       failed)
     sl_disable_raw(self);

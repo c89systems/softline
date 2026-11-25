@@ -100,6 +100,10 @@ positioning; producer bytes continue to pass through immediately.
 When no prompt frame has been rendered, the live cursor belongs to the producer.
 Writes leave that cursor in place, preserving native pending wrap and Unicode
 clusters across chunks. No editor rows are reserved until a frame exists.
+On height growth, Softline anchors the live producer cursor with relative moves
+and returns any restored rows to terminal history. If this clears an edge's
+pending wrap, subsequent style-only writes and resizes preserve its logical
+state until a write moves the cursor.
 A new terminal owner establishes a fresh row at the bottom and preserves
 prior contents in the terminal and its scrollback. Ordinary stream reopen
 can reuse an append point that Softline still owns. No output boundary
@@ -124,12 +128,13 @@ again after each callback returns, including EOF. A resize during a callback
 uses the same tracked cursor delta as a live write. Resize reconciliation
 occurs before dispatching ready producer watches. Ordinary readline reserves
 its optional live scroll region at startup or between producer callbacks when
-enabled later.
+enabled later. The pinned frame uses the configured wrap width, capped at the
+physical width, and the terminal dimensions determine its placement. On
+submission Softline restores full-screen margins and advances below the frame.
 Physical resize updates internal geometry, restores the reserved output margin
 and repositions an active editor at the terminal bottom. Restoring margins
 invalidates the cached hardware cursor even when the text is unchanged; the
-renderer restores the input cursor before returning. A prompt-free full-height
-producer retains its hardware cursor and pending wrap. Retained-frame output
+renderer restores the input cursor before returning. Retained-frame output
 preparation also restores the input cursor when an incomplete or rejected
 fragment emits no producer bytes; a later feed is not needed to restore it.
 The incremental ANSI/UTF-8 validator is unchanged. Each batch that positions

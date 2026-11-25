@@ -22,6 +22,7 @@ struct sl_surface {
   int terminal_columns;
   int native_stream;
   int producer_cursor_live;
+  int producer_wrap_lost;
   int producer_below;
   int history_rows; /* Bounded viewport-shift estimate, not terminal history.
                      * -1 assumes history can fill exposed rows. */
@@ -502,8 +503,7 @@ void sl_surface_native_recover_line(sl_surface_t *surface, int line_open) {
   if (!surface)
     return;
   surface->line_open = line_open;
-  if (surface->col == surface->width)
-    surface->producer_cursor_live = 0;
+  surface->producer_wrap_lost = surface->col == surface->width;
 }
 
 /* Apply a bottom-relative cursor delta after reflow. For an input cursor the
@@ -594,7 +594,7 @@ int sl_surface_native_write(sl_surface_t *surface, const char *bytes,
   sl_surface_t next;
   char prefix[192], suffix[64];
   int count, position, style_count, suffix_count, first, newline_returns;
-  int wrap_pending = 0;
+  int reposition, wrap_pending = 0;
   struct termios attributes;
   size_t i, osc_start = 0;
   char *new_link = NULL;
@@ -608,7 +608,8 @@ int sl_surface_native_write(sl_surface_t *surface, const char *bytes,
       (attributes.c_oflag & OPOST) && (attributes.c_oflag & ONLCR);
   sl_surface_clip_producer(surface);
   count = 0;
-  if (!surface->producer_cursor_live || prompt_row >= 0) {
+  reposition = !surface->producer_cursor_live || prompt_row >= 0;
+  if (reposition) {
     /* Resize can reset margins after its PTY size is already observable.
      * Establish the output region in every batch that positions its cursor. */
     count = snprintf(prefix, sizeof(prefix), "\033[1;%dr", surface->height);
@@ -620,19 +621,19 @@ int sl_surface_native_write(sl_surface_t *surface, const char *bytes,
     if (position < 0)
       return -1;
     count += position;
-    /* Cursor addressing cancels pending wrap. Resume on the following row when
-     * a printable continuation follows a completely filled row. */
-    if (surface->col == surface->width) {
-      int byte = sl_surface_first_output_byte(bytes, length);
-      wrap_pending = byte < 0;
-      if (!wrap_pending && byte != '\n' && byte != '\r' && byte != '\t') {
-        memcpy(prefix + count, "\r\033D", 3);
-        count += 3;
-        surface->line_cells = 0;
-        surface->line_extent = 0;
-        surface->ascii_line = 1;
-        surface->line_open = 0;
-      }
+  }
+  /* Style-only writes and successive resizes keep a lost wrap pending. */
+  if (surface->col == surface->width &&
+      (reposition || surface->producer_wrap_lost)) {
+    int byte = sl_surface_first_output_byte(bytes, length);
+    wrap_pending = byte < 0;
+    if (!wrap_pending && byte != '\n' && byte != '\r' && byte != '\t') {
+      memcpy(prefix + count, "\r\033D", 3);
+      count += 3;
+      surface->line_cells = 0;
+      surface->line_extent = 0;
+      surface->ascii_line = 1;
+      surface->line_open = 0;
     }
   }
   style_count =
@@ -704,7 +705,8 @@ int sl_surface_native_write(sl_surface_t *surface, const char *bytes,
       parts[first].iov_len -= (size_t)written;
     }
   }
-  surface->producer_cursor_live = prompt_row < 0 && !wrap_pending;
+  surface->producer_cursor_live = prompt_row < 0;
+  surface->producer_wrap_lost = wrap_pending;
   surface->producer_below = next.producer_below;
   surface->history_rows = next.history_rows;
   surface->col = next.col;
@@ -823,14 +825,10 @@ int sl_surface_resize(sl_surface_t *surface, int width, int height) {
     int row = SL_ROW(surface);
     int growth = (int)terminal.ws_row - surface->terminal_rows;
     if (growth > 0) {
-      int restored = sl_surface_native_history_growth(surface, growth);
-      row += restored;
-      if (retain_cursor && restored < growth) {
-        /* With less tracked history than the growth, the terminal may have
-         * pulled more rows than we can account for. Index from the live
-         * cursor to the bottom. Any overrun scrolls those same extra rows
-         * back into history. The former producer row then has a known address.
-         */
+      if (surface->producer_cursor_live) {
+        /* Scrolled rows may no longer exist. Index from the live endpoint
+         * using zero restored rows as a lower bound. The terminal returns
+         * restored rows to history as the indexes reach the bottom. */
         int below = (int)terminal.ws_row - 1 - row;
         int col = surface->col < width ? surface->col : width - 1;
         count = sl_surface_cursor(seq, sizeof(seq), below, col);
@@ -838,9 +836,12 @@ int sl_surface_resize(sl_surface_t *surface, int width, int height) {
             sl_surface_index_full_screen(surface->fd, below) != 0 ||
             sl_surface_write_all(surface->fd, seq, (size_t)count) != 0)
           return -1;
-        surface->producer_cursor_live = surface->col < width;
+        surface->producer_wrap_lost = surface->col == width;
+      } else {
+        int restored = sl_surface_native_history_growth(surface, growth);
+        row += restored;
+        sl_surface_native_history_shift(surface, restored);
       }
-      sl_surface_native_history_shift(surface, restored);
     }
     if (row >= (int)terminal.ws_row) {
       sl_surface_native_history_shift(surface, (int)terminal.ws_row - 1 - row);

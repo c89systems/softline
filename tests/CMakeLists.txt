@@ -1010,6 +1010,14 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND TARGET example_chat)
       "${SOFTLINE_TEST_TMUX}" "$<TARGET_FILE:native_output_fixture>" "${PROJECT_BINARY_DIR}")
     set_tests_properties(softline_terminal_retained_fragment_resize PROPERTIES
       LABELS "integration;streaming;resize" TIMEOUT 20)
+    foreach(mode submit wrap append)
+      add_test(NAME softline_terminal_cursor_${mode} COMMAND bash
+        "${CMAKE_CURRENT_SOURCE_DIR}/lifecycle/terminal-cursor-matrix.sh"
+        "${SOFTLINE_TEST_TMUX}" "$<TARGET_FILE:native_output_fixture>"
+        "${PROJECT_BINARY_DIR}" "${mode}")
+      set_tests_properties(softline_terminal_cursor_${mode} PROPERTIES
+        LABELS "integration;resize;terminal" TIMEOUT 20)
+    endforeach()
     function(retained_resize_case name columns rows mode variant draft)
       add_test(NAME "softline_retained_${name}" COMMAND bash
         "${CMAKE_CURRENT_SOURCE_DIR}/lifecycle/retained-resize.sh"

@@ -1008,8 +1008,9 @@ typedef struct sl_config {
   int input_fd;
   /** Output file descriptor; default is STDOUT_FILENO. */
   int output_fd;
-  /** Editable line wrapping width; zero follows the terminal. Native chat
-   * always uses the physical terminal width. */
+  /** Editable line wrapping width; zero follows the terminal. Pinned ordinary
+   * readline caps this at the terminal width. Native chat uses physical width.
+   */
   int screen_width;
   /** Non-zero lets an ordinary readline prompt pin itself at the terminal
    * bottom and stream output through a temporary scroll region. Disabled by
@@ -1642,9 +1643,10 @@ int sl_history_set_auto_add(sl_t *self, int enabled);
 int sl_history_search_active(const sl_t *self);
 
 /** Set ordinary readline wrapping width; zero follows the terminal.
- * Native chat always uses physical terminal width. Updates active prompt
- * wrapping when its effective width changes. Without an active readline,
- * changing this hint does not move or resize a native output session. */
+ * Pinned ordinary readline caps this at the terminal width. Native chat uses
+ * physical width. Updates active prompt wrapping when its effective width
+ * changes. Without an active readline, changing this hint does not move or
+ * resize a native output session. */
 int sl_set_screen_width(sl_t *self, int width);
 
 /** Enable or disable bottom-pinned scroll-region output for ordinary readline.
