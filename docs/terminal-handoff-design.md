@@ -137,7 +137,9 @@ with an open stream and the chat screen visible. On success, the native close
 releases terminal input ownership and clears the displayed queue, status, and
 input rows. Prior output, scrollback, and editor state are preserved. If a
 partial ANSI or UTF-8 sequence prevents close, finish the sequence and retry
-before handing over the terminal. After the program returns, call
+before handing over the terminal. On `SL_ERROR_IO`, the stream closes and
+Softline releases terminal input ownership. Reopen when terminal output is
+usable. After a successful handoff and return from the program, call
 `editor->output_stream_begin(editor)` and resume the same editor.
 `sl_output_stream_end_for_handoff()` is the equivalent free function. Use
 `output_stream_end` for application shutdown with the configured exit policy.

@@ -449,7 +449,8 @@ live scroll regions, status lines, and spinners are off; the theme is
   giving the terminal to a foreground program. Reopen with
   `sl:output_stream_begin()` before resuming editing. An incomplete ANSI or
   UTF-8 sequence returns `nil, softline.ERROR_INVALID` and leaves the session
-  open for the remaining bytes.
+  open for the remaining bytes. On `nil, softline.ERROR_IO`, the session
+  closes and releases terminal input ownership. Reopen when output is usable.
 - `sl:output_stream_end()` ends the producer session without finishing an
   external renderer document. While an editor is active it retains the
   prompt and scroll region for later finite output or another stream. Otherwise

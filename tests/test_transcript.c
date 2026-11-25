@@ -680,6 +680,54 @@ static void test_handoff_close(fixture_t *f, sl_config_t *config,
   CHECK(screen_rows_with(f, "Goodbye.") == 1 && !screen_has(f, "draft", 0));
   sl_destroy(sl);
   vterm_free(f->terminal);
+  f->terminal = NULL;
+}
+
+static void drive_failed_handoff_close(sl_t *sl, void *context) {
+  fixture_t *f = context;
+  if (f->phase == 0) {
+    advance(f, "draft\033[D");
+  } else {
+    CHECK(!strcmp(sl_buffer(sl), "draft") && sl_cursor(sl) == 4);
+    if (f->phase == 1) {
+      CHECK(sl_suspend(sl) == SL_OK);
+      advance(f, "");
+    } else {
+      CHECK(f->phase == 2);
+      advance(f, "X\r");
+    }
+  }
+}
+
+static void test_failed_handoff_close(fixture_t *f, const sl_config_t *config,
+                                      const struct termios *before) {
+  struct winsize small = {2, 20, 0, 0}, normal = {12, 20, 0, 0};
+  struct termios after;
+  sl_t *sl = sl_create_with_config(config);
+  char *line;
+  f->phase = 0;
+  CHECK(sl && sl_set_idle_callback(sl, drive_failed_handoff_close, f) == SL_OK);
+  CHECK(sl_output_stream_begin(sl) == SL_OK);
+  CHECK(!sl_readline(sl, "test> ") &&
+        sl_last_readline_status(sl) == SL_READLINE_SUSPENDED && f->phase == 2);
+  CHECK(!tcgetattr(config->input_fd, &after) &&
+        !test_termios_equal(before, &after));
+  CHECK(CHAT(sl, "\033[") == SL_OK);
+  CHECK(sl_output_stream_end_for_handoff(sl) == SL_ERROR_INVALID);
+  CHECK(CHAT(sl, "0m") == SL_OK);
+  CHECK(!ioctl(f->master, TIOCSWINSZ, &small));
+  CHECK(sl_output_stream_end_for_handoff(sl) == SL_ERROR_IO);
+  CHECK(!tcgetattr(config->input_fd, &after) &&
+        test_termios_equal(before, &after));
+  CHECK(sl_output_stream_end_for_handoff(sl) == SL_ERROR_INVALID);
+
+  CHECK(!ioctl(f->master, TIOCSWINSZ, &normal));
+  CHECK(sl_output_stream_begin(sl) == SL_OK);
+  line = sl_readline(sl, "test> ");
+  CHECK(line && !strcmp(line, "drafXt") && f->phase == 3);
+  sl_free_string(sl, line);
+  CHECK(sl_output_stream_end(sl) == SL_OK);
+  sl_destroy(sl);
 }
 
 int main(void) {
@@ -778,6 +826,7 @@ int main(void) {
   capture(&f);
   vterm_free(f.terminal);
   test_handoff_close(&f, &config, &before);
+  test_failed_handoff_close(&f, &config, &before);
   close(f.stop[1]);
   CHECK(!pthread_join(f.reader, NULL));
   CHECK(!pthread_mutex_destroy(&f.capture_lock));

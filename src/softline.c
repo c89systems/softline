@@ -4659,8 +4659,8 @@ static int sl_native_session_close(sl_t *self, int for_handoff) {
   return sl_show_cursor(impl);
 }
 
-/* A failed nonblocking handoff cannot finish drawing to an unavailable tty.
- * Retire only UI state; the draft/undo/queue continuation stays owned here.
+/* Release terminal input ownership when handoff cannot finish rendering.
+ * Retire the UI state while keeping the draft, undo and queue continuation.
  * A later begin acquires a fresh physical cursor and surface. */
 void sl_terminal_abandon(sl_t *self) {
   sl_impl_t *impl = sl_impl(self);
@@ -5965,7 +5965,10 @@ static int sl_output_stream_end_method(sl_t *self) {
 }
 
 static int sl_output_stream_end_for_handoff_method(sl_t *self) {
-  return sl_output_stream_end_impl(self, 1);
+  int result = sl_output_stream_end_impl(self, 1);
+  if (result == SL_ERROR_IO)
+    sl_terminal_abandon(self);
+  return result;
 }
 
 static int sl_print_above_backlog(sl_t *self, sl_stream_callback_t callback,
