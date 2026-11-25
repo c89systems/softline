@@ -2098,7 +2098,9 @@ int sl_output_stream_end(sl_t *self);
  * closed stream or incomplete ANSI/UTF-8. An open stream stays open on
  * validation failure. On `SL_ERROR_IO`, the stream closes and terminal
  * input ownership is released. Reopening after a native I/O failure requires
- * a fresh cursor-position reply before resetting margins and visibility. */
+ * a fresh cursor-position reply before resetting margins and visibility.
+ * If teardown moved the cursor, recovery uses the saved producer endpoint
+ * and requires the same terminal dimensions. */
 int sl_output_stream_end_for_handoff(sl_t *self);
 
 /** Write a submitted prompt as a themed quote into an open output stream.

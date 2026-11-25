@@ -140,6 +140,9 @@ typedef struct sl_impl {
   struct sl_pty *terminal_children;
   int terminal_active;
   int terminal_recovery_pending;
+  /* Producer endpoint before a teardown or recovery write moves the cursor. */
+  int terminal_recovery_row, terminal_recovery_col;
+  int terminal_recovery_rows, terminal_recovery_width;
   struct sl_transcripts *transcripts;
   struct sl_output_backlog *output_backlog;
   int input_fd;

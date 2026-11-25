@@ -771,7 +771,8 @@ enum handoff_output {
   BLOCKED_DESTROY,
   NO_REPLY,
   DISCONNECT_INPUT,
-  FAIL_FINISH
+  FAIL_FINISH,
+  FAIL_AFTER_MARGIN_RESET
 };
 static enum handoff_output handoff_output;
 static int handoff_test_fd = -1, handoff_test_master, handoff_queries;
@@ -787,6 +788,10 @@ static ssize_t handoff_test_write(int fd, const void *bytes, size_t length) {
   if (handoff_output == BLOCKED_DESTROY) {
     int flags = fcntl(fd, F_GETFL);
     CHECK(flags >= 0 && (flags & O_NONBLOCK));
+    if (length == 4 && !memcmp(bytes, "\030\033[r", length)) {
+      errno = EAGAIN;
+      return -1;
+    }
     CHECK(length == 6 && !memcmp(bytes, "\033[?25h", length));
     handoff_output = BLOCKED;
   }
@@ -799,6 +804,12 @@ static ssize_t handoff_test_write(int fd, const void *bytes, size_t length) {
   if (finish && handoff_output == DISCONNECT_INPUT) {
     CHECK(!close(handoff_test_master));
     handoff_test_master = -1;
+  }
+  if (handoff_output == FAIL_AFTER_MARGIN_RESET && length >= 3 &&
+      !memcmp(bytes, "\033[r", 3)) {
+    CHECK(__real_write(fd, bytes, 3) == 3);
+    handoff_output = BLOCKED;
+    return 3;
   }
   written = __real_write(fd, bytes, length);
   if (finish && handoff_output == DISCONNECT_INPUT)
@@ -852,10 +863,17 @@ static void test_handoff_cursor_recovery(fixture_t *f,
         test_termios_equal(before, &after));
   CHECK(fcntl(config->output_fd, F_GETFL) == flags);
   if (destroy) {
-    handoff_output = BLOCKED_DESTROY;
+    f->length = 0;
+    handoff_output = destroy == 1 ? BLOCKED_DESTROY : WRITABLE;
     sl_destroy(sl);
-    CHECK(handoff_output == BLOCKED &&
-          fcntl(config->output_fd, F_GETFL) == flags);
+    CHECK(fcntl(config->output_fd, F_GETFL) == flags);
+    if (destroy == 1) {
+      CHECK(handoff_output == BLOCKED);
+    } else {
+      capture(f);
+      CHECK(strstr(f->output, "\033[r") && strstr(f->output, "\033[8;1H") &&
+            strstr(f->output, "\033[?25h"));
+    }
     handoff_test_fd = -1;
     CURSOR_REPLIES_REAL(0);
     return;
@@ -921,8 +939,9 @@ static void test_input_disconnect_during_close(void) {
   CURSOR_REPLIES_REAL(0);
 }
 
-static void test_handoff_quote_spacing(fixture_t *f,
-                                       const sl_config_t *config) {
+static void test_handoff_quote_spacing(fixture_t *f, const sl_config_t *config,
+                                       enum handoff_output failure) {
+  static const char prior[] = "\033[1;1Hprior output\033[8;1H";
   sl_t *sl = sl_create_with_config(config);
   handoff_test_fd = config->output_fd;
   handoff_test_master = f->master;
@@ -934,12 +953,27 @@ static void test_handoff_quote_spacing(fixture_t *f,
   CHECK(f->terminal);
   vterm_set_utf8(f->terminal, 1);
   vterm_screen_reset(vterm_obtain_screen(f->terminal), 1);
-  CHECK(sl && write(config->output_fd, "\033[8;1H", 6) == 6 &&
+  CHECK(sl &&
+        write(config->output_fd, prior, sizeof(prior) - 1) ==
+            (ssize_t)(sizeof(prior) - 1) &&
         sl_output_stream_begin(sl) == SL_OK && CHAT(sl, "producer") == SL_OK);
   handoff_cursor_reply = "\033[8;9R";
-  handoff_output = FAIL_FINISH;
+  handoff_output = failure;
   CHECK(sl_output_stream_end_for_handoff(sl) == SL_ERROR_IO);
   CHECK(handoff_output == BLOCKED);
+  if (failure == FAIL_AFTER_MARGIN_RESET) {
+    struct winsize resized = {13, 20, 0, 0}, original = {12, 20, 0, 0};
+    /* Both the close and a reopen write DECSTBM and fail before
+     * restoring the cursor. The next report genuinely describes row one. */
+    handoff_cursor_reply = "\033[1;1R";
+    handoff_output = WRITABLE;
+    CHECK(!ioctl(f->master, TIOCSWINSZ, &resized));
+    CHECK(sl_output_stream_begin(sl) == SL_ERROR_IO);
+    CHECK(!ioctl(f->master, TIOCSWINSZ, &original));
+    handoff_output = FAIL_AFTER_MARGIN_RESET;
+    CHECK(sl_output_stream_begin(sl) == SL_ERROR_IO &&
+          handoff_output == BLOCKED);
+  }
   handoff_output = WRITABLE;
   CHECK(sl_output_stream_begin(sl) == SL_OK);
   CHECK(sl_output_stream_write_quoted_prompt(sl, "quote") == SL_OK);
@@ -947,6 +981,8 @@ static void test_handoff_quote_spacing(fixture_t *f,
   capture(f);
   {
     char text[128];
+    screen_text(f, 0, 0, text, sizeof(text));
+    CHECK(!strcmp(text, "prior output"));
     screen_text(f, 7, 0, text, sizeof(text));
     CHECK(!strcmp(text, "producer"));
     screen_text(f, 8, 0, text, sizeof(text));
@@ -1067,7 +1103,9 @@ int main(void) {
   test_handoff_cursor_recovery(&f, &config, &before, FAIL_AFTER_HIDE, 0);
   test_handoff_cursor_recovery(&f, &config, &before, FAIL_AFTER_HIDE, 1);
   test_input_disconnect_during_close();
-  test_handoff_quote_spacing(&f, &config);
+  test_handoff_cursor_recovery(&f, &config, &before, FAIL_AFTER_HIDE, 2);
+  test_handoff_quote_spacing(&f, &config, FAIL_FINISH);
+  test_handoff_quote_spacing(&f, &config, FAIL_AFTER_MARGIN_RESET);
 #endif
   close(f.stop[1]);
   CHECK(!pthread_join(f.reader, NULL));

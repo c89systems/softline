@@ -141,9 +141,11 @@ before handing over the terminal. If output is blocked or the native TTY
 disconnects, the close returns `SL_ERROR_IO` and releases terminal input
 ownership without waiting for drainage. Reopening after a native I/O failure
 requires a cursor-position reply before resetting the margins and restoring
-cursor visibility. If there is no reply, reopening returns `SL_ERROR_IO`
-with the stream closed. Destroying the editor while output is still blocked
-makes a nonblocking attempt to show the cursor.
+cursor visibility. If teardown may have moved the cursor, recovery uses the
+saved producer endpoint at the same terminal dimensions. A missing reply or
+changed dimensions that invalidate that endpoint return `SL_ERROR_IO` with
+the stream closed. Destroying an abandoned editor makes a nonblocking attempt
+to restore full-screen scrolling and show the cursor.
 After a successful handoff and return from the program, call
 `editor->output_stream_begin(editor)` and resume the same editor.
 `sl_output_stream_end_for_handoff()` is the equivalent free function. Use

@@ -715,10 +715,11 @@ int sl_surface_native_finish(sl_surface_t *surface, int prompt_row) {
   if (position < 0)
     return -1;
   count += position;
-  if (prompt_row < 0 && sl_surface_native_exit_advances(surface))
-    seq[count++] = '\n';
   memcpy(seq + count, "\033[?25h", 6);
   count += 6;
+  /* A short close write must not scroll the viewport before it fails. */
+  if (prompt_row < 0 && sl_surface_native_exit_advances(surface))
+    seq[count++] = '\n';
   if (sl_surface_write_all(surface->fd, seq, (size_t)count) != 0)
     return -1;
   if (prompt_row < 0 && sl_surface_native_exit_advances(surface) &&

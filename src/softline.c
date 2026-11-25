@@ -1068,6 +1068,16 @@ static int sl_native_observe_producer(sl_t *self) {
   return observed;
 }
 
+static int sl_handoff_endpoint_matches(const sl_impl_t *impl, int rows,
+                                       int width) {
+  return impl->terminal_recovery_rows == rows &&
+         impl->terminal_recovery_width == width &&
+         impl->terminal_recovery_row >= 0 &&
+         impl->terminal_recovery_row < rows &&
+         impl->terminal_recovery_col >= 0 &&
+         impl->terminal_recovery_col <= width;
+}
+
 static int sl_output_surface_reconcile(sl_t *self, int prompt_top) {
   sl_impl_t *impl = sl_impl(self);
   int width;
@@ -1085,7 +1095,7 @@ static int sl_output_surface_reconcile(sl_t *self, int prompt_top) {
     return -1;
   }
   if (!impl->output_surface) {
-    int row, col, flags = -1;
+    int row, col, observed, flags = -1;
     int recovering = impl->terminal_recovery_pending;
     int was_raw = impl->raw_active;
     if (sl_enable_raw(self) != 0)
@@ -1097,35 +1107,52 @@ static int sl_output_surface_reconcile(sl_t *self, int prompt_top) {
         goto restore_startup;
       impl->cursor_position_probe = 0;
     }
-    row = sl_query_cursor_row(self);
-    if (recovering && row <= 0)
+    observed = sl_query_cursor_row(self);
+    if (recovering && observed <= 0)
       goto restore_startup;
-    col = row > 0 ? impl->probed_cursor_col : 0;
-    /* A confirmed line start supplies one boundary before the first quote.
-     * Reopened sessions retain their known spacing instead. */
-    if (row > 0 && col == 0 && !impl->native_cursor_valid &&
-        impl->output_trailing_newlines == 0)
-      impl->output_trailing_newlines = 1;
-    row = row > 0 ? row - 1
+    col = observed > 0 ? impl->probed_cursor_col : 0;
+    row = observed > 0 ? observed - 1
           : impl->native_cursor_valid
               ? sl_terminal_rows(impl) - 1 - impl->native_cursor_below
               : 0;
     if (row < 0)
       row = 0;
-    /* A nonzero column after a close or failed handoff confirms an
-     * unfinished line. Restart quote separation from that position. */
+    if (recovering) {
+      int rows = sl_terminal_rows(impl);
+      if (observed > rows || col >= width || width != sl_terminal_columns(impl))
+        goto restore_startup;
+      /* A reply can describe a cursor already moved by a partial close or a
+       * previous recovery. Use the endpoint saved before those writes. */
+      if (impl->terminal_recovery_rows) {
+        if (!sl_handoff_endpoint_matches(impl, rows, width))
+          goto restore_startup;
+        row = impl->terminal_recovery_row;
+        col = impl->terminal_recovery_col;
+      } else {
+        impl->terminal_recovery_row = row;
+        impl->terminal_recovery_col = col;
+        impl->terminal_recovery_rows = rows;
+        impl->terminal_recovery_width = width;
+      }
+      if (sl_reset_scroll_region(impl->output_fd) != 0 ||
+          sl_write_cursor_pos(impl->output_fd, row,
+                              col == width ? width - 1 : col) != 0 ||
+          sl_wstr(impl->output_fd, "\033[?25h") != 0)
+        goto restore_startup;
+    }
+    /* Base quote separation on the append endpoint, which can differ from
+     * the cursor reported after a failed close. */
+    if (observed > 0 && col == 0 && !impl->native_cursor_valid &&
+        impl->output_trailing_newlines == 0)
+      impl->output_trailing_newlines = 1;
     if ((impl->native_cursor_valid || recovering) && col > 0)
       impl->output_trailing_newlines = 0;
-    /* Reset any margins left by the failed close. Restore the observed
-     * position because changing margins homes the terminal cursor. */
-    if (recovering && (sl_reset_scroll_region(impl->output_fd) != 0 ||
-                       sl_write_cursor_pos(impl->output_fd, row, col) != 0 ||
-                       sl_wstr(impl->output_fd, "\033[?25h") != 0))
-      goto restore_startup;
     impl->output_surface = sl_surface_create_native(
         impl->output_fd, width, prompt_top, row, col,
         impl->native_cursor_valid ? impl->native_history_rows : -1);
     sl_surface_set_osc8(impl->output_surface, impl->osc8.enabled);
+    if (recovering && col == width)
+      sl_surface_native_release_cursor(impl->output_surface);
   restore_startup:
     if (flags >= 0 && fcntl(impl->output_fd, F_SETFL, flags) != 0) {
       sl_surface_discard(impl->output_surface);
@@ -1133,6 +1160,7 @@ static int sl_output_surface_reconcile(sl_t *self, int prompt_top) {
     }
     if (impl->output_surface && recovering) {
       impl->terminal_recovery_pending = 0;
+      impl->terminal_recovery_rows = 0;
       impl->cursor_hidden = 0;
     }
     if (!impl->output_surface && !was_raw)
@@ -4634,11 +4662,21 @@ retry:
   return rc;
 }
 
+static void sl_save_handoff_endpoint(sl_impl_t *impl) {
+  sl_surface_native_position(impl->output_surface, &impl->terminal_recovery_row,
+                             &impl->terminal_recovery_col);
+  sl_surface_geometry(impl->output_surface, &impl->terminal_recovery_width,
+                      NULL, &impl->terminal_recovery_rows);
+}
+
 static int sl_native_session_close(sl_t *self, int for_handoff) {
   sl_impl_t *impl = sl_impl(self);
   int clear_frame = for_handoff || impl->clear_prompt_on_exit;
+  int handoff = for_handoff || impl->terminal_active;
   int prompt_row = -1;
   int i, row;
+  if (handoff)
+    sl_save_handoff_endpoint(impl);
   if (impl->rendered_rows > 0) {
     int result = 1;
     for (i = 0; i < 3 && result == 1; i++)
@@ -4655,6 +4693,8 @@ static int sl_native_session_close(sl_t *self, int for_handoff) {
       (void)sl_native_observe_producer(self);
     }
   }
+  if (handoff)
+    sl_save_handoff_endpoint(impl);
   if (!clear_frame && impl->rendered_rows > 0) {
     prompt_row = impl->rendered_top_row + impl->rendered_cursor_row;
     /* The cached frame separates editor cells from queue and status rows.
@@ -4683,6 +4723,7 @@ static int sl_native_session_close(sl_t *self, int for_handoff) {
     row = 0;
   if (sl_surface_native_finish(impl->output_surface, prompt_row) != 0)
     return -1;
+  impl->terminal_recovery_rows = 0;
   impl->native_cursor_below = sl_terminal_rows(impl) - 1 - row;
   impl->native_cursor_valid = 1;
   impl->native_history_rows =
@@ -8963,9 +9004,16 @@ static void sl_destroy_method(sl_t *self) {
       (void)sl_native_session_close(self, 0);
     sl_release_auto_scroll_region(impl);
     sl_disable_raw(self);
-    if (impl->cursor_hidden) {
+    if (impl->cursor_hidden || impl->terminal_recovery_pending) {
       int flags = sl_output_nonblocking(impl->output_fd);
       if (flags >= 0) {
+        if (impl->terminal_recovery_pending &&
+            sl_wstr(impl->output_fd, "\030\033[r") == 0 &&
+            sl_handoff_endpoint_matches(impl, sl_terminal_rows(impl),
+                                        sl_terminal_columns(impl)))
+          (void)sl_write_cursor_pos(impl->output_fd,
+                                    impl->terminal_recovery_row,
+                                    impl->terminal_recovery_col);
         (void)sl_show_cursor(impl);
         (void)fcntl(impl->output_fd, F_SETFL, flags);
       }
