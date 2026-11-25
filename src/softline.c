@@ -237,7 +237,7 @@ static int sl_cursor_report_begin(sl_t *self, struct termios *original);
 static int sl_cursor_report_end(sl_t *self, const struct termios *original,
                                 int temporary);
 static int sl_enable_raw(sl_t *self);
-static void sl_disable_raw(sl_t *self);
+static int sl_disable_raw(sl_t *self);
 static void sl_output_discard_backlog(sl_impl_t *impl);
 static int sl_output_write_validated(sl_t *self, const char *bytes,
                                      size_t length);
@@ -1098,7 +1098,7 @@ static int sl_output_surface_reconcile(sl_t *self, int prompt_top) {
       impl->cursor_position_probe = 0;
     }
     row = sl_query_cursor_row(self);
-    if (recovering && row == SL_ERROR_IO)
+    if (recovering && row <= 0)
       goto restore_startup;
     col = row > 0 ? impl->probed_cursor_col : 0;
     /* A confirmed line start supplies one boundary before the first quote.
@@ -1112,12 +1112,9 @@ static int sl_output_surface_reconcile(sl_t *self, int prompt_top) {
               : 0;
     if (row < 0)
       row = 0;
-    /* Native close leaves column zero. A nonzero startup report therefore
-     * identifies an unfinished line written outside Softline between sessions.
-     * Restart quote separation instead of trusting the old newline count.
-     * This uses the existing startup probe; feed positioning stays unchanged.
-     */
-    if (impl->native_cursor_valid && col > 0)
+    /* A nonzero column after a close or failed handoff confirms an
+     * unfinished line. Restart quote separation from that position. */
+    if ((impl->native_cursor_valid || recovering) && col > 0)
       impl->output_trailing_newlines = 0;
     /* Reset any margins left by the failed close. Restore the observed
      * position because changing margins homes the terminal cursor. */
@@ -1248,17 +1245,20 @@ static int sl_enable_raw(sl_t *self) {
   return 0;
 }
 
-static void sl_disable_raw(sl_t *self) {
+static int sl_disable_raw(sl_t *self) {
   sl_impl_t *impl;
+  int result;
   impl = sl_impl(self);
   if (!impl || !impl->raw_active)
-    return;
+    return 0;
   sl_output_discard_backlog(impl);
-  if (sl_tty_guard_end(impl->raw_guard, 1, !impl->terminal_guard))
+  result = sl_tty_guard_end(impl->raw_guard, 1, !impl->terminal_guard);
+  if (result)
     sl_set_error(self, "failed to restore terminal attributes");
   impl->raw_guard = NULL;
   impl->raw_active = 0;
   (void)sl_transcript_leave(self);
+  return result;
 }
 
 static int sl_buf_reserve(sl_t *self, size_t need) {
@@ -4713,9 +4713,8 @@ void sl_terminal_abandon(sl_t *self) {
   impl->native_cursor_valid = 0;
   impl->cursor_position_probe = 0;
   sl_render_store_clear(impl);
-  sl_set_error(
-      self,
-      "terminal output unavailable; reopen the output session when writable");
+  sl_set_error(self,
+               "terminal handoff failed; reopen when the terminal is usable");
 }
 
 static int sl_render_finish(sl_t *self, int queue_dispatch) {
@@ -5972,17 +5971,20 @@ static int sl_output_stream_end_impl(sl_t *self, int for_handoff) {
   impl->output_stream_active = 0;
   if (!impl->active_prompt && sl_surface_is_native(impl->output_surface)) {
     int flags = -1, result;
+    int advances = sl_surface_native_exit_advances(impl->output_surface);
     if (for_handoff && (flags = sl_output_nonblocking(impl->output_fd)) < 0)
       return SL_ERROR_IO;
-    if (sl_surface_native_exit_advances(impl->output_surface) &&
-        impl->output_trailing_newlines < 2)
-      impl->output_trailing_newlines++;
     result = sl_native_session_close(self, for_handoff);
+    if (result == 0 && advances && impl->output_trailing_newlines < 2)
+      impl->output_trailing_newlines++;
     if (flags >= 0 && fcntl(impl->output_fd, F_SETFL, flags) != 0)
       result = -1;
     if (result != 0)
       return SL_ERROR_IO;
-    sl_disable_raw(self);
+    if (sl_disable_raw(self) != 0 && for_handoff) {
+      impl->terminal_recovery_pending = 1;
+      return SL_ERROR_IO;
+    }
     return sl_show_cursor(impl) == 0 ? SL_OK : SL_ERROR_IO;
   }
   if (impl->active_prompt && prompt_origin >= 0 &&
@@ -8961,7 +8963,13 @@ static void sl_destroy_method(sl_t *self) {
       (void)sl_native_session_close(self, 0);
     sl_release_auto_scroll_region(impl);
     sl_disable_raw(self);
-    (void)sl_show_cursor(impl);
+    if (impl->cursor_hidden) {
+      int flags = sl_output_nonblocking(impl->output_fd);
+      if (flags >= 0) {
+        (void)sl_show_cursor(impl);
+        (void)fcntl(impl->output_fd, F_SETFL, flags);
+      }
+    }
     (void)sl_history_close_impl(self);
     sl_history_clear(&impl->history);
     sl_prompt_queue_clear_raw(&impl->prompt_queue);

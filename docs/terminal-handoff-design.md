@@ -139,9 +139,12 @@ input rows. Prior output, scrollback, and editor state are preserved. If a
 partial ANSI or UTF-8 sequence prevents close, finish the sequence and retry
 before handing over the terminal. If output is blocked or the native TTY
 disconnects, the close returns `SL_ERROR_IO` and releases terminal input
-ownership without waiting for drainage. When the terminal is usable again,
-reopening probes its physical cursor, resets the scroll margins and restores
-cursor visibility. After a successful handoff and return from the program, call
+ownership without waiting for drainage. Reopening after a native I/O failure
+requires a cursor-position reply before resetting the margins and restoring
+cursor visibility. If there is no reply, reopening returns `SL_ERROR_IO`
+with the stream closed. Destroying the editor while output is still blocked
+makes a nonblocking attempt to show the cursor.
+After a successful handoff and return from the program, call
 `editor->output_stream_begin(editor)` and resume the same editor.
 `sl_output_stream_end_for_handoff()` is the equivalent free function. Use
 `output_stream_end` for application shutdown with the configured exit policy.

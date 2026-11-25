@@ -2097,8 +2097,8 @@ int sl_output_stream_end(sl_t *self);
  * Returns `SL_OK` on success, `SL_ERROR_INVALID` for an unavailable editor,
  * closed stream or incomplete ANSI/UTF-8. An open stream stays open on
  * validation failure. On `SL_ERROR_IO`, the stream closes and terminal
- * input ownership is released. Reopen when terminal output is usable to
- * probe a fresh cursor position and restore cursor visibility. */
+ * input ownership is released. Reopening after a native I/O failure requires
+ * a fresh cursor-position reply before resetting margins and visibility. */
 int sl_output_stream_end_for_handoff(sl_t *self);
 
 /** Write a submitted prompt as a themed quote into an open output stream.
