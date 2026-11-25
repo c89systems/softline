@@ -2,6 +2,13 @@
   /* Tab focus and scrollIntoView must not scroll the workspace during entry. */
   #workspace { overflow: clip; }
 
+  #welcome[data-leaving] {
+    display: block;
+    position: fixed;
+    right: auto;
+    z-index: 3;
+  }
+
   #scroll-frame::before, #scroll-frame::after {
     content: "";
     position: absolute;

@@ -75,6 +75,8 @@ static int motion_assets(sl_www_t *plain, const sl_www_config_t *cfg,
   css = asset(animated, "/motion.css");
   CHECK(css && strstr(css, "(prefers-reduced-motion: no-preference)") &&
         strstr(css, "#workspace { overflow: clip; }") &&
+        strstr(css, "#welcome[data-leaving] {\n"
+                    "    display: block;\n    position: fixed;") &&
         strstr(css, ".message.user > .body:empty { visibility: hidden; }") &&
         strstr(css, ".message.user > .body:not(:empty)") &&
         strstr(css, "animation: message-arrive 410ms") &&

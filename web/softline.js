@@ -610,7 +610,9 @@ function clearConversation() {
   previews.hide(); previews.viewer.close();
   for (const m of state.messages.values()) m.stream?.end();
   state.messages.clear(); messages.replaceChildren(); state.queue.clear(); state.stagingQueue = null;
-  $('chat').classList.add('welcome-state');
+  const chat = $('chat');
+  chat.dispatchEvent(new Event('softline:welcome-reset'));
+  chat.classList.add('welcome-state');
   state.approval = null; state.busy = false; $('activity').textContent = ''; queue();
 }
 function receive(event) {
