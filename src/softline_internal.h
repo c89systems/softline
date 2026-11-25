@@ -139,6 +139,7 @@ typedef struct sl_impl {
   int image_literal;
   struct sl_pty *terminal_children;
   int terminal_active;
+  int terminal_recovery_pending;
   struct sl_transcripts *transcripts;
   struct sl_output_backlog *output_backlog;
   int input_fd;

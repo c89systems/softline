@@ -1459,7 +1459,8 @@ struct sl {
    * Clears prompt, queue and status rows for this close. Preserves the draft
    * and scrollback. Call between editor calls with chat visible. Incomplete
    * ANSI or UTF-8 returns `SL_ERROR_INVALID` and leaves the stream open.
-   * `SL_ERROR_IO` closes the stream and releases terminal input ownership. */
+   * The native close does not wait for output drainage. `SL_ERROR_IO` closes
+   * the stream and releases terminal input ownership. */
   int (*output_stream_end_for_handoff)(sl_t *self);
   /** Lend the TTY to a nonblocking PTY adapter between editor calls.
    * Preserves the draft and reopens a live output session on return.
@@ -2091,11 +2092,13 @@ int sl_output_stream_end(sl_t *self);
  * It preserves the draft, cursor, undo, history, queue, edit and status
  * state. After the program returns, call `sl_output_stream_begin()` and
  * resume the same editor. The full-frame policy applies to this close only.
+ * The native close does not wait for output drainage.
  *
  * Returns `SL_OK` on success, `SL_ERROR_INVALID` for an unavailable editor,
  * closed stream or incomplete ANSI/UTF-8. An open stream stays open on
  * validation failure. On `SL_ERROR_IO`, the stream closes and terminal
- * input ownership is released. Reopen when terminal output is usable. */
+ * input ownership is released. Reopen when terminal output is usable to
+ * probe a fresh cursor position and restore cursor visibility. */
 int sl_output_stream_end_for_handoff(sl_t *self);
 
 /** Write a submitted prompt as a themed quote into an open output stream.

@@ -7,7 +7,6 @@
 #else
 #include <pty.h>
 #endif
-#include "silent_cursor_probe.h"
 #include "softline/transcript.h"
 #include "termios_snapshot.h"
 #include <errno.h>
@@ -23,6 +22,12 @@
 #include <time.h>
 #include <unistd.h>
 #include <vterm.h>
+
+#ifdef SOFTLINE_TEST_SILENT_CURSOR_PROBE
+static ssize_t handoff_test_write(int fd, const void *bytes, size_t length);
+#define SOFTLINE_TEST_CURSOR_WRITE handoff_test_write
+#endif
+#include "silent_cursor_probe.h"
 
 #define CHECK(expression)                                                      \
   do {                                                                         \
@@ -730,6 +735,110 @@ static void test_failed_handoff_close(fixture_t *f, const sl_config_t *config,
   sl_destroy(sl);
 }
 
+static void test_disconnected_handoff_close(void) {
+  struct winsize size = {12, 20, 0, 0};
+  struct termios before, after;
+  int input_master, input, output_master, output;
+  sl_config_t config;
+  sl_t *sl;
+  CHECK(!openpty(&input_master, &input, NULL, NULL, &size));
+  CHECK(!openpty(&output_master, &output, NULL, NULL, &size));
+  CHECK(!tcgetattr(input, &before));
+  sl_config_init(&config);
+  config.input_fd = input;
+  config.output_fd = output;
+  sl = sl_create_with_config(&config);
+  CHECK(sl && sl_output_stream_begin(sl) == SL_OK);
+  CHECK(!tcgetattr(input, &after) && !test_termios_equal(&before, &after));
+  CHECK(!close(output_master));
+  CHECK(sl_output_stream_end_for_handoff(sl) == SL_ERROR_IO);
+  CHECK(!tcgetattr(input, &after) && test_termios_equal(&before, &after));
+  CHECK(sl_output_stream_begin(sl) == SL_ERROR_IO);
+  CHECK(!tcgetattr(input, &after) && test_termios_equal(&before, &after));
+  sl_destroy(sl);
+  close(output);
+  close(input);
+  close(input_master);
+}
+
+#ifdef SOFTLINE_TEST_SILENT_CURSOR_PROBE
+enum handoff_output { WRITABLE, FAIL_QUERY, FAIL_AFTER_HIDE, BLOCKED };
+static enum handoff_output handoff_output;
+static int handoff_test_fd = -1, handoff_test_master, handoff_queries;
+
+static ssize_t handoff_test_write(int fd, const void *bytes, size_t length) {
+  int query;
+  ssize_t written;
+  if (fd != handoff_test_fd)
+    return __real_write(fd, bytes, length);
+  query = length == 4 && !memcmp(bytes, "\033[6n", length);
+  if (handoff_output == BLOCKED || (query && handoff_output == FAIL_QUERY)) {
+    handoff_output = BLOCKED;
+    errno = EAGAIN;
+    return -1;
+  }
+  written = __real_write(fd, bytes, length);
+  if (query && written == 4) {
+    CHECK(__real_write(handoff_test_master, "\033[8;1R", 6) == 6);
+    ++handoff_queries;
+  }
+  /* Let the real hide reach the PTY, then fail each subsequent write until
+   * the test makes the output writable again. */
+  if (handoff_output == FAIL_AFTER_HIDE && written == 6 && length == 6 &&
+      !memcmp(bytes, "\033[?25l", length))
+    handoff_output = BLOCKED;
+  return written;
+}
+
+static void test_handoff_cursor_recovery(fixture_t *f,
+                                         const sl_config_t *config,
+                                         const struct termios *before,
+                                         enum handoff_output failure) {
+  struct termios after;
+  int queries, flags = fcntl(config->output_fd, F_GETFL);
+  sl_t *sl = sl_create_with_config(config);
+  handoff_test_fd = config->output_fd;
+  handoff_test_master = f->master;
+  handoff_output = WRITABLE;
+  CURSOR_REPLIES_REAL(1);
+  CHECK(sl && flags >= 0 && sl_output_stream_begin(sl) == SL_OK);
+  if (failure == FAIL_AFTER_HIDE) {
+    f->phase = 0;
+    CHECK(sl_set_idle_callback(sl, drive_failed_handoff_close, f) == SL_OK);
+    CHECK(!sl_readline(sl, "test> ") &&
+          sl_last_readline_status(sl) == SL_READLINE_SUSPENDED &&
+          f->phase == 2);
+  }
+  f->length = 0;
+  capture(f);
+  f->length = 0;
+  handoff_output = failure;
+  CHECK(sl_output_stream_end_for_handoff(sl) == SL_ERROR_IO);
+  CHECK(handoff_output == BLOCKED);
+  capture(f);
+  if (failure == FAIL_AFTER_HIDE)
+    CHECK(strstr(f->output, "\033[?25l") && !strstr(f->output, "\033[?25h"));
+  CHECK(!tcgetattr(config->input_fd, &after) &&
+        test_termios_equal(before, &after));
+  CHECK(fcntl(config->output_fd, F_GETFL) == flags);
+  CHECK(sl_output_stream_begin(sl) == SL_ERROR_IO);
+  CHECK(!tcgetattr(config->input_fd, &after) &&
+        test_termios_equal(before, &after));
+
+  handoff_output = WRITABLE;
+  queries = handoff_queries;
+  f->length = 0;
+  CHECK(sl_output_stream_begin(sl) == SL_OK && handoff_queries == queries + 1);
+  capture(f);
+  CHECK(strstr(f->output, "\033[8;1H") && strstr(f->output, "\033[?25h"));
+  CHECK(fcntl(config->output_fd, F_GETFL) == flags);
+  CHECK(sl_output_stream_end(sl) == SL_OK);
+  sl_destroy(sl);
+  handoff_test_fd = -1;
+  CURSOR_REPLIES_REAL(0);
+}
+#endif
+
 int main(void) {
   struct winsize size = {12, 80, 0, 0};
   struct termios before, after;
@@ -827,6 +936,11 @@ int main(void) {
   vterm_free(f.terminal);
   test_handoff_close(&f, &config, &before);
   test_failed_handoff_close(&f, &config, &before);
+  test_disconnected_handoff_close();
+#ifdef SOFTLINE_TEST_SILENT_CURSOR_PROBE
+  test_handoff_cursor_recovery(&f, &config, &before, FAIL_QUERY);
+  test_handoff_cursor_recovery(&f, &config, &before, FAIL_AFTER_HIDE);
+#endif
   close(f.stop[1]);
   CHECK(!pthread_join(f.reader, NULL));
   CHECK(!pthread_mutex_destroy(&f.capture_lock));

@@ -736,6 +736,12 @@ void sl_surface_destroy(sl_surface_t *surface) {
     (void)sl_surface_native_finish(surface, -1);
   else if (surface->osc8_open)
     (void)sl_surface_write_all(surface->fd, "\033]8;;\033\\", 7);
+  sl_surface_discard(surface);
+}
+
+void sl_surface_discard(sl_surface_t *surface) {
+  if (!surface)
+    return;
   free(surface->hyperlink);
   free(surface);
 }

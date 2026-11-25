@@ -24,6 +24,8 @@ int sl_surface_native_write(sl_surface_t *surface, const char *bytes,
                             size_t length, int prompt_row, int prompt_col);
 int sl_surface_native_finish(sl_surface_t *surface, int prompt_row);
 void sl_surface_destroy(sl_surface_t *surface);
+/* Drop a surface after terminal I/O fails, without writing any controls. */
+void sl_surface_discard(sl_surface_t *surface);
 /* Physical resize updates geometry and restores reserved margins. Prompt
  * growth reserves needed rows; a full-height live producer keeps its cursor. */
 int sl_surface_resize(sl_surface_t *surface, int width, int height);

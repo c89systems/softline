@@ -13,7 +13,11 @@ int __real_select(int, fd_set *, fd_set *, fd_set *, struct timeval *);
 
 ssize_t __wrap_write(int fd, const void *bytes, size_t length) {
   const char *text = bytes;
+#ifdef SOFTLINE_TEST_CURSOR_WRITE
+  ssize_t result = SOFTLINE_TEST_CURSOR_WRITE(fd, bytes, length);
+#else
   ssize_t result = __real_write(fd, bytes, length);
+#endif
   if (!real_cursor_replies && result == 4 && length == 4 && text[0] == '\033' &&
       text[1] == '[' && text[2] == '6' && text[3] == 'n')
     cursor_probe_fd = fd;

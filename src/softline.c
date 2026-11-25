@@ -1046,6 +1046,13 @@ static int sl_native_resize_pending(sl_impl_t *impl) {
   return sl_surface_native_resize_pending(impl->output_surface);
 }
 
+static int sl_output_nonblocking(int fd) {
+  int flags = fcntl(fd, F_GETFL);
+  if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) != 0)
+    return -1;
+  return flags;
+}
+
 /* Only query a cursor that is still physically owned by the producer. */
 static int sl_native_observe_producer(sl_t *self) {
   sl_impl_t *impl = sl_impl(self);
@@ -1078,11 +1085,21 @@ static int sl_output_surface_reconcile(sl_t *self, int prompt_top) {
     return -1;
   }
   if (!impl->output_surface) {
-    int row, col;
+    int row, col, flags = -1;
+    int recovering = impl->terminal_recovery_pending;
     int was_raw = impl->raw_active;
     if (sl_enable_raw(self) != 0)
       return -1;
+    if (recovering) {
+      flags = sl_output_nonblocking(impl->output_fd);
+      /* Cancel a partial control before asking for the physical cursor. */
+      if (flags < 0 || sl_wstr(impl->output_fd, "\030") != 0)
+        goto restore_startup;
+      impl->cursor_position_probe = 0;
+    }
     row = sl_query_cursor_row(self);
+    if (recovering && row == SL_ERROR_IO)
+      goto restore_startup;
     col = row > 0 ? impl->probed_cursor_col : 0;
     /* A confirmed line start supplies one boundary before the first quote.
      * Reopened sessions retain their known spacing instead. */
@@ -1102,10 +1119,25 @@ static int sl_output_surface_reconcile(sl_t *self, int prompt_top) {
      */
     if (impl->native_cursor_valid && col > 0)
       impl->output_trailing_newlines = 0;
+    /* Reset any margins left by the failed close. Restore the observed
+     * position because changing margins homes the terminal cursor. */
+    if (recovering && (sl_reset_scroll_region(impl->output_fd) != 0 ||
+                       sl_write_cursor_pos(impl->output_fd, row, col) != 0 ||
+                       sl_wstr(impl->output_fd, "\033[?25h") != 0))
+      goto restore_startup;
     impl->output_surface = sl_surface_create_native(
         impl->output_fd, width, prompt_top, row, col,
         impl->native_cursor_valid ? impl->native_history_rows : -1);
     sl_surface_set_osc8(impl->output_surface, impl->osc8.enabled);
+  restore_startup:
+    if (flags >= 0 && fcntl(impl->output_fd, F_SETFL, flags) != 0) {
+      sl_surface_discard(impl->output_surface);
+      impl->output_surface = NULL;
+    }
+    if (impl->output_surface && recovering) {
+      impl->terminal_recovery_pending = 0;
+      impl->cursor_hidden = 0;
+    }
     if (!impl->output_surface && !was_raw)
       sl_disable_raw(self);
     return impl->output_surface ? 0 : -1;
@@ -1186,7 +1218,10 @@ static int sl_enable_raw(sl_t *self) {
   }
   impl->raw_active = 1;
   if (sl_tty_setattr(impl->input_fd,
-                     impl->terminal_active ? TCSANOW : TCSAFLUSH, &raw) != 0) {
+                     impl->terminal_active || impl->terminal_recovery_pending
+                         ? TCSANOW
+                         : TCSAFLUSH,
+                     &raw) != 0) {
     sl_disable_raw(self);
     sl_set_error(self, "failed to enable terminal raw mode");
     return -1;
@@ -4666,14 +4701,17 @@ void sl_terminal_abandon(sl_t *self) {
   sl_impl_t *impl = sl_impl(self);
   if (!impl)
     return;
+  if (sl_surface_is_native(impl->output_surface) || impl->raw_active ||
+      impl->terminal_active)
+    impl->terminal_recovery_pending = 1;
   sl_output_discard_backlog(impl);
   sl_disable_raw(self);
-  sl_surface_destroy(impl->output_surface);
+  sl_surface_discard(impl->output_surface);
   impl->output_surface = NULL;
   impl->output_stream_active = 0;
   impl->auto_scroll_pinned = 0;
   impl->native_cursor_valid = 0;
-  impl->cursor_hidden = 0;
+  impl->cursor_position_probe = 0;
   sl_render_store_clear(impl);
   sl_set_error(
       self,
@@ -5231,6 +5269,11 @@ static int sl_output_stream_begin_method(sl_t *self) {
   if (!impl || impl->output_stream_active) {
     sl_set_error(self, "live output stream is already open");
     return SL_ERROR_INVALID;
+  }
+  if (impl->terminal_recovery_pending &&
+      (!isatty(impl->input_fd) || !isatty(impl->output_fd))) {
+    sl_set_error(self, "cannot reopen disconnected native output session");
+    return SL_ERROR_IO;
   }
   if (sl_transcript_visible(self)) {
     if (!sl_output_get_backlog(self))
@@ -5885,7 +5928,7 @@ static int sl_output_stream_write_quoted_prompt_method(sl_t *self,
 
 static int sl_output_stream_end_impl(sl_t *self, int for_handoff) {
   sl_impl_t *impl;
-  int prompt_origin;
+  int prompt_origin, tty_pair;
   impl = sl_impl(self);
   if (!impl || !impl->output_stream_active) {
     sl_set_error(self, "no live output stream is open");
@@ -5898,6 +5941,9 @@ static int sl_output_stream_end_impl(sl_t *self, int for_handoff) {
     sl_set_error(self, "output handoff requires an idle editor");
     return SL_ERROR_INVALID;
   }
+  tty_pair = isatty(impl->input_fd) && isatty(impl->output_fd);
+  if (for_handoff && sl_surface_is_native(impl->output_surface) && !tty_pair)
+    return SL_ERROR_IO;
   if (impl->output_pending_len ||
       (impl->output_surface && !sl_surface_complete(impl->output_surface))) {
     sl_set_error(self,
@@ -5916,7 +5962,7 @@ static int sl_output_stream_end_impl(sl_t *self, int for_handoff) {
     sl_set_error(self, "failed to clear prompt when ending live output");
     return SL_ERROR_IO;
   }
-  if (!isatty(impl->input_fd) || !isatty(impl->output_fd)) {
+  if (!tty_pair) {
     if (sl_surface_hyperlink_active(impl->output_surface) &&
         sl_output_stream_write_method(self, "\033]8;;\033\\", 7) != SL_OK)
       return SL_ERROR_IO;
@@ -5925,10 +5971,16 @@ static int sl_output_stream_end_impl(sl_t *self, int for_handoff) {
   }
   impl->output_stream_active = 0;
   if (!impl->active_prompt && sl_surface_is_native(impl->output_surface)) {
+    int flags = -1, result;
+    if (for_handoff && (flags = sl_output_nonblocking(impl->output_fd)) < 0)
+      return SL_ERROR_IO;
     if (sl_surface_native_exit_advances(impl->output_surface) &&
         impl->output_trailing_newlines < 2)
       impl->output_trailing_newlines++;
-    if (sl_native_session_close(self, for_handoff) != 0)
+    result = sl_native_session_close(self, for_handoff);
+    if (flags >= 0 && fcntl(impl->output_fd, F_SETFL, flags) != 0)
+      result = -1;
+    if (result != 0)
       return SL_ERROR_IO;
     sl_disable_raw(self);
     return sl_show_cursor(impl) == 0 ? SL_OK : SL_ERROR_IO;
@@ -6405,10 +6457,8 @@ static int sl_read_cursor_report(sl_t *self, int request) {
   if (!impl || impl->cursor_position_probe < 0 || !isatty(impl->input_fd) ||
       !isatty(impl->output_fd))
     return -1;
-  if (request && sl_wstr(impl->output_fd, "\033[6n") != 0) {
-    impl->cursor_position_probe = -1;
-    return -1;
-  }
+  if (request && sl_wstr(impl->output_fd, "\033[6n") != 0)
+    return SL_ERROR_IO;
   if (gettimeofday(&started, NULL) != 0) {
     impl->cursor_position_probe = -1;
     return -1;
