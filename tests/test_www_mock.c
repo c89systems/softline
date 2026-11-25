@@ -216,6 +216,9 @@ static void child_server(int output, const char *directory) {
   ops.snapshot = snapshot;
   if (chdir(directory) || setenv("SOFTLINE_WEB", "1", 1) ||
       setenv("SOFTLINE_WEB_PORT", "0", 1) ||
+      setenv("SOFTLINE_WEB_WELCOME", "", 1) ||
+      setenv("SOFTLINE_WEB_BANNER", "<svg aria-label='host banner'></svg>",
+             1) ||
       setenv("SOFTLINE_WEB_DISABLE_PROMPT_DURING_TERMINAL", "0", 1))
     _exit(2);
   unsetenv("SOFTLINE_CHAT_IMAGE_DIR");
@@ -339,6 +342,32 @@ static int check_http_host(unsigned short port, const char *headers,
            write_all(fd, request, (size_t)size) ||
            read_all(fd, response, sizeof(response)) ||
            memcmp(response, expected, sizeof(response));
+  close(fd);
+  return result;
+}
+static int http_get(unsigned short port, const char *path, char *response,
+                    size_t capacity) {
+  char request[128];
+  int length = snprintf(request, sizeof(request),
+                        "GET %s HTTP/1.1\r\nHost: localhost\r\n\r\n", path);
+  int fd = connect_to(port), result = -1;
+  double deadline = read_clock_ms() + 3000;
+  size_t used = 0;
+  if (fd < 0)
+    return -1;
+  if (length > 0 && (size_t)length < sizeof(request) &&
+      !write_all(fd, request, (size_t)length)) {
+    while (used + 1 < capacity) {
+      ssize_t n =
+          read_with_pty(fd, response + used, capacity - used - 1, deadline);
+      if (n <= 0) {
+        response[used] = 0;
+        result = n < 0 ? -1 : 0;
+        break;
+      }
+      used += (size_t)n;
+    }
+  }
   close(fd);
   return result;
 }
@@ -852,7 +881,6 @@ int main(int argc, char **argv) {
   const char *mode = argc >= 4 ? argv[3] : "";
   unsigned short queue_port = 0;
   unsigned short port;
-  size_t used;
   static const unsigned char png[16] = {137, 80,  78, 71, 13, 10, 26, 10,
                                         0,   255, 1,  2,  3,  4,  5,  6};
   (void)signal(SIGPIPE, SIG_IGN);
@@ -975,6 +1003,8 @@ int main(int argc, char **argv) {
   CHECK(child >= 0);
   if (!child) {
     close(pipes[0]);
+    unsetenv("SOFTLINE_WEB_WELCOME");
+    unsetenv("SOFTLINE_WEB_BANNER");
     if (argc >= 4) {
       if (chdir(root) || dup2(pipes[1], STDOUT_FILENO) < 0 ||
           dup2(pipes[1], STDERR_FILENO) < 0 || setenv("SOFTLINE_WEB", "1", 1) ||
@@ -1082,24 +1112,9 @@ int main(int argc, char **argv) {
                    other);
     CHECK(!check_http_host(port, authority, "HTTP/1.1 400"));
   }
-  fd = connect_to(port);
-  CHECK(fd >= 0);
-  CHECK(write_all(fd, "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n", 35) == 0);
-  used = 0;
-  {
-    double deadline = read_clock_ms() + 3000;
-    for (;;) {
-      ssize_t n =
-          read_with_pty(fd, http + used, 512 * 1024 - used - 1, deadline);
-      CHECK(n >= 0);
-      if (!n)
-        break;
-      used += (size_t)n;
-      CHECK(used < 512 * 1024 - 1);
-    }
-  }
-  http[used] = 0;
-  CHECK(strstr(http, "200 OK") && strstr(http, "Welcome to softline") &&
+  CHECK(http_get(port, "/", http, 512 * 1024) == 0);
+  CHECK(strstr(http, "200 OK") &&
+        strstr(http, "<div id=\"welcome-text\"></div>") &&
         strstr(http, "id=\"send\""));
   {
     const char *motion = getenv("SOFTLINE_WEB_ANIMATIONS");
@@ -1107,8 +1122,17 @@ int main(int argc, char **argv) {
     CHECK(!!strstr(http, "./motion.css") == expected &&
           !!strstr(http, "./motion.js") == expected);
   }
-  close(fd);
-  fd = -1;
+  CHECK(http_get(port, "/config.json", http, 512 * 1024) == 0 &&
+        strstr(http, "200 OK"));
+  if (argc == 2)
+    CHECK(strstr(http, "\"welcome\":\"\"") &&
+          strstr(http, "\"banner\":\"<svg aria-label='host banner'></svg>\""));
+  else
+    CHECK(strstr(http, "\"welcome\":\"Welcome to softline\"") &&
+          strstr(http, "./assets/vectis-logo.svg"));
+  CHECK(http_get(port, "/assets/vectis-logo.svg", http, 512 * 1024) == 0 &&
+        strstr(http, "200 OK") && strstr(http, "image/svg+xml") &&
+        strstr(http, "<svg") && strstr(http, "aria-label=\"Vectis logo\""));
   one = ws_open(port);
   two = ws_open(port);
   CHECK(one >= 0 && two >= 0);

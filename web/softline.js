@@ -742,7 +742,11 @@ try {
   state.images = config.images === '1';
   if (Number(config.image_bytes) > 0) state.imageLimit = Number(config.image_bytes);
   if (Number(config.queue_delay) >= 0) state.queueDelay = Number(config.queue_delay);
-  $('welcome-text').replaceChildren(); const welcome = new MarkdownStream($('welcome-text')); welcome.write(config.welcome || 'Welcome to softline'); welcome.end();
+  if (config.welcome) {
+    const welcome = new MarkdownStream($('welcome-text'));
+    welcome.write(config.welcome);
+    welcome.end();
+  }
   // This is host-supplied branding, separate from model Markdown.
   $('banner').innerHTML = config.banner || '';
   $('brand').innerHTML = config.header || '';

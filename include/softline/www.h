@@ -79,7 +79,7 @@ typedef struct sl_www_config {
   int enabled;
   /** Browser document title; default softline. */
   const char *title;
-  /** Welcome Markdown; default Welcome to softline. */
+  /** Optional welcome Markdown. NULL and an empty string display no text. */
   const char *welcome;
   /** Trusted host HTML/SVG only; model text is never HTML. */
   const char *banner;

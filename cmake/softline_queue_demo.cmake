@@ -13,6 +13,14 @@ add_library(demo_image_store STATIC "${PROJECT_SOURCE_DIR}/examples/queue_demo_i
 target_link_libraries(demo_image_store PUBLIC softline)
 softline_apply_warnings(demo_image_store)
 add_library(web_chat STATIC "${PROJECT_SOURCE_DIR}/examples/web_chat.c")
+set(demo_assets "${PROJECT_BINARY_DIR}/softline_demo_assets.h")
+add_custom_command(OUTPUT "${demo_assets}"
+  COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/scripts/embed-web-assets.py"
+    "${PROJECT_SOURCE_DIR}" "${demo_assets}" --demo
+  DEPENDS scripts/embed-web-assets.py assets/vectis-logo.svg assets/vectis-logo.LICENSE
+  VERBATIM)
+target_sources(web_chat PRIVATE "${demo_assets}")
+target_include_directories(web_chat PRIVATE "${PROJECT_BINARY_DIR}")
 target_include_directories(web_chat PUBLIC "${PROJECT_SOURCE_DIR}/examples")
 target_link_libraries(web_chat PUBLIC www_mock demo_image_store)
 softline_apply_warnings(web_chat)

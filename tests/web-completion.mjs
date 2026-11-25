@@ -216,7 +216,11 @@ export async function runWebCompletionTests(source, completionSource, promptSour
       crypto: { getRandomValues(array) { return array.fill(++serial); } },
       localStorage: { getItem: name => preferences.get(name), setItem: (name, value) => preferences.set(name, value) },
       ResizeObserver: class { constructor(fn) { this.fn = fn; this.targets = []; observers.push(this); } observe(target) { this.targets.push(target); } }, performance: { now: () => now },
-      MarkdownStream: class { write() {} end() {} },
+      MarkdownStream: class {
+        constructor(root) { this.root = root; }
+        write(text) { if (this.root === get('welcome-text')) this.root.append(text); }
+        end() {}
+      },
       fetch: async () => { options.beforeConfig?.(document); return { ok: true, json: async () => ({ images: options.images ? '1' : '0', ...options.config }) }; },
       setTimeout: (fn, delay) => { const id = ++serial; timers.set(id, { fn, delay, due: now + delay }); return id; },
       clearTimeout: id => timers.delete(id)
@@ -1933,6 +1937,17 @@ export async function runWebCompletionTests(source, completionSource, promptSour
   await check('toolbar branding is hidden and empty by default', async ui => {
     assert(ui.get('brand').hidden && ui.get('brand').innerHTML === '', 'default toolbar included branding');
   });
+  await check('missing welcome text stays blank', async ui => {
+    assert(ui.get('welcome-text').textContent === '', 'browser supplied a default welcome');
+  });
+  const banner = '<svg aria-label="Welcome banner"></svg>';
+  await check('a banner can appear without welcome text', async ui => {
+    assert(ui.get('welcome-text').textContent === '', 'blank welcome was replaced');
+    assert(ui.get('banner').innerHTML === banner, 'banner was lost');
+  }, { config: { welcome: '', banner } });
+  await check('configured welcome goes through Markdown', async ui => {
+    assert(ui.get('welcome-text').textContent === '**Hello**', 'host welcome was not rendered');
+  }, { config: { welcome: '**Hello**' } });
   const header = '<a href="./"><svg aria-label="My project"></svg><img src="./logo.svg" alt="Logo"></a>';
   await check('trusted custom header HTML is visible independently of welcome branding', async ui => {
     assert(!ui.get('brand').hidden && ui.get('brand').innerHTML === header, 'host header HTML was lost or hidden');

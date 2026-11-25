@@ -163,7 +163,6 @@ void sl_www_config_init(sl_www_config_t *config) {
     return;
   memset(config, 0, sizeof(*config));
   config->title = "softline";
-  config->welcome = "Welcome to softline";
   config->queue_display_delay_ms = 500;
   config->image_max_bytes = 32u * 1024u * 1024u;
 }
@@ -460,7 +459,7 @@ sl_www_t *sl_www_create(const sl_www_config_t *config) {
   fields[0].name = "title";
   fields[0].value = config->title ? config->title : "softline";
   fields[1].name = "welcome";
-  fields[1].value = config->welcome ? config->welcome : "Welcome to softline";
+  fields[1].value = config->welcome;
   fields[2].name = "banner";
   fields[2].value = config->banner;
   (void)snprintf(delay, sizeof(delay), "%d", config->queue_display_delay_ms);

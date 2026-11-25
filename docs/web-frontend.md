@@ -33,7 +33,10 @@ output, a completion receipt, and a diff on replies 1, 4, 7, and so on. See
 
 `SOFTLINE_WEB_TITLE`, `SOFTLINE_WEB_WELCOME` (Markdown), and
 `SOFTLINE_WEB_BANNER` (trusted host HTML/SVG in the welcome area) customize the
-examples. `SOFTLINE_WEB_HEADER` optionally supplies trusted HTML, SVG or image
+examples. The demos show the Vectis logo above “Welcome to softline” by
+default. Set `SOFTLINE_WEB_WELCOME=''` to leave the text empty or
+`SOFTLINE_WEB_BANNER=''` to hide the logo.
+`SOFTLINE_WEB_HEADER` optionally supplies trusted HTML, SVG or image
 markup in the upper-left toolbar; that area is hidden and unbranded by default.
 Use F9 or **Hide toolbar** and **Show toolbar** in the `+` menu to toggle the
 toolbar. F9 also works from the embedded terminal. The toolbar's **Margin**
@@ -115,8 +118,10 @@ paths, MIME types, bytes, and callback contexts are borrowed until destruction.
 Set `config.header` to optional upper-left toolbar HTML, for example
 `<a href="./"><img src="./logo.svg" alt="My project"></a>`. NULL, empty or
 whitespace-only headers hide the area without reserving space. The existing
-`config.banner` independently controls welcome-area branding. Toolbar graphics
-fit within a 32px height and the available toolbar width.
+`config.banner` independently controls welcome-area branding. `config.welcome`
+accepts Markdown and defaults to empty. NULL and an empty string both leave
+the welcome text blank. Toolbar graphics fit within a 32px height and the
+available toolbar width.
 
 Header and banner HTML are trusted host input; Markdown/model output is rendered as text
 and safe DOM elements. Optional graphics are custom assets registered in

@@ -2,6 +2,7 @@
 #include "web_chat.h"
 #include "completion_resolve.h"
 #include "queue_demo_image.h"
+#include "softline_demo_assets.h"
 #include "transcript_demo.h"
 #include <errno.h>
 #include <limits.h>
@@ -774,6 +775,8 @@ demo_web_chat_t *demo_web_open(sl_t *editor, const demo_web_ops_t *ops,
                                int *enabled) {
   const char *on = getenv("SOFTLINE_WEB"), *port = getenv("SOFTLINE_WEB_PORT");
   const char *animations = getenv("SOFTLINE_WEB_ANIMATIONS");
+  const char *welcome = getenv("SOFTLINE_WEB_WELCOME");
+  const char *banner = getenv("SOFTLINE_WEB_BANNER");
   int terminal_lock;
   demo_web_chat_t *w;
   sl_www_config_t config;
@@ -831,10 +834,13 @@ demo_web_chat_t *demo_web_open(sl_t *editor, const demo_web_ops_t *ops,
   }
   if (getenv("SOFTLINE_WEB_TITLE"))
     config.title = getenv("SOFTLINE_WEB_TITLE");
-  if (getenv("SOFTLINE_WEB_WELCOME"))
-    config.welcome = getenv("SOFTLINE_WEB_WELCOME");
-  config.banner = getenv("SOFTLINE_WEB_BANNER");
+  config.welcome = welcome ? welcome : "Welcome to softline";
+  config.banner = banner ? banner
+                         : "<img src=\"./assets/vectis-logo.svg\" "
+                           "alt=\"Vectis\" width=\"208\">";
   config.header = getenv("SOFTLINE_WEB_HEADER");
+  config.assets = demo_assets;
+  config.asset_count = sizeof(demo_assets) / sizeof(demo_assets[0]);
   w->www = demo_www_open(&config, (unsigned short)number, closed);
   if (!w->www) {
     demo_web_close(w);
