@@ -10,11 +10,10 @@ function randomId() {
 const $ = id => document.getElementById(id);
 const prompt = $('prompt'), scroll = $('scroll'), messages = $('messages'), toolbar = $('toolbar');
 const chat = $('chat');
-const showWelcome = performance.getEntriesByType('navigation')[0]?.type !== 'reload';
-if (showWelcome) chat.classList.add('welcome-state');
 const previews = new ImagePreviews(document, window, { notice: toast });
 const requestLimit = 32;
 const state = { socket: null, online: false, follow: true, messages: new Map(),
+  replaying: false, started: false,
   queue: new Map(), seq: '', upload: null,
   view: randomId(), generation: 0, imageLimit: 32 * 1024 * 1024,
   queueDelay: 500, queueTimer: null, pending: new Map(), recovery: [], epoch: null,
@@ -86,9 +85,13 @@ const followResize = new ResizeObserver(entries => {
   follow(entries.some(entry => entry.target === scroll));
 });
 followResize.observe(messages); followResize.observe(scroll); followResize.observe(prompt);
+function showWelcome() {
+  if (!state.replaying && !state.started) chat.classList.add('welcome-state');
+}
 function leaveWelcome() {
+  state.started = true;
   if (!chat.classList.contains('welcome-state')) return;
-  chat.dispatchEvent(new Event('softline:composer-dock'));
+  if (!state.replaying) chat.dispatchEvent(new Event('softline:composer-dock'));
   chat.classList.remove('welcome-state');
 }
 function feedTimestamp(text) {
@@ -620,7 +623,8 @@ function clearConversation() {
   for (const m of state.messages.values()) m.stream?.end();
   state.messages.clear(); messages.replaceChildren(); state.queue.clear(); state.stagingQueue = null;
   chat.dispatchEvent(new Event('softline:welcome-reset'));
-  if (showWelcome) chat.classList.add('welcome-state');
+  state.started = false;
+  showWelcome();
   state.approval = null; state.busy = false; $('activity').textContent = ''; queue();
 }
 function receive(event) {
@@ -628,6 +632,14 @@ function receive(event) {
   if (e.seq) state.seq = e.seq;
   if (e.view && e.view !== state.view) return;
   switch (e.type) {
+    case 'replay_begin': state.replaying = true; break;
+    case 'replay_end':
+      if (state.replaying) {
+        if (state.queue.size) leaveWelcome();
+        state.replaying = false;
+        showWelcome();
+      }
+      break;
     case 'reset':
       clearConversation();
       if (e.text) toast(e.text); break;
@@ -702,6 +714,7 @@ function receive(event) {
       }
       state.epoch = e.id;
       state.online = true; $('connection').textContent = 'Connected';
+      showWelcome();
       updatePromptState(); queue();
       if (!restarted && e.disable_auto_resend !== '1') {
         for (const item of state.pending.values()) send(item.action, item.fields);
@@ -731,6 +744,7 @@ function receive(event) {
 }
 function connect() {
   const generation = ++state.generation;
+  state.replaying = false;
   const url = new URL('./events', document.baseURI || location.href); url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
   url.searchParams.set('after', state.seq); url.searchParams.set('view', state.view);
   const socket = state.socket = new WebSocket(url);
@@ -752,15 +766,13 @@ try {
   state.images = config.images === '1';
   if (Number(config.image_bytes) > 0) state.imageLimit = Number(config.image_bytes);
   if (Number(config.queue_delay) >= 0) state.queueDelay = Number(config.queue_delay);
-  if (showWelcome) {
-    if (config.welcome) {
-      const welcome = new MarkdownStream($('welcome-text'));
-      welcome.write(config.welcome);
-      welcome.end();
-    }
-    // This is host-supplied branding, separate from model Markdown.
-    $('banner').innerHTML = config.banner || '';
+  if (config.welcome) {
+    const welcome = new MarkdownStream($('welcome-text'));
+    welcome.write(config.welcome);
+    welcome.end();
   }
+  // This is host-supplied branding, separate from model Markdown.
+  $('banner').innerHTML = config.banner || '';
   $('brand').innerHTML = config.header || '';
   $('brand').hidden = !config.header?.trim();
   connect();

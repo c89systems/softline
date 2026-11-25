@@ -532,10 +532,14 @@ static int replay_cursors(unsigned short port, const char *epoch, char *data,
     if (fd < 0)
       return -1;
     if (ws_read(fd, data, cap, &opcode) < 0 ||
+        !strstr(data, "\"type\":\"replay_begin\"") ||
+        ws_read(fd, data, cap, &opcode) < 0 ||
         !strstr(data, "\"type\":\"reset\"") ||
         until(fd, data, cap, "aGVsbG8gd29ybGQ=") ||
         strstr(data, "\"timestamp\"") ||
-        (i == 0 && replay_sample(fd, data, cap)))
+        (i == 0 && replay_sample(fd, data, cap)) ||
+        until(fd, data, cap, "\"type\":\"queue_end\"") ||
+        until(fd, data, cap, "\"type\":\"replay_end\""))
       failed = 1;
     close(fd);
     if (failed)
@@ -546,7 +550,10 @@ static int replay_cursors(unsigned short port, const char *epoch, char *data,
   if (fd < 0)
     return -1;
   failed = ws_read(fd, data, cap, &opcode) < 0 ||
-           !strstr(data, "\"type\":\"session\"");
+           !strstr(data, "\"type\":\"replay_begin\"") ||
+           ws_read(fd, data, cap, &opcode) < 0 ||
+           !strstr(data, "\"type\":\"session\"") ||
+           until(fd, data, cap, "\"type\":\"replay_end\"");
   close(fd);
   return failed ? -1 : 0;
 }
@@ -1136,6 +1143,8 @@ int main(int argc, char **argv) {
   one = ws_open(port);
   two = ws_open(port);
   CHECK(one >= 0 && two >= 0);
+  CHECK(ws_read(one, data, SL_WWW_FRAME_MAX + 1, &opcode) >= 0 &&
+        strstr(data, "\"type\":\"replay_begin\""));
   CHECK(until(one, data, SL_WWW_FRAME_MAX + 1, "\"type\":\"session\"") == 0);
   CHECK(!json_field(data, "id", epoch, sizeof(epoch)));
   CHECK(
@@ -1172,6 +1181,8 @@ int main(int argc, char **argv) {
                    i == 0 || i == 4 ? "\"expand\":\"1\"" : "\"expand\":\"0\""));
     }
   }
+  if (!handoff)
+    CHECK(!until(one, data, SL_WWW_FRAME_MAX + 1, "\"type\":\"replay_end\""));
   if (terminal) {
 #ifdef SOFTLINE_CBOR_TCP
     CHECK(!terminal_roundtrip(port, queue_port, one, root, terminal_lock, data,
@@ -1211,6 +1222,7 @@ int main(int argc, char **argv) {
   }
   if (handoff) {
     CHECK(!terminal_state_wait(one, data, SL_WWW_FRAME_MAX + 1, 0, 1));
+    CHECK(!until(one, data, SL_WWW_FRAME_MAX + 1, "\"type\":\"replay_end\""));
     CHECK(!terminal_state_wait(two, data, SL_WWW_FRAME_MAX + 1, 0, 1));
     CHECK(!ws_text(one, "action=send&view=policy&request=off&request_seq=1"
                         "&text=%2Fterminal-lock+off"));
@@ -1692,6 +1704,7 @@ int main(int argc, char **argv) {
           break;
       }
       CHECK(iteration < 5000 && items == 64);
+      CHECK(!until(one, data, SL_WWW_FRAME_MAX + 1, "\"type\":\"replay_end\""));
     }
     close(one);
     one = -1;

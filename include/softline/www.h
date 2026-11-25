@@ -70,7 +70,9 @@ typedef int (*sl_www_action_t)(void *context, const sl_www_request_t *request);
  * The result becomes the status of the host's `sl_www_binary()` call. */
 typedef int (*sl_www_binary_t)(void *context, const sl_www_request_t *request,
                                const void *bytes, size_t length);
-/** Register host-owned replay work. The cursor is borrowed for the call.
+/** Register host-owned replay work. Bracket restored events for this peer
+ * with `replay_begin` and `replay_end` so the browser can select its layout.
+ * The cursor is borrowed for the call.
  * The result becomes the status of the host's `sl_www_connect()` call. */
 typedef int (*sl_www_replay_t)(void *context, void *peer, const char *after);
 /** Initialize with sl_www_config_init() before overriding fields. */

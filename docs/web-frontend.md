@@ -94,11 +94,11 @@ stylesheet and module to the page it serves at `/`. The composer moves into
 place on the first successful send, the first message delivered to the feed,
 the first visible queue entry or approval, or when opening a shell. The welcome
 banner and text dip briefly and accelerate upward out of the viewport. Typing
-in the draft leaves the welcome in place. A browser reload opens directly in
-the conversation layout while the host restores history and queue state. User
-bubbles glide and fade into place. The shell split opens from the bottom and
-the transcript split opens from the right, or from the top when stacked on
-narrow screens.
+in the draft leaves the welcome in place. After replay, an empty conversation
+shows its welcome and a conversation with history or queued entries opens
+directly in the docked layout. User bubbles glide and fade into place. The
+shell split opens from the bottom and the transcript split opens from the
+right, or from the top when stacked on narrow screens.
 Both splits collapse toward the same edge when closed. The shell is asked to
 stop as soon as its pane begins closing.
 The conversation fades and blurs at the top once scrolled away from the start,
@@ -195,12 +195,21 @@ by the host's history owner. Bind them to the session epoch: the examples use
 expired cursors. A bare number never authorizes replay across host restarts.
 Replies may omit `seq`.
 
+Hosts that replay history or a queue snapshot send `replay_begin` before
+`session`, `reset`, and any restored content for that peer. Send `replay_end`
+after delivering the retained feed and current queue projection, including for
+an empty conversation. Deliver later live feed and queue events after that
+boundary. Emit both markers with `sl_www_emit()` and zero fields. The browser
+uses the boundary to select its initial layout without animating restored
+content. A host that provides live events only can send `session` directly.
+
 See [read-only terminal transcripts](transcripts.md#web-handler) for
 `transcript_*` event fields, source geometry, and reconnect behavior.
 
 | Event | Fields and behavior |
 | --- | --- |
 | `session` | `id`: host epoch. `disable_auto_resend=1` disables automatic retries on same-epoch reconnects. The field defaults to `0`. |
+| `replay_begin`, `replay_end` | Peer-scoped replay boundaries with no fields. |
 | `capabilities` | `edit=1` enables revision-checked queue edits. Optional `terminal` is a same-origin absolute path to a terminal page. Optional `terminal_unlock_command` is a single-line host command. During an automatic terminal lock, the `+` menu displays that text and submits it verbatim through the normal prompt handler, preserving the draft. |
 | `reset` | Optional `text`; clear the retained transcript and queue before replay |
 | `begin` | `id`, `role` (`user`, `assistant`, `note`), optional `format`, `copy=0/1`, `timestamp`, `label`, and `tone` |
