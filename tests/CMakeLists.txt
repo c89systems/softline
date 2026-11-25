@@ -934,6 +934,11 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND TARGET example_chat)
     set_tests_properties(softline_terminal_blank_reflow PROPERTIES ENVIRONMENT "${terminal_test_environment}")
     set_tests_properties(softline_terminal_blank_reflow PROPERTIES
       LABELS "integration;streaming" TIMEOUT 60)
+    add_test(NAME softline_terminal_multiline_resize COMMAND "${SOFTLINE_TEST_XVFB_RUN}" -a
+      "$<TARGET_FILE:test_vte_chat>" multiline-resize "$<TARGET_FILE:example_chat>")
+    set_tests_properties(softline_terminal_multiline_resize PROPERTIES
+      ENVIRONMENT "${terminal_test_environment}"
+      LABELS "integration;streaming;resize" TIMEOUT 12)
     add_test(NAME softline_chat_line_keys COMMAND "${SOFTLINE_TEST_XVFB_RUN}" -a
       "$<TARGET_FILE:test_vte_chat>" line-keys "$<TARGET_FILE:example_chat>")
     set_tests_properties(softline_chat_line_keys PROPERTIES

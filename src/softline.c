@@ -4158,12 +4158,12 @@ static int sl_render_paint_editor(sl_t *self, const char *prompt,
 
 /* A retained editor frame still has physical cells after readline returns.
  * Reconcile those cells before either repainting or closing the session. */
-static int sl_native_reconcile_rendered_frame(sl_t *self, int width,
-                                              int height) {
+static int sl_native_reconcile_rendered_frame(sl_t *self, int width, int height,
+                                              int repaint) {
   sl_impl_t *impl = sl_impl(self);
   struct winsize size;
   int span, height_only, old_offset, offset;
-  int column, editor_offset;
+  int column, editor_offset, replace_frame;
   if (!sl_surface_is_native(impl->output_surface) || impl->rendered_rows == 0 ||
       (!sl_native_resize_pending(impl) && impl->rendered_width == width &&
        impl->rendered_height == height))
@@ -4177,6 +4177,9 @@ static int sl_native_reconcile_rendered_frame(sl_t *self, int width,
   if (!height_only)
     sl_render_reflow_geometry(impl, width, &span, &offset, &column,
                               &editor_offset);
+  replace_frame = repaint && impl->active_prompt &&
+                  impl->rendered_cursor_valid &&
+                  old_offset < impl->rendered_rows - 1;
   {
     int line_rows = sl_surface_native_reflow_rows(impl->output_surface, width);
     int top = impl->rendered_top_row + line_rows;
@@ -4211,12 +4214,27 @@ static int sl_native_reconcile_rendered_frame(sl_t *self, int width,
          * the terminal pulled back are returned to history at the bottom. */
         if (below > 0 &&
             (sl_write_cursor_down(impl->output_fd, last) != 0 ||
-             sl_surface_index_full_screen(impl->output_fd, below) != 0))
+             sl_surface_index_full_screen(impl->output_fd, below) != 0 ||
+             (replace_frame && sl_write_cursor_up(impl->output_fd, last) != 0)))
           return -1;
       }
     }
     if (top + offset >= height)
       top -= top + offset - height + 1;
+    if (replace_frame) {
+      int fd = impl->output_fd;
+      int rows = sl_output_prompt_rows(impl);
+      /* The terminal may discard rows below the caret on shrink. Erase
+       * from the reflowed frame's start and let indexing make room for the
+       * replacement on the main screen before reinstating the margins. */
+      if (sl_surface_index_full_screen(fd, 0) != 0 ||
+          sl_write_cursor_up(fd, offset) != 0 ||
+          sl_wstr(fd, "\r\033[0m\033[J") != 0 ||
+          sl_surface_index_full_screen(fd, rows - 1) != 0)
+        return -1;
+      if (top > height - rows)
+        top = height - rows;
+    }
     sl_surface_native_history_shift(impl->output_surface,
                                     top - impl->rendered_top_row - line_rows);
     sl_surface_native_prompt_reflow(impl->output_surface,
@@ -4224,7 +4242,7 @@ static int sl_native_reconcile_rendered_frame(sl_t *self, int width,
                                         impl->rendered_top_row - top);
     impl->rendered_top_row = top;
   }
-  if (!height_only &&
+  if (!height_only && !replace_frame &&
       sl_render_store_reflow(impl, width, height, impl->rendered_top_row, span,
                              offset, column, editor_offset) != 0)
     return -1;
@@ -4238,6 +4256,8 @@ static int sl_native_reconcile_rendered_frame(sl_t *self, int width,
               ? impl->rendered_top_row
               : sl_prompt_top(impl, sl_output_prompt_rows(impl))) != 0)
     return -1;
+  if (replace_frame)
+    sl_render_store_clear(impl);
   impl->rendered_width = width;
   if (ioctl(impl->output_fd, TIOCGWINSZ, &size) == 0 &&
       (size.ws_col != width || size.ws_row != height))
@@ -4324,7 +4344,7 @@ static int sl_render_apply_absolute(sl_t *self, sl_render_t *render) {
        impl->rendered_height != height)) {
     /* A retry must see acknowledged dimensions, so it cannot apply a resize
      * twice. Height-only changes preserve the terminal's prompt pixels. */
-    int result = sl_native_reconcile_rendered_frame(self, width, height);
+    int result = sl_native_reconcile_rendered_frame(self, width, height, 1);
     if (result != 0)
       return result;
   }
@@ -4692,7 +4712,7 @@ static int sl_native_session_close(sl_t *self, int for_handoff) {
     int result = 1;
     for (i = 0; i < 3 && result == 1; i++)
       result = sl_native_reconcile_rendered_frame(
-          self, sl_terminal_columns(impl), sl_terminal_rows(impl));
+          self, sl_terminal_columns(impl), sl_terminal_rows(impl), 0);
     if (result != 0)
       return -1;
   }
@@ -5049,7 +5069,7 @@ static int sl_prepare_native_output(sl_t *self) {
         int attempt, result = 1;
         for (attempt = 0; attempt < 3 && result == 1; attempt++)
           result = sl_native_reconcile_rendered_frame(
-              self, sl_terminal_columns(impl), sl_terminal_rows(impl));
+              self, sl_terminal_columns(impl), sl_terminal_rows(impl), 0);
         if (result != 0) {
           sl_set_error(self,
                        "failed to reconcile retained prompt after resize");
