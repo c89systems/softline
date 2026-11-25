@@ -91,9 +91,11 @@ web = sl_www_create(&config);
 Set `config.animations = 1` before `sl_www_create(&config)` to serve the animated
 chat page. The setting defaults to zero. The handler adds the separate motion
 stylesheet and module to the page it serves at `/`. The composer moves into
-place on the first successful send or when opening a shell from the welcome
-screen. The welcome banner and text dip briefly and accelerate upward out of
-the viewport. User bubbles glide and fade into place. The shell split opens from
+place on the first successful send, the first message delivered to the feed
+(including replay), the first visible queue entry or approval, or when opening
+a shell. The welcome banner and text dip briefly and accelerate upward out of
+the viewport. Typing in the draft leaves the welcome in place. User bubbles
+glide and fade into place. The shell split opens from
 the bottom and the transcript split opens from the right, or from the top when
 stacked on narrow screens.
 Both splits collapse toward the same edge when closed. The shell is asked to

@@ -487,12 +487,42 @@ export async function runWebCompletionTests(source, completionSource, promptSour
       assert(ui.sent() === 'initial draft' && !ui.animations.length && !ui.get('chat').classList.contains('welcome-state'), 'submit did not dock without animation');
     }, { ...brandedMotion, motion, reducedMotion });
   }
-  await check('history replay docks the composer without flying from the welcome position', async ui => {
-    ui.event({ type: 'delta', id: 'm1', role: 'user', text: 'Existing turn' });
-    assert(!ui.get('chat').classList.contains('welcome-state') && !ui.animations.length, 'history triggered a local send animation');
-    await ui.type('next prompt'); ui.key('Enter'); await ui.idle();
-    assert(ui.sent() === 'next prompt' && !ui.animations.length, 'an already docked composer took the welcome flight');
-  }, { motion: true, motionLayout: true });
+  for (const [source, entry] of [
+    ['a prompt from another client', { type: 'delta', role: 'user', text: 'Remote prompt' }],
+    ['assistant output', { type: 'begin', role: 'assistant' }],
+    ['a plain feed note', { type: 'delta', role: 'note', text: 'Host output' }],
+    ['replayed history', { type: 'delta', role: 'user', text: 'Existing turn' }]
+  ]) await check(`${source} dismisses the welcome without changing the local draft`, async ui => {
+    await ui.type('unsent draft'); ui.prompt.setSelectionRange(2, 5);
+    assert(ui.get('chat').classList.contains('welcome-state') && !ui.animations.length, 'local typing dismissed the welcome');
+    if (source === 'replayed history') ui.event({ type: 'reset' });
+    ui.event({ ...entry, id: 'first' }); await ui.idle();
+    assert(!ui.get('chat').classList.contains('welcome-state') && ui.animations.length === 2 &&
+      ui.animations[0].element === ui.get('welcome'), 'incoming feed did not animate the welcome and composer');
+    assert(ui.prompt.value === 'unsent draft' && ui.prompt.selectionStart === 2 &&
+      ui.prompt.selectionEnd === 5 && !ui.sent(), 'incoming feed changed or sent the local draft');
+    ui.event({ type: 'delta', id: 'second', text: 'Next output' });
+    ui.key('Enter'); await ui.idle();
+    assert(ui.sent() === 'unsent draft' && ui.animations.length === 2, 'an already docked composer took the welcome flight');
+  }, brandedMotion);
+  await check('the first approval shows and dismisses the welcome immediately', async ui => {
+    queueState(ui, [{ id: 'approval', revision: '1' }]); await ui.idle();
+    const queue = ui.get('queue');
+    assert(!queue.hidden && queue.children[0].dataset.id === 'approval', 'approval waited for the queue delay');
+    assert(!ui.get('chat').classList.contains('welcome-state') && ui.animations.length === 2 &&
+      ui.animations[0].element === ui.get('welcome'), 'approval did not animate the welcome and composer');
+  }, brandedMotion);
+  await check('an ordinary remote queue entry dismisses the welcome when it becomes visible', async ui => {
+    const chat = ui.get('chat'), queue = ui.get('queue');
+    queueState(ui, [{ id: 'transient', held: '0' }]); ui.advance(50);
+    queueState(ui, []); ui.advance(500); await ui.idle();
+    assert(queue.hidden && chat.classList.contains('welcome-state') && !ui.animations.length, 'a consumed entry dismissed the welcome');
+    queueState(ui, [{ id: 'waiting', held: '0', mode: 'steer' }]); ui.advance(499);
+    assert(queue.hidden && chat.classList.contains('welcome-state') && !ui.animations.length, 'debounced entry dismissed the welcome before appearing');
+    ui.advance(1); await ui.idle();
+    assert(!queue.hidden && !chat.classList.contains('welcome-state') && ui.animations.length === 2 &&
+      ui.animations[0].element === ui.get('welcome'), 'visible queue did not animate the welcome and composer');
+  }, brandedMotion);
   await check('a drained queue never appears and the next arrivals age independently', async ui => {
     const queue = ui.get('queue'), queued = { id: 'queued', held: '0' }, steer = { id: 'steer', held: '0', mode: 'steer' };
     await ui.type('sent immediately'); ui.key('Enter'); await ui.idle();

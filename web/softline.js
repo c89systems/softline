@@ -83,7 +83,12 @@ const followResize = new ResizeObserver(entries => {
   follow(entries.some(entry => entry.target === scroll));
 });
 followResize.observe(messages); followResize.observe(scroll); followResize.observe(prompt);
-function started() { $('chat').classList.remove('welcome-state'); }
+function leaveWelcome() {
+  const chat = $('chat');
+  if (!chat.classList.contains('welcome-state')) return;
+  chat.dispatchEvent(new Event('softline:composer-dock'));
+  chat.classList.remove('welcome-state');
+}
 function feedTimestamp(text) {
   const stamp = document.createElement('div');
   stamp.className = 'feed-timestamp'; stamp.textContent = text;
@@ -94,7 +99,7 @@ function message({ id, role = 'assistant', format, copy: copyPolicy, timestamp, 
   if (format === undefined) format = role === 'user' ? null : 'markdown';
   else if (!['markdown', 'diff'].includes(format)) format = 'text';
   const labeled = role !== 'user' && typeof label === 'string' && !!label;
-  if (role !== 'note' || labeled) started();
+  leaveWelcome();
   const article = document.createElement('article'), body = document.createElement('div');
   article.className = `message ${['user', 'assistant', 'note'].includes(role) ? role : 'assistant'}`;
   article.dataset.message = id; body.className = 'body';
@@ -183,7 +188,9 @@ function queue() {
     }
     $('queue').append(row);
   }
-  $('queue').hidden = !$('queue').childElementCount;
+  const visible = $('queue').childElementCount > 0;
+  if (visible) leaveWelcome();
+  $('queue').hidden = !visible;
   if (restoreFocus) {
     const row = state.approval && [...$('queue').children].find(item => item.dataset.id === state.approval.id);
     (row || prompt).focus();
@@ -338,7 +345,7 @@ window.addEventListener('keydown', event => {
   event.preventDefault();
   if (!event.repeat) toggleToolbar();
 }, { capture: true });
-const terminalPanel = new TerminalPanel({ document, window, toggleToolbar, closed: () => {
+const terminalPanel = new TerminalPanel({ document, window, toggleToolbar, opening: leaveWelcome, closed: () => {
   state.restorePromptAfterTerminal = !editor.focus();
   if (state.restorePromptAfterTerminal) scroll.focus({ preventScroll: true });
 } });
@@ -380,6 +387,7 @@ function sendPrompt(text, action) {
   const request = randomId(), fields = { text, request, request_seq: ++state.requestSeq };
   if (!send(action, fields)) return false;
   state.pending.set(request, { action, fields, text });
+  leaveWelcome();
   return request;
 }
 function reportSimulation(id, status, details = {}) {
@@ -502,8 +510,7 @@ function submit(steer = false, automatic = false) {
   const request = sendPrompt(prompt.value, steer ? 'steer' : 'send');
   if (request) {
     stopSimulation('manual_input');
-    $('chat').dispatchEvent(new Event('softline:composer-dock'));
-    prompt.value = ''; prompt.setSelectionRange(0, 0); started();
+    prompt.value = ''; prompt.setSelectionRange(0, 0);
     if (!automatic) state.follow = true;
     editor.reset();
     if (!automatic) editor.focus();

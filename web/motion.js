@@ -64,7 +64,7 @@ reduced.addEventListener('change', () => {
 });
 
 chat.addEventListener('softline:composer-dock', () => {
-  if (reduced.matches || !chat.classList.contains('welcome-state')) return;
+  if (reduced.matches) return;
   const duration = 540;
   const top = composer.getBoundingClientRect().top;
   const bounds = welcome.getBoundingClientRect();
