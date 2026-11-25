@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-include("${CMAKE_CURRENT_LIST_DIR}/header-doxygen.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/header-comments.cmake")
 file(READ "${ROOT}/lua/README.md" docs)
 file(READ "${ROOT}/README.md" readme)
 file(READ "${ROOT}/include/softline/softline.h" header)

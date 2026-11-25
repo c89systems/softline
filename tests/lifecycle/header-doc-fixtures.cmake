@@ -19,7 +19,7 @@ function(check name expected)
     if(NOT result EQUAL 0)
       message(FATAL_ERROR "${name}: valid documentation rejected: ${output}${error}")
     endif()
-  elseif(result EQUAL 0 OR NOT diagnostic MATCHES "missing Doxygen comment" OR
+  elseif(result EQUAL 0 OR NOT diagnostic MATCHES "missing API comment" OR
       NOT diagnostic MATCHES "${expected}")
     message(FATAL_ERROR "${name}: expected attached-documentation rejection: ${output}${error}")
   endif()
@@ -56,15 +56,16 @@ string(REPLACE "/** Receiver handle for one independent softline editor instance
   "/// Receiver handle for one independent softline editor instance."
   modified "${header}")
 file(WRITE "${work}/include/softline/softline.h" "${modified}")
-check(line_doxygen "")
+check(line_doc "")
 file(WRITE "${work}/include/softline/softline.h" "${header}")
 string(REGEX REPLACE "/\\*([^*]|\\*+[^*/])*\\*+/" "" stripped "${version}")
 file(WRITE "${work}/cmake/softline_version.h.in" "${stripped}")
 check(version_comments_removed "cmake/softline_version[.]h[.]in")
 file(WRITE "${work}/cmake/softline_version.h.in" "${version}")
 file(READ "${ROOT}/include/softline/cbor.h" cbor)
-string(REPLACE "/** @file" "/* @file" modified "${cbor}")
+string(REPLACE "/** Optional libcbor integration" "/* Optional libcbor integration"
+  modified "${cbor}")
 file(WRITE "${work}/include/softline/cbor.h" "${modified}")
 check(cbor_file_comment_removed "include/softline/cbor[.]h")
 file(REMOVE_RECURSE "${work}")
-message(STATUS "Attached Doxygen checks reject missing, ordinary and detached comments across public declarations")
+message(STATUS "API comment checks reject missing, ordinary and detached comments across public declarations")

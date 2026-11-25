@@ -153,12 +153,12 @@ concurrent prompt input. A host prompt lock, a replaced draft, or an image
 attachment in progress stops automatic submission. Delivery is transient and
 a disconnect or session change cancels unfinished automation.
 
-For optional feedback, call the `simulate_prompt_tracked` receiver method or
-`sl_www_simulate_prompt_tracked()` with a fresh
-simulation ID and the selected peer's writer. The browser sends advisory
-`simulation_status` actions to the existing `sl_www_action_t` callback.
+For optional feedback, call
+`receiver->simulate_prompt_tracked(receiver, writer, writer_context, id, text, options)`
+with a fresh simulation ID and the selected peer's writer. The browser sends
+advisory `simulation_status` actions to the existing `sl_www_action_t` callback.
 Match each report against the host-owned `peer` and the simulation ID. The
-writer's `SL_OK` confirms frame delivery to the writer. A missing browser
+method returns `SL_OK` when the writer consumes every frame. A missing browser
 report leaves the outcome unknown. The browser drops reports if the socket
 is congested or has changed, and the host decides whether to surface them.
 
@@ -169,12 +169,14 @@ is congested or has changed, and the host decides whether to surface them.
 | `cancelled` | The browser stopped the request. `reason` can identify manual input, host cancellation, or a failed submit. |
 | `submitted` | The browser sent the ordinary queue or steer action. `request` is that action's existing request ID. The normal `accepted` or `error` response describes admission. |
 
-Call the `cancel_prompt_simulation` receiver method or
-`sl_www_cancel_prompt_simulation()` with the same writer and ID to stop
-a pending or active simulation. The browser leaves any inserted text in the
-composer and ignores the command once the simulation has submitted. Use IDs of
+Call `receiver->cancel_prompt_simulation(receiver, writer, writer_context, id)`
+with the same writer and ID to stop a pending or active simulation.
+The browser leaves any inserted text in the composer and ignores the command
+once the simulation has submitted. Use IDs of
 1 to 64 ASCII letters, digits, underscores, or hyphens. Send each tracked
 simulation and cancellation directly to the peer as transient events.
+The matching free functions are `sl_www_simulate_prompt_tracked()` and
+`sl_www_cancel_prompt_simulation()`.
 
 ## Browser event contract
 

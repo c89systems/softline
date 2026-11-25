@@ -35,10 +35,10 @@ the application through a pipe or another bounded transport. The application
 registers its descriptor with `sl_watch_add()` (Lua: `watch_add()`), drains it
 on the editor thread, feeds its renderer, and forwards each sink emission
 directly into the Softline session. Softline does not buffer whole messages,
-interpret Markdown, own the transport, or run a worker. An already-decided
-fragment is visible when the write returns. While the read-only transcript
-viewer occupies the terminal, chat writes enter its bounded display backlog.
-The backlog replays when the user returns to chat. See
+interpret Markdown, own the transport, or run a worker. Complete units reach
+the terminal when the write returns with chat on screen. While the
+read-only transcript viewer occupies the terminal, chat writes enter a bounded
+backlog. The retained portion is displayed when the user returns to chat. See
 [transcript behavior](transcripts.md#native-editor).
 
 Softline adds no content bytes, response separator, or space at chunk
@@ -60,9 +60,9 @@ native session startup restores raw mode only when
 that startup acquired it, preserving raw mode already owned by the editor.
 Ending a session does not finish a Markdown document. The application calls its
 renderer’s document lifecycle itself. Each successful write accepts its entire
-span; errors are reported on the handle and never silently discard accepted
-data. A zero-length write is a no-op. Writes after end and overlapping begins
-fail. Existing finite `sl_print_above()` remains available in native terminal scrollback. It cannot be interleaved with an open live session.
+span. An error can occur after processing a prefix. A zero-length write is a
+no-op. Writes after end and overlapping begins fail. Use `sl_print_above()`
+for finite output between live sessions.
 
 The quoted-prompt helper writes submitted text literally into an open session
 between external renderer segments. It wraps at the current output width,
@@ -194,11 +194,10 @@ application-owned coordinates to return to the input cursor. Softline applies
 that separation to incremental producer writes and retains only the prompt
 frame for cell comparisons.
 `clear_prompt_on_exit = 1` selects clearing the whole prompt area and returning
-below the transcript. For a foreground pager or another external terminal
-program, call `sl_output_stream_end_for_handoff()` after the editor returns.
-It applies the full-frame close for that call, preserving the draft and status
-values. Run the program, then call `sl_output_stream_begin()` before resuming
-the editor. A partial ANSI or UTF-8 sequence leaves the stream open for retry.
+below the transcript. `output_stream_end_for_handoff` applies the same
+full-frame close for one call at a foreground-program boundary. See
+[terminal ownership](terminal-handoff-design.md#terminal-and-output-ownership)
+for call order and validation errors.
 Ending an ordinary stream inside an active editor retains the
 prompt and scroll region for later finite output or another stream. Closing
 the handle always restores terminal state. Non-TTY sessions emit no teardown
@@ -225,14 +224,10 @@ accepts one-byte fragments indefinitely.
 
 ## Compatibility and public surfaces
 
-The C and Lua surfaces expose a single native chat layout. ABI 1 introduced the
-public `output_stream_reconcile` receiver method. ABI 2 retains it and adds
-per-entry queue approval and stable identities. ABI 3 adds native submission
-policies and per-entry execution/stop state. ABI 4 adds constructor-selected
-asynchronous queue backends. Equivalent free functions validate NULL handles.
-Public declarations document ownership, thread context, lifecycle, errors,
-and chunk semantics for clangd. Lua methods document the same contract in the
-Lua reference and adjacent public binding comments. Lua cannot invoke its VM
+The C and Lua surfaces expose a single native chat layout. Use either the
+editor receiver or its matching free functions in C. The comments on public
+declarations cover ownership, thread context, lifecycle, and errors.
+Lua methods expose the same contract. Lua cannot invoke its VM
 from a foreign producer thread; a watched descriptor supplies owner-thread
 events. The core and Lua libraries do not import libmdf.
 
@@ -246,8 +241,8 @@ advancing released v0.13.0's ABI 2 to ABI 3. Constructor-selected backends advan
 released v0.15.1's ABI 3 to ABI 4. Image handover and later receiver extensions
 use ABI 5, one increment from released v0.17.0. Terminal handoff, transcripts,
 and tracked browser simulation extend the receivers in ABI 6, one increment
-from released v0.20.0. Both C and Lua consumers must rebuild against the
-matching header and library.
+from released v0.20.0. See the [README](../README.md#build-and-test) for the
+current SONAME and consumer requirements.
 
 ### Review exception: active-prompt right-edge continuation
 

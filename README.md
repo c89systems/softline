@@ -57,11 +57,12 @@ cancellation, interruption, suspension and errors.
 | [Web frontend](docs/web-frontend.md) and [browser terminal](docs/web-terminal.md) | HTTP/WebSocket host integration, replay, and xterm.js |
 | [Lua API](lua/README.md) | Lua 5.5 editor methods and callback contracts |
 
-The installed `<softline/softline.h>` documents the editor, including ownership,
-return values and receiver equivalents. `<softline/terminal.h>` exposes the
-host-driven server PTY, `<softline/transcript.h>` the native transcript viewer,
-and `<softline/www.h>` the opt-in web handler. `<softline/cbor.h>` is a
-convenience include for applications that link libcbor and supply a transport.
+The installed `<softline/softline.h>` documents the editor receiver, including
+terminal handoff and transcript methods. `<softline/transcript.h>` declares
+the matching transcript free functions. `<softline/terminal.h>` exposes the
+independent server PTY receiver, and `<softline/www.h>` the opt-in web handler.
+`<softline/cbor.h>` is a convenience include for applications that link
+libcbor and supply a transport.
 
 ## Examples
 
@@ -117,7 +118,14 @@ sl_output_stream_write(sl, bytes, length);
 sl_output_stream_end(sl);
 ```
 
-Check each return value. At a settled resize boundary, call
+Check each return value. To lend the TTY to an external pager, call
+`sl->output_stream_end_for_handoff(sl)` after the editor returns. It clears
+the complete prompt frame for that close and preserves the draft and prior
+output. Reopen the stream after the pager returns. For a built-in local shell
+or a host PTY adapter, `terminal_local` and `terminal_handoff` manage the
+stream boundary themselves. See the [terminal handoff guide](docs/terminal-handoff-design.md#terminal-and-output-ownership).
+
+At a settled resize boundary, call
 `sl_output_stream_reconcile()` before resuming a synchronous producer.
 `sl_output_stream_write_quoted_prompt()` writes literal submitted text with
 a themed prefix. Softline can also present finite output using
@@ -222,7 +230,8 @@ diagnosis until `make clean`.
 Every project-owned C target is compiled as C89 with POSIX terminal APIs.
 For editor setup, run `make build-debug` to prepare the dependencies, generated
 headers and `build/debug/compile_commands.json`. The checked-in `.clangd` uses
-that database; public-header Doxygen comments supply API hover documentation.
+that database. Public header comments supply API help on hover, and clangd
+uses the declared parameter names for signature help at call sites.
 `make test-clangd` verifies configuration/database discovery and semantic parsing
 of `src/softline.c`. `make test-public-header-docs` checks documentation coverage
 for installed C declarations. Lua usage and callback contracts are documented in

@@ -349,7 +349,8 @@ live scroll regions, status lines, and spinners are off; the theme is
   start. Soft wraps do not create these boundaries.
   Ctrl-Y yanks killed draft text and Alt-Y rotates that yank; focused approval
   controls retain priority over Alt-Y. Ctrl-_ or Ctrl-X Ctrl-U undoes draft
-  edits, Ctrl-T transposes Unicode clusters, and Alt-D/Alt-Backspace kill words.
+  edits, and Alt-D/Alt-Backspace kill words. Ctrl-T transposes Unicode clusters
+  when no [read-only transcript](#read-only-transcripts) is registered.
   Undo is scoped to the current draft; the ten-entry kill ring persists across
   prompts on the same instance. These keys can be rebound like other keys.
   The default `softline.KEY_CTRL_V` action saves a PNG or JPEG from the Linux
@@ -391,11 +392,11 @@ live scroll regions, status lines, and spinners are off; the theme is
   including after readline returns. The active input loop observes resize
   before dispatching producer watches. This delta fallback is deliberately
   immediate; see the stream design's unobserved retained-frame resize exception.
-  No producer transcript, glyph spans or grapheme tails are buffered. Physical
-  resize can race an in-flight VT batch and misplace even ASCII output. This accepted
-  concurrency limit has an unpaused VTE diagnostic (`--streaming-race`);
-  there is no transcript replay or feed wait to conceal it. Reflow
-  belongs to the terminal. With an active prompt, a known ASCII right-edge
+  With chat visible, output reaches the terminal directly without buffering
+  glyph spans or grapheme tails. Physical resize can race an in-flight VT batch
+  and misplace even ASCII output. The unpaused VTE diagnostic
+  (`--streaming-race`) exercises this limit.
+  Reflow belongs to the terminal. With an active prompt, a known ASCII right-edge
   continuation advances a hard row after the cursor handoff. That row may not
   rejoin on width growth, and a split Unicode cluster can lose its attachment.
   At the bottom output margin, VTE and tmux can reflow that boundary
@@ -404,7 +405,7 @@ live scroll regions, status lines, and spinners are off; the theme is
   tracked column, clamping it only if offscreen; continuation can land in a gap
   or overwrite text, including CR tails. A last-column report cannot distinguish
   Unicode pending wrap from a cursor before the last cell. These are intentional
-  opaque-feed limits; Softline never reconstructs or replays the transcript.
+  opaque-feed limits. Softline leaves previously displayed output in place.
   The output margin follows the actual prompt height, including visible queue
   entries, nonempty status messages, status lines, and editor rows. Unused
   preview slots occupy no space. At physical capacity the editor pages, leaving
@@ -420,6 +421,7 @@ live scroll regions, status lines, and spinners are off; the theme is
   response/document lifecycle; Softline has no Markdown dependency.
 - `sl:output_stream_write(bytes)` sends a Lua byte string immediately into the
   open session. Calls from a watch callback can alternate with prompt typing.
+  While a read-only viewer is open, the write goes to the bounded chat backlog.
   Chunk boundaries add no newline or response separator. The stream accepts
   printable UTF-8, LF/CR/Tab, ANSI SGR styling, and opt-in OSC 8 hyperlinks.
   OSC 8 is off by default; `sl:get_osc8_info().enabled` reports the effective
@@ -443,8 +445,11 @@ live scroll regions, status lines, and spinners are off; the theme is
   text stays italic.
 - `sl:output_stream_end_for_handoff()` closes the native session and clears
   all prompt, queue, and status rows while keeping the transcript and draft.
-  Call after the editor suspends, before giving the terminal to a foreground
-  program. Reopen with `sl:output_stream_begin()` before resuming editing.
+  Call between editor calls with chat visible and an open stream, before
+  giving the terminal to a foreground program. Reopen with
+  `sl:output_stream_begin()` before resuming editing. An incomplete ANSI or
+  UTF-8 sequence returns `nil, softline.ERROR_INVALID` and leaves the session
+  open for the remaining bytes.
 - `sl:output_stream_end()` ends the producer session without finishing an
   external renderer document. While an editor is active it retains the
   prompt and scroll region for later finite output or another stream. Otherwise
@@ -456,12 +461,8 @@ live scroll regions, status lines, and spinners are off; the theme is
   Closing an idle native session also releases terminal
   input ownership. Reopening a closed native session probes the cursor again.
   A nonzero column restarts quote separation for an unfinished externally
-  written line; otherwise known spacing remains. A caller may run a foreground
-  child between editor calls, then call
-  `output_stream_begin()` to probe its final cursor and build a fresh prompt
-  without replacing the handle or its history/settings. Do this outside
-  editor callbacks; child execution belongs to the application. Non-TTY output
-  adds no teardown controls. If the last write left an ANSI or UTF-8 sequence
+  written line. Otherwise known spacing remains. Non-TTY output adds no
+  teardown controls. If the last write left an ANSI or UTF-8 sequence
   incomplete, it returns `nil, softline.ERROR_INVALID` and keeps the session
   open so the missing bytes can be supplied. Only one session may be open per
   editor. Output-session and quoted-prompt methods run on the Lua/editor owner
@@ -644,11 +645,11 @@ command forms still return to an empty prompt. A key callback may return
 `softline.KEY_ACTION_SUSPEND`: `sl:readline()` or `sl:next_prompt()` returns
 `nil, softline.READLINE_SUSPENDED` without submission, history append or
 cancellation. The next editor call resumes that draft before automatic queue
-delivery. Run the child in the owner loop after
-`sl:output_stream_end_for_handoff()`, then
-call `sl:output_stream_begin()` and resume editing at the current geometry.
-Suspension does not pause producers; the application must ensure exclusive
-terminal ownership. The example rejects Alt-S while an operation runs.
+delivery. The example calls `sl:terminal_local()` from the owner loop after
+suspension. The relay manages its open stream. For a directly launched pager,
+use the [explicit stream handoff](#pty-terminal-handoff). The host controls
+which producers can write to the terminal during suspension. The example
+rejects Alt-S while an operation runs.
 
 ```sh
 make lua-test
@@ -982,6 +983,11 @@ rooted during handoff. Reentry, including `sl:close()`, is forbidden. The
 module functions `softline.terminal_local(sl[, shell])` and
 `softline.terminal_handoff(sl, callback)` are equivalent.
 
+For a foreground program the host launches directly, call
+`sl:output_stream_end_for_handoff()` after suspension. Run the program after
+the close succeeds, then reopen with `sl:output_stream_begin()` before
+resuming the same editor.
+
 If physical terminal output prevents session restoration, the function returns
 `nil, softline.ERROR_IO` promptly with input modes released and the output
 session closed. The draft and editing continuation remain intact. Reopen with
@@ -1096,13 +1102,16 @@ owner thread. See the [transcript guide](../docs/transcripts.md) for display
 and navigation behavior.
 
 - `sl:transcript_add(title, rows, columns)` registers a source and returns its
-  numeric ID or `nil, status`.
+  numeric ID or `nil, status`. Source dimensions can be up to 200 rows by 320
+  columns. The native viewer shows the source's position in the Ctrl+T cycle.
 - `sl:transcript_write(id, format, bytes)` appends literal text with
   `softline.TRANSCRIPT_TEXT` or PTY bytes with `softline.TRANSCRIPT_VT`. The
   string can contain embedded NULs.
 - `sl:transcript_resize(id, rows, columns)` updates the source geometry.
-- `sl:transcript_reset(id)` clears the source's screen and scrollback.
-- `sl:transcript_remove(id)` removes the source.
+- `sl:transcript_reset(id)` clears the screen, parser, scrollback, and search
+  and resumes following live output at the same geometry.
+- `sl:transcript_remove(id)` removes the source and returns to chat if the
+  source was visible.
 - `sl:transcript_visible()` reports whether a transcript is currently visible.
 
 Write, resize, reset, and remove return `true` or `nil, status`.
