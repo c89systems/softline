@@ -483,6 +483,18 @@ int sl_surface_native_exit_advances(const sl_surface_t *surface) {
   return surface->col > 0 || surface->line_open;
 }
 
+int sl_surface_native_line_open(const sl_surface_t *surface) {
+  return surface->line_open;
+}
+
+void sl_surface_native_recover_line(sl_surface_t *surface, int line_open) {
+  if (!surface)
+    return;
+  surface->line_open = line_open;
+  if (surface->col == surface->width)
+    surface->producer_cursor_live = 0;
+}
+
 /* Apply an observed bottom-relative cursor delta. For an input cursor the
  * caller excludes reflow inside its prompt. Transcript cells stay terminal
  * owned; no text is retained or moved here. */
@@ -519,9 +531,9 @@ void sl_surface_native_history_shift(sl_surface_t *surface, int rows) {
     surface->history_rows = 65535;
 }
 
-/* SGR alone must not consume a pending wrap, nor may a following LF wrap
- * twice. Find the first text character without modifying producer bytes. */
-static int sl_surface_continues_row(const char *bytes, size_t length) {
+/* SGR and OSC 8 do not resolve pending wrap. Find the first byte that can
+ * move the cursor, or return -1 for a styling-only write. */
+static int sl_surface_first_output_byte(const char *bytes, size_t length) {
   size_t i = 0;
   while (i < length) {
     unsigned char ch = (unsigned char)bytes[i++];
@@ -542,9 +554,9 @@ static int sl_surface_continues_row(const char *bytes, size_t length) {
       }
       continue;
     }
-    return ch != '\n' && ch != '\r' && ch != '\t';
+    return ch;
   }
-  return 0;
+  return -1;
 }
 
 /* Width reflow can invalidate a clipped endpoint. Reset it at that boundary,
@@ -571,6 +583,7 @@ int sl_surface_native_write(sl_surface_t *surface, const char *bytes,
   sl_surface_t next;
   char prefix[192], suffix[64];
   int count, position, style_count, suffix_count, first, newline_returns;
+  int wrap_pending = 0;
   struct termios attributes;
   size_t i, osc_start = 0;
   char *new_link = NULL;
@@ -598,14 +611,17 @@ int sl_surface_native_write(sl_surface_t *surface, const char *bytes,
     count += position;
     /* Cursor addressing cancels pending wrap. Resume on the following row when
      * a printable continuation follows a completely filled row. */
-    if (surface->col == surface->width &&
-        sl_surface_continues_row(bytes, length)) {
-      memcpy(prefix + count, "\r\033D", 3);
-      count += 3;
-      surface->line_cells = 0;
-      surface->line_extent = 0;
-      surface->ascii_line = 1;
-      surface->line_open = 0;
+    if (surface->col == surface->width) {
+      int byte = sl_surface_first_output_byte(bytes, length);
+      wrap_pending = byte < 0;
+      if (!wrap_pending && byte != '\n' && byte != '\r' && byte != '\t') {
+        memcpy(prefix + count, "\r\033D", 3);
+        count += 3;
+        surface->line_cells = 0;
+        surface->line_extent = 0;
+        surface->ascii_line = 1;
+        surface->line_open = 0;
+      }
     }
   }
   style_count =
@@ -678,7 +694,7 @@ int sl_surface_native_write(sl_surface_t *surface, const char *bytes,
       parts[first].iov_len -= (size_t)written;
     }
   }
-  surface->producer_cursor_live = prompt_row < 0;
+  surface->producer_cursor_live = prompt_row < 0 && !wrap_pending;
   surface->producer_below = next.producer_below;
   surface->history_rows = next.history_rows;
   surface->col = next.col;

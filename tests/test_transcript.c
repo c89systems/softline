@@ -979,10 +979,21 @@ static void test_input_disconnect_during_close(void) {
   CURSOR_REPLIES_REAL(0);
 }
 
-static void test_handoff_quote_spacing(fixture_t *f, const sl_config_t *config,
-                                       enum handoff_output failure,
-                                       int carriage_return) {
+enum recovered_output {
+  QUOTE_AFTER_TEXT,
+  QUOTE_AFTER_CR,
+  HANDOFF_AFTER_CR,
+  STYLE_BEFORE_WRAP,
+  STYLE_BEFORE_NEWLINE
+};
+
+static void test_recovered_output(fixture_t *f, const sl_config_t *config,
+                                  enum handoff_output failure,
+                                  enum recovered_output action) {
   static const char prior[] = "\033[1;1Hprior output\033[8;1H";
+  static const char full_row[] = "12345678901234567890";
+  int wrap = action == STYLE_BEFORE_WRAP || action == STYLE_BEFORE_NEWLINE;
+  int carriage_return = action == QUOTE_AFTER_CR || action == HANDOFF_AFTER_CR;
   sl_t *sl = sl_create_with_config(config);
   handoff_test_fd = config->output_fd;
   handoff_test_master = f->master;
@@ -997,10 +1008,13 @@ static void test_handoff_quote_spacing(fixture_t *f, const sl_config_t *config,
   CHECK(sl &&
         write(config->output_fd, prior, sizeof(prior) - 1) ==
             (ssize_t)(sizeof(prior) - 1) &&
-        sl_output_stream_begin(sl) == SL_OK && CHAT(sl, "producer") == SL_OK);
+        sl_output_stream_begin(sl) == SL_OK);
+  CHECK((wrap ? CHAT(sl, full_row) : CHAT(sl, "producer")) == SL_OK);
   if (carriage_return)
     CHECK(CHAT(sl, "\r") == SL_OK);
-  handoff_cursor_reply = carriage_return ? "\033[8;1R" : "\033[8;9R";
+  handoff_cursor_reply = wrap              ? "\033[8;20R"
+                         : carriage_return ? "\033[8;1R"
+                                           : "\033[8;9R";
   handoff_output = failure;
   CHECK(sl_output_stream_end_for_handoff(sl) == SL_ERROR_IO);
   CHECK(handoff_output == BLOCKED);
@@ -1019,7 +1033,17 @@ static void test_handoff_quote_spacing(fixture_t *f, const sl_config_t *config,
   }
   handoff_output = WRITABLE;
   CHECK(sl_output_stream_begin(sl) == SL_OK);
-  CHECK(sl_output_stream_write_quoted_prompt(sl, "quote") == SL_OK);
+  if (action == HANDOFF_AFTER_CR) {
+    CHECK(sl_output_stream_end_for_handoff(sl) == SL_OK);
+    CHECK(write(config->output_fd, "X", 1) == 1);
+  } else if (wrap) {
+    CHECK(CHAT(sl, "\033[32m") == SL_OK);
+    CHECK(CHAT(sl, "\033[1m") == SL_OK);
+    CHECK((action == STYLE_BEFORE_NEWLINE ? CHAT(sl, "\nX") : CHAT(sl, "X")) ==
+          SL_OK);
+  } else {
+    CHECK(sl_output_stream_write_quoted_prompt(sl, "quote") == SL_OK);
+  }
   f->length = 0;
   capture(f);
   {
@@ -1027,16 +1051,21 @@ static void test_handoff_quote_spacing(fixture_t *f, const sl_config_t *config,
     screen_text(f, 0, 0, text, sizeof(text));
     CHECK(!strcmp(text, "prior output"));
     screen_text(f, 7, 0, text, sizeof(text));
-    CHECK(!strcmp(text, "producer"));
+    CHECK(!strcmp(text, wrap ? full_row : "producer"));
     screen_text(f, 8, 0, text, sizeof(text));
-    CHECK(!*text);
-    screen_text(f, 9, 0, text, sizeof(text));
-    CHECK(!strcmp(text, "> quote"));
+    if (action == HANDOFF_AFTER_CR || wrap) {
+      CHECK(!strcmp(text, "X"));
+    } else {
+      CHECK(!*text);
+      screen_text(f, 9, 0, text, sizeof(text));
+      CHECK(!strcmp(text, "> quote"));
+    }
   }
   handoff_test_fd = -1;
   handoff_cursor_reply = "\033[8;1R";
   CURSOR_REPLIES_REAL(0);
-  CHECK(sl_output_stream_end(sl) == SL_OK);
+  if (action != HANDOFF_AFTER_CR)
+    CHECK(sl_output_stream_end(sl) == SL_OK);
   sl_destroy(sl);
   vterm_free(f->terminal);
   f->terminal = NULL;
@@ -1148,9 +1177,12 @@ int main(void) {
   test_input_disconnect_during_close();
   test_handoff_cursor_recovery(&f, &config, &before, FAIL_AFTER_HIDE, 2);
   test_handoff_cursor_recovery(&f, &config, &before, FAIL_AFTER_HIDE, 3);
-  test_handoff_quote_spacing(&f, &config, FAIL_FINISH, 0);
-  test_handoff_quote_spacing(&f, &config, FAIL_AFTER_MARGIN_RESET, 0);
-  test_handoff_quote_spacing(&f, &config, FAIL_FINISH, 1);
+  test_recovered_output(&f, &config, FAIL_FINISH, QUOTE_AFTER_TEXT);
+  test_recovered_output(&f, &config, FAIL_AFTER_MARGIN_RESET, QUOTE_AFTER_TEXT);
+  test_recovered_output(&f, &config, FAIL_FINISH, QUOTE_AFTER_CR);
+  test_recovered_output(&f, &config, FAIL_FINISH, HANDOFF_AFTER_CR);
+  test_recovered_output(&f, &config, FAIL_FINISH, STYLE_BEFORE_WRAP);
+  test_recovered_output(&f, &config, FAIL_FINISH, STYLE_BEFORE_NEWLINE);
 #endif
   close(f.stop[1]);
   CHECK(!pthread_join(f.reader, NULL));

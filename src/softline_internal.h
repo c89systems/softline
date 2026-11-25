@@ -144,6 +144,7 @@ typedef struct sl_impl {
   /* Producer endpoint before a teardown or recovery write moves the cursor. */
   int terminal_recovery_row, terminal_recovery_col;
   int terminal_recovery_rows, terminal_recovery_width;
+  int terminal_recovery_line_open;
   /* Only the geometry of any prompt rows left by a failed clear. */
   int terminal_recovery_frame_top, terminal_recovery_frame_count;
   int terminal_recovery_frame_height, terminal_recovery_frame_width;

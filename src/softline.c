@@ -1147,6 +1147,7 @@ static int sl_output_surface_reconcile(sl_t *self, int prompt_top) {
         impl->terminal_recovery_col = col;
         impl->terminal_recovery_rows = rows;
         impl->terminal_recovery_width = width;
+        impl->terminal_recovery_line_open = col > 0;
       }
       if (impl->terminal_recovery_frame_count &&
           (impl->terminal_recovery_frame_height != rows ||
@@ -1171,8 +1172,9 @@ static int sl_output_surface_reconcile(sl_t *self, int prompt_top) {
         impl->output_fd, width, prompt_top, row, col,
         impl->native_cursor_valid ? impl->native_history_rows : -1);
     sl_surface_set_osc8(impl->output_surface, impl->osc8.enabled);
-    if (recovering && col == width)
-      sl_surface_native_release_cursor(impl->output_surface);
+    if (saved_endpoint)
+      sl_surface_native_recover_line(impl->output_surface,
+                                     impl->terminal_recovery_line_open);
   restore_startup:
     if (flags >= 0 && fcntl(impl->output_fd, F_SETFL, flags) != 0) {
       sl_surface_discard(impl->output_surface);
@@ -4695,6 +4697,8 @@ static void sl_save_handoff_display(sl_impl_t *impl) {
                              &impl->terminal_recovery_col);
   sl_surface_geometry(impl->output_surface, &impl->terminal_recovery_width,
                       NULL, &impl->terminal_recovery_rows);
+  impl->terminal_recovery_line_open =
+      sl_surface_native_line_open(impl->output_surface);
   sl_save_handoff_frame(impl);
 }
 

@@ -20,6 +20,9 @@ void sl_surface_native_history_shift(sl_surface_t *surface, int rows);
 void sl_surface_native_position(const sl_surface_t *surface, int *row,
                                 int *col);
 int sl_surface_native_exit_advances(const sl_surface_t *surface);
+int sl_surface_native_line_open(const sl_surface_t *surface);
+/* Restore the logical line after recovery repositions the hardware cursor. */
+void sl_surface_native_recover_line(sl_surface_t *surface, int line_open);
 int sl_surface_native_write(sl_surface_t *surface, const char *bytes,
                             size_t length, int prompt_row, int prompt_col);
 int sl_surface_native_finish(sl_surface_t *surface, int prompt_row);

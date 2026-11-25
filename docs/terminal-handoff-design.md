@@ -142,9 +142,11 @@ disconnects, the close returns `SL_ERROR_IO` and releases terminal input
 ownership without waiting for drainage. Reopening after a native I/O failure
 requires a cursor-position reply before resetting the margins and restoring
 cursor visibility. If teardown may have moved the cursor, recovery uses the
-saved producer endpoint at the same terminal dimensions. It clears surviving
-prompt rows before accepting new output. A missing reply or changed dimensions
-that invalidate the saved geometry return `SL_ERROR_IO` with the stream closed.
+saved producer endpoint at the same terminal dimensions. Recovery retains
+unfinished lines and keeps a right-edge wrap pending through styling-only
+writes. It clears surviving prompt rows before accepting new output. A missing
+reply or changed dimensions that invalidate the saved geometry return
+`SL_ERROR_IO` with the stream closed.
 Destroying an editor with unfinished display cleanup attempts to restore
 full-screen scrolling and show the cursor without blocking.
 After a successful handoff and return from the program, call
