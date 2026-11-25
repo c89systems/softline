@@ -240,7 +240,8 @@ int main(int argc, char **argv) {
       --depth;
     CHECK(depth >= 0);
   }
-  CHECK(!depth && strstr(css, "scrollbar-color") &&
+  CHECK(strstr(html, "<main id=\"chat\">") && !depth &&
+        strstr(css, "scrollbar-color") &&
         strstr(css, ".welcome-state #composer-area"));
   CHECK(
       strstr(html, "id=\"workspace\"") &&

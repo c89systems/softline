@@ -9,6 +9,9 @@ function randomId() {
 }
 const $ = id => document.getElementById(id);
 const prompt = $('prompt'), scroll = $('scroll'), messages = $('messages'), toolbar = $('toolbar');
+const chat = $('chat');
+const showWelcome = performance.getEntriesByType('navigation')[0]?.type !== 'reload';
+if (showWelcome) chat.classList.add('welcome-state');
 const previews = new ImagePreviews(document, window, { notice: toast });
 const requestLimit = 32;
 const state = { socket: null, online: false, follow: true, messages: new Map(),
@@ -84,7 +87,6 @@ const followResize = new ResizeObserver(entries => {
 });
 followResize.observe(messages); followResize.observe(scroll); followResize.observe(prompt);
 function leaveWelcome() {
-  const chat = $('chat');
   if (!chat.classList.contains('welcome-state')) return;
   chat.dispatchEvent(new Event('softline:composer-dock'));
   chat.classList.remove('welcome-state');
@@ -617,9 +619,8 @@ function clearConversation() {
   previews.hide(); previews.viewer.close();
   for (const m of state.messages.values()) m.stream?.end();
   state.messages.clear(); messages.replaceChildren(); state.queue.clear(); state.stagingQueue = null;
-  const chat = $('chat');
   chat.dispatchEvent(new Event('softline:welcome-reset'));
-  chat.classList.add('welcome-state');
+  if (showWelcome) chat.classList.add('welcome-state');
   state.approval = null; state.busy = false; $('activity').textContent = ''; queue();
 }
 function receive(event) {
@@ -751,13 +752,15 @@ try {
   state.images = config.images === '1';
   if (Number(config.image_bytes) > 0) state.imageLimit = Number(config.image_bytes);
   if (Number(config.queue_delay) >= 0) state.queueDelay = Number(config.queue_delay);
-  if (config.welcome) {
-    const welcome = new MarkdownStream($('welcome-text'));
-    welcome.write(config.welcome);
-    welcome.end();
+  if (showWelcome) {
+    if (config.welcome) {
+      const welcome = new MarkdownStream($('welcome-text'));
+      welcome.write(config.welcome);
+      welcome.end();
+    }
+    // This is host-supplied branding, separate from model Markdown.
+    $('banner').innerHTML = config.banner || '';
   }
-  // This is host-supplied branding, separate from model Markdown.
-  $('banner').innerHTML = config.banner || '';
   $('brand').innerHTML = config.header || '';
   $('brand').hidden = !config.header?.trim();
   connect();

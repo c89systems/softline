@@ -183,7 +183,7 @@ export async function runWebCompletionTests(source, completionSource, promptSour
     welcome.animate = (keyframes, timing) => recordAnimation(animations, welcome, keyframes, timing);
     if (options.motionLayout) {
       const chat = get('chat'), composer = get('composer-area');
-      const classes = new Set(['welcome-state']);
+      const classes = new Set();
       chat.classList = { add: name => classes.add(name), remove: name => classes.delete(name), contains: name => classes.has(name) };
       composer.getBoundingClientRect = () => ({ ...composer.rect, top: classes.has('welcome-state') ? 310 : composer.rect.top });
       composer.animate = (keyframes, timing) => animations.push({ keyframes, timing });
@@ -226,7 +226,8 @@ export async function runWebCompletionTests(source, completionSource, promptSour
       URL: class extends globalThis.URL { static createObjectURL() { const url = 'blob:test-image-' + (++serial); blobs.push(url); return url; } static revokeObjectURL(url) { revoked.push(url); } }, location: { href: 'http://localhost/', protocol: 'http:', origin: 'http://localhost' },
       crypto: { getRandomValues(array) { return array.fill(++serial); } },
       localStorage: { getItem: name => preferences.get(name), setItem: (name, value) => preferences.set(name, value) },
-      ResizeObserver: class { constructor(fn) { this.fn = fn; this.targets = []; observers.push(this); } observe(target) { this.targets.push(target); } }, performance: { now: () => now },
+      ResizeObserver: class { constructor(fn) { this.fn = fn; this.targets = []; observers.push(this); } observe(target) { this.targets.push(target); } },
+      performance: { now: () => now, getEntriesByType: type => type === 'navigation' ? [{ type: options.navigation || 'navigate' }] : [] },
       MarkdownStream: class {
         constructor(root) { this.root = root; }
         write(text) { if (this.root === get('welcome-text')) this.root.append(text); }
@@ -490,12 +491,10 @@ export async function runWebCompletionTests(source, completionSource, promptSour
   for (const [source, entry] of [
     ['a prompt from another client', { type: 'delta', role: 'user', text: 'Remote prompt' }],
     ['assistant output', { type: 'begin', role: 'assistant' }],
-    ['a plain feed note', { type: 'delta', role: 'note', text: 'Host output' }],
-    ['replayed history', { type: 'delta', role: 'user', text: 'Existing turn' }]
+    ['a plain feed note', { type: 'delta', role: 'note', text: 'Host output' }]
   ]) await check(`${source} dismisses the welcome without changing the local draft`, async ui => {
     await ui.type('unsent draft'); ui.prompt.setSelectionRange(2, 5);
     assert(ui.get('chat').classList.contains('welcome-state') && !ui.animations.length, 'local typing dismissed the welcome');
-    if (source === 'replayed history') ui.event({ type: 'reset' });
     ui.event({ ...entry, id: 'first' }); await ui.idle();
     assert(!ui.get('chat').classList.contains('welcome-state') && ui.animations.length === 2 &&
       ui.animations[0].element === ui.get('welcome'), 'incoming feed did not animate the welcome and composer');
@@ -505,6 +504,21 @@ export async function runWebCompletionTests(source, completionSource, promptSour
     ui.key('Enter'); await ui.idle();
     assert(ui.sent() === 'unsent draft' && ui.animations.length === 2, 'an already docked composer took the welcome flight');
   }, brandedMotion);
+  await check('reload restores history and approvals without showing the welcome', async ui => {
+    const chat = ui.get('chat');
+    assert(!chat.classList.contains('welcome-state') && !ui.get('banner').innerHTML &&
+      !ui.get('welcome-text').textContent, 'reload rendered the welcome before history');
+    ui.event({ type: 'reset' }); await ui.idle();
+    assert(!chat.classList.contains('welcome-state'), 'replay reset showed the welcome');
+    queueState(ui, [{ id: 'approval', revision: '1' }]); await ui.idle();
+    assert(!ui.get('queue').hidden && !ui.animations.length, 'restored approval triggered welcome motion');
+    ui.event({ type: 'delta', id: 'history', role: 'user', text: 'Earlier prompt' }); await ui.idle();
+    assert(ui.get('messages').textContent.includes('Earlier prompt') && !ui.animations.length, 'restored history triggered welcome motion');
+    await ui.type('new prompt'); ui.key('Enter'); await ui.idle();
+    assert(ui.sent() === 'new prompt' && !ui.animations.length && !chat.classList.contains('welcome-state'), 'reloaded composer animated on send');
+  }, { ...brandedMotion, navigation: 'reload', beforeConfig(document) {
+    assert(!document.getElementById('chat').classList.contains('welcome-state'), 'welcome appeared before configuration on reload');
+  } });
   await check('the first approval shows and dismisses the welcome immediately', async ui => {
     queueState(ui, [{ id: 'approval', revision: '1' }]); await ui.idle();
     const queue = ui.get('queue');
