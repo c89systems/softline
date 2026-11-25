@@ -441,6 +441,10 @@ live scroll regions, status lines, and spinners are off; the theme is
   `sl:set_quoted_prompt_style({prefix={r,g,b}, text={r,g,b}})` overrides the
   theme colours; `nil` restores theme defaults. The prefix stays faded and the
   text stays italic.
+- `sl:output_stream_end_for_handoff()` closes the native session and clears
+  all prompt, queue, and status rows while keeping the transcript and draft.
+  Call after the editor suspends, before giving the terminal to a foreground
+  program. Reopen with `sl:output_stream_begin()` before resuming editing.
 - `sl:output_stream_end()` ends the producer session without finishing an
   external renderer document. While an editor is active it retains the
   prompt and scroll region for later finite output or another stream. Otherwise
@@ -640,7 +644,8 @@ command forms still return to an empty prompt. A key callback may return
 `softline.KEY_ACTION_SUSPEND`: `sl:readline()` or `sl:next_prompt()` returns
 `nil, softline.READLINE_SUSPENDED` without submission, history append or
 cancellation. The next editor call resumes that draft before automatic queue
-delivery. Run the child in the owner loop after `sl:output_stream_end()`, then
+delivery. Run the child in the owner loop after
+`sl:output_stream_end_for_handoff()`, then
 call `sl:output_stream_begin()` and resume editing at the current geometry.
 Suspension does not pause producers; the application must ensure exclusive
 terminal ownership. The example rejects Alt-S while an operation runs.
@@ -789,7 +794,7 @@ for handoff; backend acceptance arrives later. They cannot reenter Softline.
 All copied text is bounded by `line_max_len`, backend IDs/revisions/tokens by
 127 bytes, and snapshots by `prompt_queue_max_entries`. No network or storage
 implementation is imposed by Softline. The C constructor uses equivalent
-callbacks and a borrowed context; rebuild C/Lua consumers for shared ABI 5.
+callbacks and a borrowed context.
 
 - `sl:queue_backend_request(request)` returns a per-handle request ID, or
   `nil, status`. Request fields are `operation`, `item_id`, `item_revision`,
@@ -961,7 +966,7 @@ See the [full contract](../docs/softline-spec.md#completion-providers).
 
 ## PTY terminal handoff
 
-`softline.terminal_local(sl[, shell])` opens a fresh local PTY and invokes one
+`sl:terminal_local([shell])` opens a fresh local PTY and invokes one
 shell executable with `-i` (default `$SHELL`, falling back to `/bin/sh`). It uses
 `sl_terminal_local()` through the same relay as remote adapters. Call between
 editor calls after suspension, outside key/watch/idle callbacks. An existing
@@ -970,11 +975,12 @@ escaped`, or `nil, error_code`. The exit status is -1 while unavailable, otherwi
 an exit code or 128+signal. `escaped` reports local escape with Enter then `~.`.
 The handle owns eventual nonblocking reaping of cancelled local children.
 
-`softline.terminal_handoff(sl, callback)` runs a host-selected adapter, returning
+`sl:terminal_handoff(callback)` runs a host-selected adapter, returning
 `true, escaped` or `nil, error_code`. A callback exception is raised only after
 terminal restoration and the close callback. The function keeps the callback
-rooted during handoff. Reentry, including `sl:close()`, is forbidden. Neither
-function adds a receiver shell-control method; both use the shared adapter path.
+rooted during handoff. Reentry, including `sl:close()`, is forbidden. The
+module functions `softline.terminal_local(sl[, shell])` and
+`softline.terminal_handoff(sl, callback)` are equivalent.
 
 If physical terminal output prevents session restoration, the function returns
 `nil, softline.ERROR_IO` promptly with input modes released and the output
@@ -1080,4 +1086,23 @@ Mutation methods return true or nil, status. Stale IDs, duplicate notifications
 and invalid ordering return softline.ERROR_INVALID. Metadata/paths are literal;
 no completion, prompt submission, history append or server-file deletion occurs
 as a consequence of progress or acknowledgement. Without a callback, standalone
-image saving remains available. Rebuild C and Lua consumers for ABI 5.
+image saving remains available.
+
+## Read-only transcripts
+
+The host can register up to eight sources. Ctrl+T cycles through them in the
+terminal and then returns to the editor. Call these methods on the editor's
+owner thread. See the [transcript guide](../docs/transcripts.md) for display
+and navigation behavior.
+
+- `sl:transcript_add(title, rows, columns)` registers a source and returns its
+  numeric ID or `nil, status`.
+- `sl:transcript_write(id, format, bytes)` appends literal text with
+  `softline.TRANSCRIPT_TEXT` or PTY bytes with `softline.TRANSCRIPT_VT`. The
+  string can contain embedded NULs.
+- `sl:transcript_resize(id, rows, columns)` updates the source geometry.
+- `sl:transcript_reset(id)` clears the source's screen and scrollback.
+- `sl:transcript_remove(id)` removes the source.
+- `sl:transcript_visible()` reports whether a transcript is currently visible.
+
+Write, resize, reset, and remove return `true` or `nil, status`.

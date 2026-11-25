@@ -41,6 +41,8 @@ mutate(terminal_receiver include/softline/terminal.h "(*dispatch)"
   "(*fixture_only)" "Terminal receiver lacks public C counterpart: fixture_only")
 mutate(www_declaration include/softline/www.h "int sl_www_asset("
   "int sl_www_fixture_only(" "C public declarations and dynamic export allowlist differ")
+mutate(www_receiver_missing include/softline/www.h "(*cancel_prompt_simulation)"
+  "fixture_cancel_prompt_simulation" "Handle function lacks receiver method: sl_www_cancel_prompt_simulation")
 mutate(c_declaration include/softline/softline.h "int sl_output_stream_begin("
   "int sl_fixture_only(" "C public declarations and dynamic export allowlist differ")
 mutate(receiver include/softline/softline.h "(*output_stream_begin)"
@@ -59,7 +61,7 @@ mutate(c_constant lua/softline_lua.c "lua_pushinteger(L, SL_KEY_NONE)"
   "lua_pushinteger(L, SL_FIXTURE_ONLY)" "Missing public Lua constant declaration/doc: SL_FIXTURE_ONLY")
 mutate(lua_constant lua/softline_lua.c "lua_setfield(L, -2, \"KEY_NONE\")"
   "lua_setfield(L, -2, \"FIXTURE_ONLY\")" "Missing public Lua constant declaration/doc: SL_KEY_NONE")
-mutate(abi CMakeLists.txt "set(SOFTLINE_ABI_VERSION \"5\""
+mutate(abi CMakeLists.txt "set(SOFTLINE_ABI_VERSION \"6\""
   "set(SOFTLINE_ABI_VERSION \"999\"" "ABI documentation and implementation differ")
 mutate(config_docs lua/README.md "`history_max_len`" "history_max_len"
   "Lua config documentation missing: history_max_len")

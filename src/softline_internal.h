@@ -264,8 +264,10 @@ typedef struct sl_impl {
 
 void sl_terminal_reap(sl_impl_t *impl);
 void sl_terminal_cleanup(sl_impl_t *impl);
+void sl_terminal_init_receiver(sl_t *self);
 void sl_terminal_abandon(sl_t *self);
 void sl_transcript_destroy(sl_t *self);
+void sl_transcript_init_receiver(sl_t *self);
 int sl_transcript_key(sl_t *self, int key, const char *bytes, size_t length);
 int sl_transcript_paint(sl_t *self, int rows, int columns);
 int sl_transcript_leave(sl_t *self);

@@ -2454,6 +2454,81 @@ static int softline_lua_output_stream_end(lua_State *L) {
   return softline_lua_status(L, sl_output_stream_end(handle->sl));
 }
 
+static int softline_lua_output_stream_end_for_handoff(lua_State *L) {
+  sl_t *sl = softline_lua_check(L, 1)->sl;
+  return softline_lua_status(L, sl->output_stream_end_for_handoff(sl));
+}
+
+static int softline_lua_transcript_dimensions(lua_State *L, int index,
+                                              int *rows, int *columns) {
+  lua_Integer r = luaL_checkinteger(L, index);
+  lua_Integer c = luaL_checkinteger(L, index + 1);
+  if (r < 1 || r > INT_MAX || c < 1 || c > INT_MAX)
+    return 0;
+  *rows = (int)r;
+  *columns = (int)c;
+  return 1;
+}
+
+static sl_transcript_id_t softline_lua_transcript_id(lua_State *L) {
+  lua_Integer id = luaL_checkinteger(L, 2);
+  return id > 0 && (lua_Unsigned)id <= ULONG_MAX ? (sl_transcript_id_t)id : 0;
+}
+
+static int softline_lua_transcript_add(lua_State *L) {
+  sl_t *sl = softline_lua_check(L, 1)->sl;
+  const char *title = luaL_checkstring(L, 2);
+  sl_transcript_id_t id;
+  int rows, columns, status;
+  if (!softline_lua_transcript_dimensions(L, 3, &rows, &columns))
+    return softline_lua_status(L, SL_ERROR_INVALID);
+  status = sl->transcript_add(sl, title, rows, columns, &id);
+  if (status != SL_OK)
+    return softline_lua_status(L, status);
+  lua_pushinteger(L, (lua_Integer)id);
+  return 1;
+}
+
+static int softline_lua_transcript_write(lua_State *L) {
+  sl_t *sl = softline_lua_check(L, 1)->sl;
+  sl_transcript_id_t id = softline_lua_transcript_id(L);
+  lua_Integer format = luaL_checkinteger(L, 3);
+  size_t length;
+  const char *bytes = luaL_checklstring(L, 4, &length);
+  if (format != SL_TRANSCRIPT_TEXT && format != SL_TRANSCRIPT_VT)
+    return softline_lua_status(L, SL_ERROR_INVALID);
+  return softline_lua_status(
+      L, sl->transcript_write(sl, id, (sl_transcript_format_t)format, bytes,
+                              length));
+}
+
+static int softline_lua_transcript_resize(lua_State *L) {
+  sl_t *sl = softline_lua_check(L, 1)->sl;
+  sl_transcript_id_t id = softline_lua_transcript_id(L);
+  int rows, columns;
+  if (!softline_lua_transcript_dimensions(L, 3, &rows, &columns))
+    return softline_lua_status(L, SL_ERROR_INVALID);
+  return softline_lua_status(L, sl->transcript_resize(sl, id, rows, columns));
+}
+
+static int softline_lua_transcript_reset(lua_State *L) {
+  sl_t *sl = softline_lua_check(L, 1)->sl;
+  return softline_lua_status(
+      L, sl->transcript_reset(sl, softline_lua_transcript_id(L)));
+}
+
+static int softline_lua_transcript_remove(lua_State *L) {
+  sl_t *sl = softline_lua_check(L, 1)->sl;
+  return softline_lua_status(
+      L, sl->transcript_remove(sl, softline_lua_transcript_id(L)));
+}
+
+static int softline_lua_transcript_visible(lua_State *L) {
+  sl_t *sl = softline_lua_check(L, 1)->sl;
+  lua_pushboolean(L, sl->transcript_visible(sl));
+  return 1;
+}
+
 static const luaL_Reg softline_lua_methods[] = {
     {"image_paste_start", softline_lua_image_start},
     {"image_paste_start_source", softline_lua_image_start_source},
@@ -2557,6 +2632,16 @@ static const luaL_Reg softline_lua_methods[] = {
     {"output_stream_write_quoted_prompt",
      softline_lua_output_stream_write_quoted_prompt},
     {"output_stream_end", softline_lua_output_stream_end},
+    {"output_stream_end_for_handoff",
+     softline_lua_output_stream_end_for_handoff},
+    {"terminal_handoff", softline_lua_terminal_handoff},
+    {"terminal_local", softline_lua_terminal_local},
+    {"transcript_add", softline_lua_transcript_add},
+    {"transcript_write", softline_lua_transcript_write},
+    {"transcript_resize", softline_lua_transcript_resize},
+    {"transcript_reset", softline_lua_transcript_reset},
+    {"transcript_remove", softline_lua_transcript_remove},
+    {"transcript_visible", softline_lua_transcript_visible},
     {"last_readline_status", softline_lua_last_readline_status},
     {"last_error", softline_lua_last_error},
     {"close", softline_lua_close},
@@ -2589,6 +2674,10 @@ int luaopen_softline(lua_State *L) {
   lua_setfield(L, -2, "IMAGE_PASTE_ABORT");
   lua_pushinteger(L, SL_IMAGE_PASTE_DONE);
   lua_setfield(L, -2, "IMAGE_PASTE_DONE");
+  lua_pushinteger(L, SL_TRANSCRIPT_TEXT);
+  lua_setfield(L, -2, "TRANSCRIPT_TEXT");
+  lua_pushinteger(L, SL_TRANSCRIPT_VT);
+  lua_setfield(L, -2, "TRANSCRIPT_VT");
   lua_pushinteger(L, SL_TERMINAL_OPEN);
   lua_setfield(L, -2, "TERMINAL_OPEN");
   lua_pushinteger(L, SL_TERMINAL_STEP);

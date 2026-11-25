@@ -7,7 +7,9 @@ deciding which views a conversation can see.
 
 ## Native editor
 
-Include `<softline/transcript.h>`. The C89 interface uses the editor's owner
+Include `<softline/transcript.h>` for the C free functions. The same operations
+are available on the editor receiver and in [Lua](../lua/README.md#read-only-transcripts).
+The C89 interface uses the editor's owner
 thread, as do the watch and idle callbacks. For example, register a viewer
 and feed each chunk from a watch on a background PTY.
 

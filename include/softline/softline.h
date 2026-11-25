@@ -22,6 +22,18 @@ typedef unsigned long sl_watch_id_t;
 /** Image transfer identity; nonzero and never reused during a handle's life. */
 typedef unsigned long sl_image_paste_id_t;
 
+/** Nonzero handle-local transcript identity assigned at registration. */
+typedef unsigned long sl_transcript_id_t;
+
+/** Encoding of a producer output chunk. */
+typedef enum sl_transcript_format {
+  /** UTF-8 text. LF starts a new line and Tab advances to a tab stop.
+   * Other ASCII control bytes are discarded. */
+  SL_TRANSCRIPT_TEXT = 0,
+  /** Terminal output bytes, using the source PTY's rows and columns. */
+  SL_TRANSCRIPT_VT = 1
+} sl_transcript_format_t;
+
 /** Notification delivered to the constructor's image-paste callback. */
 typedef enum sl_image_paste_operation {
   /** Admit the chosen PNG/JPEG representation before reading image content. */
@@ -297,8 +309,7 @@ typedef struct sl_osc8_info {
  * Enter then ~. escapes locally, ~~ sends a literal tilde. Return SL_OK on EOF,
  * SL_TERMINAL_ESCAPED on escape, or an SL_ERROR_* value. Adapter callbacks must
  * not block. Bounded input overflow fails explicitly instead of growing memory.
- * Pending output is discarded on cancellation/failure. This free function adds
- * no shell-control method to the receiver.
+ * Pending output is discarded on cancellation/failure.
  * If terminal output prevents teardown/reacquisition, return SL_ERROR_IO with
  * input modes released and the output session closed. The editor continuation
  * remains intact; reopen with sl_output_stream_begin() when output is writable.
@@ -1432,6 +1443,30 @@ struct sl {
    * @see sl_set_completion_predicate */
   int (*set_completion_predicate)(sl_t *self, sl_completion_predicate_t allow,
                                   void *userdata);
+  /** Close the full prompt frame before a foreground program.
+   * @see sl_output_stream_end_for_handoff */
+  int (*output_stream_end_for_handoff)(sl_t *self);
+  /** Run an adapter relay between editor calls. @see sl_terminal_handoff */
+  int (*terminal_handoff)(sl_t *self, sl_terminal_callback_t callback,
+                          void *context);
+  /** Open a local PTY shell between editor calls. @see sl_terminal_local */
+  int (*terminal_local)(sl_t *self, const char *shell, int *exit_status);
+  /** Register an output viewer in Ctrl+T cycle order. @see sl_transcript_add */
+  int (*transcript_add)(sl_t *self, const char *title, int rows, int columns,
+                        sl_transcript_id_t *id);
+  /** Feed a borrowed byte chunk to a viewer. @see sl_transcript_write */
+  int (*transcript_write)(sl_t *self, sl_transcript_id_t id,
+                          sl_transcript_format_t format, const void *bytes,
+                          size_t length);
+  /** Apply new producer dimensions. @see sl_transcript_resize */
+  int (*transcript_resize)(sl_t *self, sl_transcript_id_t id, int rows,
+                           int columns);
+  /** Clear a viewer before replacing its source. @see sl_transcript_reset */
+  int (*transcript_reset)(sl_t *self, sl_transcript_id_t id);
+  /** Remove an output viewer. @see sl_transcript_remove */
+  int (*transcript_remove)(sl_t *self, sl_transcript_id_t id);
+  /** Report whether a transcript is active. @see sl_transcript_visible */
+  int (*transcript_visible)(const sl_t *self);
 };
 
 /**

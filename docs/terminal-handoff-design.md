@@ -107,12 +107,11 @@ blocked write or stalled close cannot monopolize its loop. Adapter deadlines
 govern connection/setup failure, not how long a user may keep a healthy shell
 open. Inactivity alone is not an error.
 
-Use the existing suspension and output-session lifecycle. Do not add a shell
-method to the public receiver merely to select an adapter. C and Lua hosts must
-be able to select local or remote sessions with the same behavior. Callback
-operations are declared in `sl_terminal_event_t` and `sl_terminal_operation_t`.
-Session selection uses these free functions; suspension retains the editor
-continuation without adding a shell-control method to the receiver.
+Use the existing suspension and output-session lifecycle. The editor receiver
+offers `terminal_local` and `terminal_handoff` in C and Lua. The equivalent
+C free functions and Lua module functions use the same relay. Suspension
+retains the editor continuation. Callback operations are declared in
+`sl_terminal_event_t` and `sl_terminal_operation_t`.
 
 ## Terminal and output ownership
 

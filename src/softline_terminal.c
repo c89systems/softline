@@ -249,8 +249,8 @@ static int relay_loop(sl_impl_t *impl, sl_terminal_callback_t callback,
   }
   return status;
 }
-int sl_terminal_handoff(sl_t *self, sl_terminal_callback_t callback,
-                        void *context) {
+static int terminal_handoff(sl_t *self, sl_terminal_callback_t callback,
+                            void *context) {
   sl_impl_t *impl = self ? self->impl : NULL;
   terminal_relay_t *relay;
   struct termios original, raw, original_output, raw_output;
@@ -333,7 +333,7 @@ finished:
   free(relay);
   return status;
 }
-int sl_terminal_local(sl_t *self, const char *shell, int *exit_status) {
+static int terminal_local(sl_t *self, const char *shell, int *exit_status) {
   sl_impl_t *impl = self ? self->impl : NULL;
   sl_pty_t *pty;
   int status;
@@ -352,7 +352,7 @@ int sl_terminal_local(sl_t *self, const char *shell, int *exit_status) {
   pty->exec_fd = -1;
   pty->shell = shell;
   pty->status = -1;
-  status = sl_terminal_handoff(self, sl_pty_callback, pty);
+  status = terminal_handoff(self, sl_pty_callback, pty);
   (void)sl_pty_reap(pty);
   if (exit_status)
     *exit_status = pty->status;
@@ -363,4 +363,24 @@ int sl_terminal_local(sl_t *self, const char *shell, int *exit_status) {
     free(pty);
   sl_terminal_reap(impl);
   return status;
+}
+
+void sl_terminal_init_receiver(sl_t *self) {
+  self->terminal_handoff = terminal_handoff;
+  self->terminal_local = terminal_local;
+}
+
+int sl_terminal_handoff(sl_t *self, sl_terminal_callback_t callback,
+                        void *context) {
+  return self && self->terminal_handoff
+             ? self->terminal_handoff(self, callback, context)
+             : SL_ERROR_INVALID;
+}
+
+int sl_terminal_local(sl_t *self, const char *shell, int *exit_status) {
+  if (self && self->terminal_local)
+    return self->terminal_local(self, shell, exit_status);
+  if (exit_status)
+    *exit_status = -1;
+  return SL_ERROR_INVALID;
 }

@@ -216,7 +216,7 @@ static void drive_navigation(sl_t *sl, void *context) {
     advance(f, "qj/Gc\r");
     return;
   }
-  CHECK(sl_transcript_visible(sl));
+  CHECK(sl->transcript_visible(sl));
   switch (phase) {
   case 1: {
     struct winsize size = {9, 20, 0, 0};
@@ -657,7 +657,7 @@ static void test_handoff_close(fixture_t *f, sl_config_t *config,
         CHAT(sl, "kept-output\n") == SL_OK);
   CHECK(!sl_readline(sl, "test> ") &&
         sl_last_readline_status(sl) == SL_READLINE_SUSPENDED && f->phase == 2);
-  CHECK(sl_output_stream_end_for_handoff(sl) == SL_OK);
+  CHECK(sl->output_stream_end_for_handoff(sl) == SL_OK);
   CHECK(!tcgetattr(config->input_fd, &after) &&
         test_termios_equal(before, &after));
   capture(f);
@@ -710,16 +710,16 @@ int main(void) {
   CHECK(sl_set_prompt_queue_delivery(sl, SL_PROMPT_QUEUE_DELIVERY_MANUAL) ==
         SL_OK);
   CHECK(sl_transcript_add(sl, "invalid", 0, 32, &rejected) == SL_ERROR_INVALID);
-  CHECK(sl_transcript_add(sl, "Log", 6, 42, &f.log) == SL_OK);
+  CHECK(sl->transcript_add(sl, "Log", 6, 42, &f.log) == SL_OK);
   CHECK(sl_transcript_add(sl, "Worker", 6, 42, &f.worker) == SL_OK);
   for (i = 0; i < 6; ++i)
     CHECK(sl_transcript_add(sl, "extra", 2, 5, &extra[i]) == SL_OK);
   CHECK(sl_transcript_add(sl, "extra", 2, 5, &rejected) == SL_ERROR_FULL);
   for (i = 0; i < 6; ++i)
-    CHECK(sl_transcript_remove(sl, extra[i]) == SL_OK);
+    CHECK(sl->transcript_remove(sl, extra[i]) == SL_OK);
   CHECK(sl_transcript_remove(sl, extra[0]) == SL_ERROR_INVALID);
   CHECK(TEXT(sl, f.log, "plain\ttext\n") == SL_OK);
-  CHECK(sl_transcript_resize(sl, f.log, 7, 44) == SL_OK);
+  CHECK(sl->transcript_resize(sl, f.log, 7, 44) == SL_OK);
   /* Text and VT chunks share one screen. Split a cursor command and a UTF-8
    * character to exercise the producer's actual chunk boundary. */
   CHECK(VT(sl, f.worker, "\033[2;") == SL_OK);
@@ -727,8 +727,9 @@ int main(void) {
   CHECK(VT(sl, f.worker, "\251") == SL_OK);
   CHECK(VT(sl, f.worker, "\033[?1049h\033[H\033[36mALT frame\033[0m") == SL_OK);
   CHECK(VT(sl, f.worker, "\033]2;external title\007") == SL_OK);
-  CHECK(sl_transcript_reset(sl, f.log) == SL_OK);
-  CHECK(TEXT(sl, f.log, "plain\ttext\n") == SL_OK);
+  CHECK(sl->transcript_reset(sl, f.log) == SL_OK);
+  CHECK(sl->transcript_write(sl, f.log, SL_TRANSCRIPT_TEXT, "plain\ttext\n",
+                             sizeof("plain\ttext\n") - 1) == SL_OK);
   CHECK(!sl_transcript_visible(sl));
   CHECK(sl_bind_key(sl, SL_KEY_ALT_BASE + 's', shell_key, &f) == SL_OK);
   CHECK(sl_set_idle_callback(sl, drive, &f) == SL_OK);

@@ -48,6 +48,15 @@ local prompt_methods = {
   "output_stream_write",
   "output_stream_write_quoted_prompt",
   "output_stream_end",
+  "output_stream_end_for_handoff",
+  "terminal_handoff",
+  "terminal_local",
+  "transcript_add",
+  "transcript_write",
+  "transcript_resize",
+  "transcript_reset",
+  "transcript_remove",
+  "transcript_visible",
   "set_prompt_queue",
   "set_queue_display_delay",
   "simulate_prompt",
@@ -151,6 +160,22 @@ assert(sl:output_stream_write("-echo\n"))
 assert(sl:output_stream_end())
 assert(not sl:output_stream_reconcile())
 assert(not sl:output_stream_write("after end"))
+assert(sl:output_stream_begin())
+assert(sl:output_stream_write("before handoff\n"))
+assert(sl:output_stream_end_for_handoff())
+assert(not sl:output_stream_reconcile())
+local bad_transcript, transcript_error = sl:transcript_add("Log", 0, 40)
+assert(bad_transcript == nil and transcript_error == softline.ERROR_INVALID)
+local log = assert(sl:transcript_add("Log", 10, 40))
+assert(not sl:transcript_visible())
+assert(sl:transcript_write(log, softline.TRANSCRIPT_TEXT, "literal text\n"))
+assert(sl:transcript_write(log, softline.TRANSCRIPT_VT, "\27[2J\0Worker"))
+assert(not sl:transcript_write(log, -1, "unknown format"))
+assert(sl:transcript_resize(log, 15, 60))
+assert(sl:transcript_reset(log))
+assert(sl:transcript_remove(log))
+assert(not sl:transcript_write(log, softline.TRANSCRIPT_TEXT, "stale"))
+assert(not sl:transcript_remove(0))
 sl:close()
 
 local image_config = assert(softline.new({

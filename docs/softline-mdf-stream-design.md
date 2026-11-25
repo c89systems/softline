@@ -244,9 +244,10 @@ Queue approval extends that released receiver layout and changes insertion
 signatures in ABI 2. Native queue policies extend the receiver and entry layouts,
 advancing released v0.13.0's ABI 2 to ABI 3. Constructor-selected backends advance
 released v0.15.1's ABI 3 to ABI 4. Image handover and later receiver extensions
-use ABI 5, one increment from released v0.17.0. Both C and Lua consumers must
-rebuild against the matching header and library. Local release rehearsal tags
-are not the released baseline for this decision.
+use ABI 5, one increment from released v0.17.0. Terminal handoff, transcripts,
+and tracked browser simulation extend the receivers in ABI 6, one increment
+from released v0.20.0. Both C and Lua consumers must rebuild against the
+matching header and library.
 
 ### Review exception: active-prompt right-edge continuation
 

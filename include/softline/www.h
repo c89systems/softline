@@ -128,6 +128,13 @@ struct sl_www {
   int (*simulate_prompt)(sl_www_t *self, sl_www_write_t write, void *target,
                          const char *text,
                          const sl_prompt_simulation_options_t *options);
+  /** Start a simulation with feedback. @see sl_www_simulate_prompt_tracked */
+  int (*simulate_prompt_tracked)(sl_www_t *self, sl_www_write_t write,
+                                 void *target, const char *id, const char *text,
+                                 const sl_prompt_simulation_options_t *options);
+  /** Cancel a tracked simulation. @see sl_www_cancel_prompt_simulation */
+  int (*cancel_prompt_simulation)(sl_www_t *self, sl_www_write_t write,
+                                  void *target, const char *id);
 };
 
 /** Initialize documented defaults, including enabled=0. NULL is ignored. */

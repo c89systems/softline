@@ -12,18 +12,6 @@
 extern "C" {
 #endif
 
-/** Nonzero handle-local identity assigned at registration. */
-typedef unsigned long sl_transcript_id_t;
-
-/** Encoding of a producer output chunk. */
-typedef enum sl_transcript_format {
-  /** UTF-8 text. LF starts a new line and Tab advances to a tab stop.
-   * Other ASCII control bytes are discarded. */
-  SL_TRANSCRIPT_TEXT = 0,
-  /** Terminal output bytes, using the source PTY's rows and columns. */
-  SL_TRANSCRIPT_VT = 1
-} sl_transcript_format_t;
-
 /** Register a viewer in Ctrl+T cycle order. The editor owns its bounded
  * screen and scrollback. The host owns the producer and any replay.
  * @param self Native editor.

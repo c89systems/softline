@@ -245,14 +245,14 @@ int main(void) {
                                          "bad id", text,
                                          &options) == SL_ERROR_INVALID &&
           sink.frames == 0);
-    CHECK(sl_www_simulate_prompt_tracked(h.web, simulation_frame, &sink,
+    CHECK(h.web->simulate_prompt_tracked(h.web, simulation_frame, &sink,
                                          "run_17", text, &options) == SL_OK &&
           sink.frames == 4);
     CHECK(sl_www_cancel_prompt_simulation(h.web, write_frame, &h, "run_17") ==
           SL_ERROR_NOT_READY);
     h.fail = 0;
     CHECK(
-        sl_www_cancel_prompt_simulation(h.web, write_frame, &h, "run_17") ==
+        h.web->cancel_prompt_simulation(h.web, write_frame, &h, "run_17") ==
             SL_OK &&
         !strcmp(h.output, "{\"type\":\"simulate_cancel\",\"id\":\"run_17\"}"));
     CHECK(sl_www_message(h.web, &h, report, sizeof(report) - 1, write_frame,

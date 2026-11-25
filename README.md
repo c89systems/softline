@@ -228,10 +228,11 @@ of `src/softline.c`. `make test-public-header-docs` checks documentation coverag
 for installed C declarations. Lua usage and callback contracts are documented in
 [lua/README.md](lua/README.md) and the facade's source comments.
 
-Shared builds use `SOFTLINE_ABI_VERSION=5` for SONAME/SOVERSION. Image-paste handover
-extends the public configuration and receiver layout. Rebuild consumers against
-the new header/library pair. ABI 5 advances exactly once from released v0.17.0's
-ABI 4, independently of the project release version.
+Shared builds use `SOFTLINE_ABI_VERSION=6` for SONAME/SOVERSION. Terminal
+handoff, transcripts, and tracked browser simulation extend the public editor
+and web receiver layouts. Rebuild C and Lua consumers against the matching
+header and library. ABI 6 advances from released v0.20.0's ABI 5,
+independently of the project release version.
 The ABI is fixed by the source, not a CMake option. Reconfiguring an existing
 build discards any obsolete cached ABI value before generating library names
 and installed metadata.

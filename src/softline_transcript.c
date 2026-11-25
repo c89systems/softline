@@ -258,8 +258,8 @@ static transcript_t *lookup(sl_t *self, sl_transcript_id_t id) {
   return index >= 0 ? views->items[index] : NULL;
 }
 
-int sl_transcript_add(sl_t *self, const char *title, int rows, int columns,
-                      sl_transcript_id_t *id) {
+static int transcript_add(sl_t *self, const char *title, int rows, int columns,
+                          sl_transcript_id_t *id) {
   sl_impl_t *impl = self ? self->impl : NULL;
   struct sl_transcripts *views;
   transcript_t *view;
@@ -314,9 +314,9 @@ static void write_text(transcript_t *view, const unsigned char *data,
     vterm_input_write(view->vt, (const char *)data + start, length - start);
 }
 
-int sl_transcript_write(sl_t *self, sl_transcript_id_t id,
-                        sl_transcript_format_t format, const void *bytes,
-                        size_t length) {
+static int transcript_write(sl_t *self, sl_transcript_id_t id,
+                            sl_transcript_format_t format, const void *bytes,
+                            size_t length) {
   transcript_t *view = lookup(self, id);
   if (!view || (!bytes && length) ||
       (format != SL_TRANSCRIPT_TEXT && format != SL_TRANSCRIPT_VT))
@@ -337,8 +337,8 @@ int sl_transcript_write(sl_t *self, sl_transcript_id_t id,
   return SL_OK;
 }
 
-int sl_transcript_resize(sl_t *self, sl_transcript_id_t id, int rows,
-                         int columns) {
+static int transcript_resize(sl_t *self, sl_transcript_id_t id, int rows,
+                             int columns) {
   transcript_t *view = lookup(self, id);
   if (!view || !geometry(rows, columns))
     return SL_ERROR_INVALID;
@@ -360,12 +360,12 @@ int sl_transcript_resize(sl_t *self, sl_transcript_id_t id, int rows,
   return SL_OK;
 }
 
-int sl_transcript_reset(sl_t *self, sl_transcript_id_t id) {
+static int transcript_reset(sl_t *self, sl_transcript_id_t id) {
   transcript_t *view = lookup(self, id);
   return view ? reset_engine(view) : SL_ERROR_INVALID;
 }
 
-int sl_transcript_visible(const sl_t *self) {
+static int transcript_visible(const sl_t *self) {
   struct sl_transcripts *views = registry(self);
   return views && views->selected >= 0;
 }
@@ -395,7 +395,7 @@ int sl_transcript_leave(sl_t *self) {
   return sl_output_replay_transcript(self) == SL_OK ? 0 : -1;
 }
 
-int sl_transcript_remove(sl_t *self, sl_transcript_id_t id) {
+static int transcript_remove(sl_t *self, sl_transcript_id_t id) {
   struct sl_transcripts *views = registry(self);
   int at = index_of(views, id);
   transcript_t *view;
@@ -426,12 +426,57 @@ void sl_transcript_destroy(sl_t *self) {
   (void)sl_transcript_leave(self);
   views->selected = -1;
   while (views->count)
-    (void)sl_transcript_remove(self, views->items[views->count - 1]->id);
+    (void)transcript_remove(self, views->items[views->count - 1]->id);
   for (i = 0; i < views->paint_count; ++i)
     free(views->paint[i].bytes);
   free(views->paint);
   free(views);
   impl->transcripts = NULL;
+}
+
+void sl_transcript_init_receiver(sl_t *self) {
+  self->transcript_add = transcript_add;
+  self->transcript_write = transcript_write;
+  self->transcript_resize = transcript_resize;
+  self->transcript_reset = transcript_reset;
+  self->transcript_remove = transcript_remove;
+  self->transcript_visible = transcript_visible;
+}
+
+int sl_transcript_add(sl_t *self, const char *title, int rows, int columns,
+                      sl_transcript_id_t *id) {
+  return self && self->transcript_add
+             ? self->transcript_add(self, title, rows, columns, id)
+             : SL_ERROR_INVALID;
+}
+
+int sl_transcript_write(sl_t *self, sl_transcript_id_t id,
+                        sl_transcript_format_t format, const void *bytes,
+                        size_t length) {
+  return self && self->transcript_write
+             ? self->transcript_write(self, id, format, bytes, length)
+             : SL_ERROR_INVALID;
+}
+
+int sl_transcript_resize(sl_t *self, sl_transcript_id_t id, int rows,
+                         int columns) {
+  return self && self->transcript_resize
+             ? self->transcript_resize(self, id, rows, columns)
+             : SL_ERROR_INVALID;
+}
+
+int sl_transcript_reset(sl_t *self, sl_transcript_id_t id) {
+  return self && self->transcript_reset ? self->transcript_reset(self, id)
+                                        : SL_ERROR_INVALID;
+}
+
+int sl_transcript_remove(sl_t *self, sl_transcript_id_t id) {
+  return self && self->transcript_remove ? self->transcript_remove(self, id)
+                                         : SL_ERROR_INVALID;
+}
+
+int sl_transcript_visible(const sl_t *self) {
+  return self && self->transcript_visible ? self->transcript_visible(self) : 0;
 }
 
 static int limit(int value, int minimum, int maximum) {

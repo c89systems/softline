@@ -5964,6 +5964,10 @@ static int sl_output_stream_end_method(sl_t *self) {
   return sl_output_stream_end_impl(self, 0);
 }
 
+static int sl_output_stream_end_for_handoff_method(sl_t *self) {
+  return sl_output_stream_end_impl(self, 1);
+}
+
 static int sl_print_above_backlog(sl_t *self, sl_stream_callback_t callback,
                                   void *userdata) {
   sl_impl_t *impl = sl_impl(self);
@@ -10234,6 +10238,9 @@ static sl_t *sl_create_with_config_impl(const sl_config_t *config) {
   self->output_stream_reconcile = sl_output_stream_reconcile_method;
   self->output_stream_write = sl_output_stream_write_method;
   self->output_stream_end = sl_output_stream_end_method;
+  self->output_stream_end_for_handoff = sl_output_stream_end_for_handoff_method;
+  sl_terminal_init_receiver(self);
+  sl_transcript_init_receiver(self);
   self->output_stream_write_quoted_prompt =
       sl_output_stream_write_quoted_prompt_method;
   self->set_quoted_prompt_prefix = sl_set_quoted_prompt_prefix_method;
@@ -10931,7 +10938,9 @@ int sl_output_stream_end(sl_t *self) {
 }
 
 int sl_output_stream_end_for_handoff(sl_t *self) {
-  return sl_output_stream_end_impl(self, 1);
+  if (!self || !self->output_stream_end_for_handoff)
+    return SL_ERROR_INVALID;
+  return self->output_stream_end_for_handoff(self);
 }
 
 int sl_output_stream_write_quoted_prompt(sl_t *self, const char *text) {
