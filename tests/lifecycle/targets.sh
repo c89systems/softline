@@ -9,10 +9,10 @@ cp "$root/Makefile" "$work/"
 mkdir -p "$work/scripts" "$work/bin" "$work/build/debug/examples"
 cp "$root/scripts/"{require-host-bash.sh,require-workspace.sh,deps.sh,build.sh} "$work/scripts/"
 mkdir -p "$work/cmake"
-cp "$root/cmake/softline_workspace.cmake" "$work/cmake/"
+cp "$root/cmake/"{softline_workspace.cmake,build-cbor-debug.cmake} "$work/cmake/"
 cat > "$work/bin/cmake" <<'SH'
 #!/bin/sh
-case "$1" in -DSOFTLINE_WORKSPACE_ROOT=*) exec "$REAL_CMAKE" "$@" ;; esac
+case "$1" in -DSOFTLINE_WORKSPACE_ROOT=*|-DBINARY_DIR=*) exec "$REAL_CMAKE" "$@" ;; esac
 printf 'cmake %s\n' "$*" >> "$CALL_LOG"
 SH
 cat > "$work/scripts/build-local-lua.sh" <<'SH'
@@ -49,6 +49,30 @@ for theme in default riced; do
   [[ "$output" == "0 $theme" ]]
   grep -qx 'supervised ./build/debug/examples/example_chat' "$CALL_LOG"
 done
+# The CBOR Make entry point must hold the same lock across both phases.
+cat > "$work/CMakePresets.json" <<'JSON'
+{"version": 3, "configurePresets": [{"name": "debug", "generator": "Ninja"}]}
+JSON
+cat > "$work/check-lock.cmake" <<'CMAKE'
+file(LOCK "${LOCK}" GUARD PROCESS TIMEOUT 0 RESULT_VARIABLE result)
+if(NOT result STREQUAL "Timeout reached")
+  message(FATAL_ERROR "CBOR build lock was not held: ${result}")
+endif()
+CMAKE
+cat > "$work/CMakeLists.txt" <<'CMAKE'
+cmake_minimum_required(VERSION 3.24)
+project(cbor_build_fixture NONE)
+if(NOT SL_ENABLE_CBOR_TCP OR
+   NOT SL_CBOR_SDK_PREFIXES STREQUAL "/sdk one;/sdk two")
+  message(FATAL_ERROR "CBOR configuration arguments changed")
+endif()
+set(LOCK "${CMAKE_BINARY_DIR}/.build.lock")
+include(check-lock.cmake)
+add_custom_target(check ALL COMMAND "${CMAKE_COMMAND}" "-DLOCK=${LOCK}"
+  -P "${CMAKE_SOURCE_DIR}/check-lock.cmake" VERBATIM)
+CMAKE
+make --no-print-directory build-cbor-debug 'SL_CBOR_SDK_PREFIXES=/sdk one;/sdk two'
+make --no-print-directory build-cbor-debug SL_CBOR_SDK_PREFIXES=
 # Packaging consumes resolver readiness: optional Darwin skips an unavailable
 # SDK, while required Darwin fails before any producer is invoked.
 cp "$root/scripts/"{package.sh,release-targets.sh,release_version.sh} "$work/scripts/"

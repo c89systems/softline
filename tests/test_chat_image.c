@@ -400,7 +400,7 @@ static int default_status_unchanged(sl_t *sl, int master) {
     ready.revents = 0;
     if (poll(&ready, 1, 10) < 0 && errno != EINTR)
       break;
-    /* Drain while the editor runs; also answer its cursor-position probe. */
+    /* Drain while the editor runs. */
     while (used + 1 < sizeof(output)) {
       count = read(master, output + used, sizeof(output) - used - 1);
       if (count < 0 && errno == EINTR)
@@ -416,7 +416,7 @@ static int default_status_unchanged(sl_t *sl, int master) {
     if (done == child) {
       child = -1;
       if (WIFEXITED(status) && WEXITSTATUS(status) == 0 &&
-          strstr(output, "HOST OWNS STATUS") &&
+          strstr(output, "HOST OWNS STATUS") && !strstr(output, "\033[6n") &&
           !strstr(output, "image upload") &&
           !strstr(output, "server byte limit"))
         failed = 0;
@@ -425,7 +425,6 @@ static int default_status_unchanged(sl_t *sl, int master) {
     if (done < 0)
       break;
   } while (milliseconds() < deadline);
-cleanup:
   if (child > 0) {
     kill(child, SIGKILL);
     waitpid(child, NULL, 0);

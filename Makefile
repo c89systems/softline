@@ -78,8 +78,7 @@ build-debug: build ## Build debug target
 
 .PHONY: build-cbor-debug
 build-cbor-debug: ## Build with the opt-in CBOR TCP demos
-	@cmake --preset debug -B "$(CBOR_BUILD_DIR)" -DSL_ENABLE_CBOR_TCP=ON $(if $(SL_CBOR_SDK_PREFIXES),-DSL_CBOR_SDK_PREFIXES="$(SL_CBOR_SDK_PREFIXES)")
-	@cmake --build "$(CBOR_BUILD_DIR)"
+	@cmake "-DBINARY_DIR=$(CBOR_BUILD_DIR)" "-DSL_CBOR_SDK_PREFIXES=$(SL_CBOR_SDK_PREFIXES)" -P cmake/build-cbor-debug.cmake
 
 .PHONY: run-simple
 run-simple: build-debug ## Run C simple example (THEME=default|plain|...)

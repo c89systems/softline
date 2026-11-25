@@ -201,7 +201,8 @@ Missing archives are downloaded and checked against the pinned SHA-256 digests.
 To use your own SDKs, pass their prefixes as a semicolon-separated
 `SL_CBOR_SDK_PREFIXES`. Direct CMake builds opt in with
 `-DSL_ENABLE_CBOR_TCP=ON` and accept the same override.
-The Make targets use `build/cbor-debug`; run its tests with
+The Make targets share `build/cbor-debug` and serialize configure and build
+there before either demo starts. Run its tests with
 `ctest --test-dir build/cbor-debug --output-on-failure`. The default Softline
 build and local/web examples build independently of libcbor.
 
