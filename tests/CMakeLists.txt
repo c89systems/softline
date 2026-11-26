@@ -1132,3 +1132,8 @@ foreach(_softline_test IN LISTS _softline_tests)
   set_property(TEST "${_softline_test}" APPEND PROPERTY ENVIRONMENT
     "SOFTLINE_HISTORY_DIR=${PROJECT_BINARY_DIR}/test-history/${_softline_test}")
 endforeach()
+
+option(SOFTLINE_TEST_KNOWN_REGRESSIONS "Register unfixed regression reproductions" OFF)
+if(SOFTLINE_TEST_KNOWN_REGRESSIONS)
+  add_subdirectory(repros)
+endif()
