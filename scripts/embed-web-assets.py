@@ -42,7 +42,21 @@ def write_assets(stream, name, entries):
     stream.write("};\n")
 
 
-assets = [(path, mime, (root / source).read_bytes()) for path, mime, source in assets]
+def read_assets(entries):
+    return [(path, mime, (root / source).read_bytes()) for path, mime, source in entries]
+
+
+if sys.argv[3:] == ["--demo"]:
+    demo_assets = [
+        ("/assets/vectis-logo.svg", "image/svg+xml", "assets/vectis-logo.svg"),
+        ("/licenses/vectis-logo.txt", "text/plain; charset=utf-8", "assets/vectis-logo.LICENSE"),
+    ]
+    with output.open("w") as stream:
+        stream.write("/* Generated: do not edit. */\n")
+        write_assets(stream, "demo_assets", read_assets(demo_assets))
+    sys.exit(0)
+
+assets = read_assets(assets)
 page, mime, html = assets[0]
 head = b'  <link rel="stylesheet" href="./motion.css">\n  <script type="module" src="./motion.js"></script>\n'
 if html.count(b"</head>") != 1:

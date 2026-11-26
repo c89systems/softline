@@ -163,7 +163,6 @@ void sl_www_config_init(sl_www_config_t *config) {
     return;
   memset(config, 0, sizeof(*config));
   config->title = "softline";
-  config->welcome = "Welcome to softline";
   config->queue_display_delay_ms = 500;
   config->image_max_bytes = 32u * 1024u * 1024u;
 }
@@ -393,6 +392,31 @@ static int simulate_prompt(sl_www_t *self, sl_www_write_t write, void *target,
   return simulate_prompt_frames(self, write, target, NULL, text, options);
 }
 
+static int simulate_prompt_tracked(sl_www_t *self, sl_www_write_t write,
+                                   void *target, const char *id,
+                                   const char *text,
+                                   const sl_prompt_simulation_options_t *opts) {
+  if (!identifier(id))
+    return SL_ERROR_INVALID;
+  return simulate_prompt_frames(self, write, target, id, text, opts);
+}
+
+static int cancel_prompt_simulation(sl_www_t *self, sl_www_write_t write,
+                                    void *target, const char *id) {
+  www_impl_t *impl = self ? self->impl : NULL;
+  sl_www_field_t field = {"id", NULL, 0};
+  int result;
+  if (!impl || !impl->config.enabled || !write || !identifier(id))
+    return SL_ERROR_INVALID;
+  if (impl->callback_active)
+    return SL_ERROR_NOT_READY;
+  field.value = id;
+  impl->callback_active = 1;
+  result = sl_www_emit(write, target, "simulate_cancel", NULL, &field, 1);
+  impl->callback_active = 0;
+  return result;
+}
+
 sl_www_t *sl_www_create(const sl_www_config_t *config) {
   sl_www_t *self;
   www_impl_t *impl;
@@ -429,11 +453,13 @@ sl_www_t *sl_www_create(const sl_www_config_t *config) {
   self->binary = binary;
   self->destroy = destroy;
   self->simulate_prompt = simulate_prompt;
+  self->simulate_prompt_tracked = simulate_prompt_tracked;
+  self->cancel_prompt_simulation = cancel_prompt_simulation;
   memset(fields, 0, sizeof(fields));
   fields[0].name = "title";
   fields[0].value = config->title ? config->title : "softline";
   fields[1].name = "welcome";
-  fields[1].value = config->welcome ? config->welcome : "Welcome to softline";
+  fields[1].value = config->welcome;
   fields[2].name = "banner";
   fields[2].value = config->banner;
   (void)snprintf(delay, sizeof(delay), "%d", config->queue_display_delay_ms);
@@ -488,23 +514,15 @@ int sl_www_simulate_prompt_tracked(sl_www_t *self, sl_www_write_t write,
                                    void *target, const char *id,
                                    const char *text,
                                    const sl_prompt_simulation_options_t *opts) {
-  if (!identifier(id))
-    return SL_ERROR_INVALID;
-  return simulate_prompt_frames(self, write, target, id, text, opts);
+  return self && self->simulate_prompt_tracked
+             ? self->simulate_prompt_tracked(self, write, target, id, text,
+                                             opts)
+             : SL_ERROR_INVALID;
 }
 
 int sl_www_cancel_prompt_simulation(sl_www_t *self, sl_www_write_t write,
                                     void *target, const char *id) {
-  www_impl_t *impl = self ? self->impl : NULL;
-  sl_www_field_t field = {"id", NULL, 0};
-  int result;
-  if (!impl || !impl->config.enabled || !write || !identifier(id))
-    return SL_ERROR_INVALID;
-  if (impl->callback_active)
-    return SL_ERROR_NOT_READY;
-  field.value = id;
-  impl->callback_active = 1;
-  result = sl_www_emit(write, target, "simulate_cancel", NULL, &field, 1);
-  impl->callback_active = 0;
-  return result;
+  return self && self->cancel_prompt_simulation
+             ? self->cancel_prompt_simulation(self, write, target, id)
+             : SL_ERROR_INVALID;
 }

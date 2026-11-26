@@ -47,7 +47,8 @@ struct demo_www_peer {
   size_t input_length, message_length, queued;
   frame_t *head, *tail;
   record_t *cursor;
-  unsigned long replay_before;
+  unsigned long replay_before, replay_through;
+  int replaying;
   sl_www_asset_t asset;
   size_t asset_at;
   int asset_active, close_after_write;
@@ -221,10 +222,11 @@ static void drop(demo_www_peer_t *p) {
 }
 static void interest(demo_www_peer_t *p) {
   if (p->watch && p->server->editor)
-    (void)sl_watch_modify(
-        p->server->editor, p->watch,
-        SL_WATCH_READ |
-            ((p->head || p->cursor || p->asset_active) ? SL_WATCH_WRITE : 0));
+    (void)sl_watch_modify(p->server->editor, p->watch,
+                          SL_WATCH_READ | ((p->head || p->cursor ||
+                                            p->replaying || p->asset_active)
+                                               ? SL_WATCH_WRITE
+                                               : 0));
 }
 static int queue_frame(demo_www_peer_t *p, int opcode, const void *bytes,
                        size_t length) {
@@ -427,6 +429,8 @@ static int replay(void *context, void *peer, const char *after) {
   unsigned long seq = 0;
   int status;
   char *end;
+  if (demo_www_reply(p, "replay_begin", NULL, 0) != SL_OK)
+    return SL_ERROR;
   if (after && !strncmp(after, w->epoch, strlen(w->epoch)) &&
       after[strlen(w->epoch)] == '.') {
     const char *number = after + strlen(w->epoch) + 1;
@@ -452,6 +456,9 @@ static int replay(void *context, void *peer, const char *after) {
   status = w->host.replay
                ? w->host.replay(w->host.context, peer, seq ? after : "")
                : SL_OK;
+  /* The host may publish a fresh queue snapshot from its replay callback. */
+  p->replay_through = w->sequence;
+  p->replaying = 1;
   return status == SL_OK ? terminal_state(w, p) : status;
 }
 static int action(void *context, const sl_www_request_t *r) {
@@ -688,6 +695,12 @@ static int flush(demo_www_peer_t *p) {
     while (!p->head && p->cursor && p->cursor->state &&
            p->cursor->seq <= p->replay_before)
       p->cursor = p->cursor->next;
+    if (!p->head && p->replaying &&
+        (!p->cursor || p->cursor->seq > p->replay_through)) {
+      p->replaying = 0;
+      if (demo_www_reply(p, "replay_end", NULL, 0) != SL_OK)
+        return -1;
+    }
     if (!p->head && p->cursor) {
       record_t *r = p->cursor;
       if (queue_frame(p, 1, r->data, r->length) != SL_OK)
@@ -749,7 +762,8 @@ int demo_www_descriptors(demo_www_t *w, struct pollfd *fds, size_t capacity) {
     fds[i + 1].fd = p->fd;
     fds[i + 1].events =
         (p->close_after_write ? 0 : POLLIN) |
-        ((p->head || p->cursor || p->asset_active) ? POLLOUT : 0);
+        ((p->head || p->cursor || p->replaying || p->asset_active) ? POLLOUT
+                                                                   : 0);
     fds[i + 1].revents = 0;
     demo_web_terminal_descriptor(p->terminal ? p->terminal->value : NULL,
                                  fds + PEERS + 1 + i);
@@ -988,7 +1002,7 @@ int demo_www_publish(demo_www_t *w, const char *type,
   (void)snprintf(seq, sizeof(seq), "%s.%lu", w->epoch, ++w->sequence);
   w->publishing_state =
       type && (!strncmp(type, "queue_", 6) || !strcmp(type, "status") ||
-               !strcmp(type, "terminal_state"));
+               !strcmp(type, "terminal_state") || !strcmp(type, "prompt_trim"));
   return sl_www_emit(save_record, w, type, seq, fields, count);
 }
 void demo_www_begin(demo_www_t *w, const char *id, const char *role,

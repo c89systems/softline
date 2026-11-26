@@ -607,14 +607,14 @@ static int example_completion(int chat) {
   REQUIRE(send_bytes(&e, "\t \r") == 0);
   if (chat) {
     double deadline = now() + 3;
-    while (!contains(&e, "[turn] README.md ", mark) &&
-           !contains(&e, "[queued] README.md ", mark) && now() < deadline)
+    while (!contains(&e, "[turn] README.md", mark) &&
+           !contains(&e, "[queued] README.md", mark) && now() < deadline)
       if (pump(&e, 20))
         break;
-    REQUIRE(contains(&e, "[turn] README.md ", mark) ||
-            contains(&e, "[queued] README.md ", mark));
+    REQUIRE(contains(&e, "[turn] README.md", mark) ||
+            contains(&e, "[queued] README.md", mark));
   } else {
-    REQUIRE(wait_for(&e, "submitted: README.md ", mark) == 0);
+    REQUIRE(wait_for(&e, "submitted: README.md\r\n", mark) == 0);
     REQUIRE(wait_for(&e, "\033[?2004h", mark) == 0);
   }
   mark = e.length;

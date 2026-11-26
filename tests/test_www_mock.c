@@ -111,6 +111,8 @@ static int control(void *context, const char *action, const char *id,
   sl_queue_result_t result;
   (void)id;
   (void)revision;
+  if (!strcmp(action, "trim-off") || !strcmp(action, "trim-on"))
+    return sl_set_prompt_trim(app->sl, !strcmp(action, "trim-on"));
   if (!strcmp(action, "terminal-policy-on") ||
       !strcmp(action, "terminal-policy-off")) {
     demo_www_set_terminal_prompt_lock(demo_web_listener(app->web),
@@ -216,6 +218,9 @@ static void child_server(int output, const char *directory) {
   ops.snapshot = snapshot;
   if (chdir(directory) || setenv("SOFTLINE_WEB", "1", 1) ||
       setenv("SOFTLINE_WEB_PORT", "0", 1) ||
+      setenv("SOFTLINE_WEB_WELCOME", "", 1) ||
+      setenv("SOFTLINE_WEB_BANNER", "<svg aria-label='host banner'></svg>",
+             1) ||
       setenv("SOFTLINE_WEB_DISABLE_PROMPT_DURING_TERMINAL", "0", 1))
     _exit(2);
   unsetenv("SOFTLINE_CHAT_IMAGE_DIR");
@@ -227,7 +232,7 @@ static void child_server(int output, const char *directory) {
   app.sl = sl_create_with_config(&config);
   if (!app.sl || sl_set_buffer(app.sl, "independent ANSI draft") != SL_OK)
     _exit(2);
-  app.web = demo_web_open(NULL, &ops, &app, 0, &enabled);
+  app.web = demo_web_open(app.sl, &ops, &app, 0, &enabled);
   if (!app.web || !enabled)
     _exit(2);
   port = demo_web_port(app.web);
@@ -339,6 +344,32 @@ static int check_http_host(unsigned short port, const char *headers,
            write_all(fd, request, (size_t)size) ||
            read_all(fd, response, sizeof(response)) ||
            memcmp(response, expected, sizeof(response));
+  close(fd);
+  return result;
+}
+static int http_get(unsigned short port, const char *path, char *response,
+                    size_t capacity) {
+  char request[128];
+  int length = snprintf(request, sizeof(request),
+                        "GET %s HTTP/1.1\r\nHost: localhost\r\n\r\n", path);
+  int fd = connect_to(port), result = -1;
+  double deadline = read_clock_ms() + 3000;
+  size_t used = 0;
+  if (fd < 0)
+    return -1;
+  if (length > 0 && (size_t)length < sizeof(request) &&
+      !write_all(fd, request, (size_t)length)) {
+    while (used + 1 < capacity) {
+      ssize_t n =
+          read_with_pty(fd, response + used, capacity - used - 1, deadline);
+      if (n <= 0) {
+        response[used] = 0;
+        result = n < 0 ? -1 : 0;
+        break;
+      }
+      used += (size_t)n;
+    }
+  }
   close(fd);
   return result;
 }
@@ -503,10 +534,14 @@ static int replay_cursors(unsigned short port, const char *epoch, char *data,
     if (fd < 0)
       return -1;
     if (ws_read(fd, data, cap, &opcode) < 0 ||
+        !strstr(data, "\"type\":\"replay_begin\"") ||
+        ws_read(fd, data, cap, &opcode) < 0 ||
         !strstr(data, "\"type\":\"reset\"") ||
         until(fd, data, cap, "aGVsbG8gd29ybGQ=") ||
         strstr(data, "\"timestamp\"") ||
-        (i == 0 && replay_sample(fd, data, cap)))
+        (i == 0 && replay_sample(fd, data, cap)) ||
+        until(fd, data, cap, "\"type\":\"queue_end\"") ||
+        until(fd, data, cap, "\"type\":\"replay_end\""))
       failed = 1;
     close(fd);
     if (failed)
@@ -517,7 +552,10 @@ static int replay_cursors(unsigned short port, const char *epoch, char *data,
   if (fd < 0)
     return -1;
   failed = ws_read(fd, data, cap, &opcode) < 0 ||
-           !strstr(data, "\"type\":\"session\"");
+           !strstr(data, "\"type\":\"replay_begin\"") ||
+           ws_read(fd, data, cap, &opcode) < 0 ||
+           !strstr(data, "\"type\":\"session\"") ||
+           until(fd, data, cap, "\"type\":\"replay_end\"");
   close(fd);
   return failed ? -1 : 0;
 }
@@ -590,7 +628,7 @@ static int edit_turns(int fd, unsigned short port, char *data, size_t cap,
     return -1;
   snprintf(request, sizeof(request),
            "action=edit&view=edits&request=saved&request_seq=3&id=%s&revision=%"
-           "s&text=revised+queued+text",
+           "s&text=++revised+queued+text+%%0A",
            id, revision);
   if (ws_text(fd, request))
     return -1;
@@ -852,7 +890,6 @@ int main(int argc, char **argv) {
   const char *mode = argc >= 4 ? argv[3] : "";
   unsigned short queue_port = 0;
   unsigned short port;
-  size_t used;
   static const unsigned char png[16] = {137, 80,  78, 71, 13, 10, 26, 10,
                                         0,   255, 1,  2,  3,  4,  5,  6};
   (void)signal(SIGPIPE, SIG_IGN);
@@ -975,6 +1012,8 @@ int main(int argc, char **argv) {
   CHECK(child >= 0);
   if (!child) {
     close(pipes[0]);
+    unsetenv("SOFTLINE_WEB_WELCOME");
+    unsetenv("SOFTLINE_WEB_BANNER");
     if (argc >= 4) {
       if (chdir(root) || dup2(pipes[1], STDOUT_FILENO) < 0 ||
           dup2(pipes[1], STDERR_FILENO) < 0 || setenv("SOFTLINE_WEB", "1", 1) ||
@@ -1082,24 +1121,9 @@ int main(int argc, char **argv) {
                    other);
     CHECK(!check_http_host(port, authority, "HTTP/1.1 400"));
   }
-  fd = connect_to(port);
-  CHECK(fd >= 0);
-  CHECK(write_all(fd, "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n", 35) == 0);
-  used = 0;
-  {
-    double deadline = read_clock_ms() + 3000;
-    for (;;) {
-      ssize_t n =
-          read_with_pty(fd, http + used, 512 * 1024 - used - 1, deadline);
-      CHECK(n >= 0);
-      if (!n)
-        break;
-      used += (size_t)n;
-      CHECK(used < 512 * 1024 - 1);
-    }
-  }
-  http[used] = 0;
-  CHECK(strstr(http, "200 OK") && strstr(http, "Welcome to softline") &&
+  CHECK(http_get(port, "/", http, 512 * 1024) == 0);
+  CHECK(strstr(http, "200 OK") &&
+        strstr(http, "<div id=\"welcome-text\"></div>") &&
         strstr(http, "id=\"send\""));
   {
     const char *motion = getenv("SOFTLINE_WEB_ANIMATIONS");
@@ -1107,11 +1131,22 @@ int main(int argc, char **argv) {
     CHECK(!!strstr(http, "./motion.css") == expected &&
           !!strstr(http, "./motion.js") == expected);
   }
-  close(fd);
-  fd = -1;
+  CHECK(http_get(port, "/config.json", http, 512 * 1024) == 0 &&
+        strstr(http, "200 OK"));
+  if (argc == 2)
+    CHECK(strstr(http, "\"welcome\":\"\"") &&
+          strstr(http, "\"banner\":\"<svg aria-label='host banner'></svg>\""));
+  else
+    CHECK(strstr(http, "\"welcome\":\"Welcome to softline\"") &&
+          strstr(http, "./assets/vectis-logo.svg"));
+  CHECK(http_get(port, "/assets/vectis-logo.svg", http, 512 * 1024) == 0 &&
+        strstr(http, "200 OK") && strstr(http, "image/svg+xml") &&
+        strstr(http, "<svg") && strstr(http, "aria-label=\"Vectis logo\""));
   one = ws_open(port);
   two = ws_open(port);
   CHECK(one >= 0 && two >= 0);
+  CHECK(ws_read(one, data, SL_WWW_FRAME_MAX + 1, &opcode) >= 0 &&
+        strstr(data, "\"type\":\"replay_begin\""));
   CHECK(until(one, data, SL_WWW_FRAME_MAX + 1, "\"type\":\"session\"") == 0);
   CHECK(!json_field(data, "id", epoch, sizeof(epoch)));
   CHECK(
@@ -1126,6 +1161,8 @@ int main(int argc, char **argv) {
   CHECK(
       !until(one, data, SL_WWW_FRAME_MAX + 1, "\"type\":\"transcript_data\"") &&
       strstr(data, "\"encoding\":\"base64\""));
+  CHECK(!until(one, data, SL_WWW_FRAME_MAX + 1, "\"type\":\"prompt_trim\"") &&
+        strstr(data, "\"enabled\":\"1\""));
   if (handoff || terminal || argc == 2) {
     CHECK(!until(one, data, SL_WWW_FRAME_MAX + 1, "\"type\":\"capabilities\""));
     if (argc == 2)
@@ -1148,6 +1185,8 @@ int main(int argc, char **argv) {
                    i == 0 || i == 4 ? "\"expand\":\"1\"" : "\"expand\":\"0\""));
     }
   }
+  if (!handoff)
+    CHECK(!until(one, data, SL_WWW_FRAME_MAX + 1, "\"type\":\"replay_end\""));
   if (terminal) {
 #ifdef SOFTLINE_CBOR_TCP
     CHECK(!terminal_roundtrip(port, queue_port, one, root, terminal_lock, data,
@@ -1187,6 +1226,7 @@ int main(int argc, char **argv) {
   }
   if (handoff) {
     CHECK(!terminal_state_wait(one, data, SL_WWW_FRAME_MAX + 1, 0, 1));
+    CHECK(!until(one, data, SL_WWW_FRAME_MAX + 1, "\"type\":\"replay_end\""));
     CHECK(!terminal_state_wait(two, data, SL_WWW_FRAME_MAX + 1, 0, 1));
     CHECK(!ws_text(one, "action=send&view=policy&request=off&request_seq=1"
                         "&text=%2Fterminal-lock+off"));
@@ -1455,18 +1495,58 @@ int main(int argc, char **argv) {
               0);
       }
     }
-    CHECK(ws_text(one, "action=send&request=file-send&text=README.md&view="
+    CHECK(ws_text(one, "action=send&request=file-send&text=+README.md+&view="
                        "completion&request_seq=1") == 0);
     CHECK(until(one, data, SL_WWW_FRAME_MAX + 1, "\"request\":\"file-send\"") ==
               0 &&
           strstr(data, "\"type\":\"accepted\""));
     CHECK(until(two, data, SL_WWW_FRAME_MAX + 1, "UkVBRE1FLm1k") == 0);
-    CHECK(ws_text(one, "action=steer&request=file-steer&text=examples%2Fchat.c&"
-                       "view=completion&request_seq=2") == 0);
+    CHECK(ws_text(one,
+                  "action=steer&request=file-steer&text=+examples%2Fchat.c+&"
+                  "view=completion&request_seq=2") == 0);
     CHECK(until(one, data, SL_WWW_FRAME_MAX + 1,
                 "\"request\":\"file-steer\"") == 0 &&
           strstr(data, "\"type\":\"accepted\""));
     CHECK(until(two, data, SL_WWW_FRAME_MAX + 1, "ZXhhbXBsZXMvY2hhdC5j") == 0);
+  }
+  if (argc == 2) {
+    CHECK(!ws_text(one, "action=send&request=trim-empty&text=+%09+&view="
+                        "completion&request_seq=3"));
+    CHECK(
+        !until(one, data, SL_WWW_FRAME_MAX + 1, "\"request\":\"trim-empty\"") &&
+        strstr(data, "\"type\":\"error\""));
+    CHECK(!ws_text(one, "action=trim-off&request=trim-off"));
+    CHECK(!until(one, data, SL_WWW_FRAME_MAX + 1, "\"type\":\"prompt_trim\"") &&
+          strstr(data, "\"enabled\":\"0\""));
+    /* Replaying the earlier request retains its original outcome. */
+    CHECK(!ws_text(one, "action=send&request=trim-empty&text=+%09+&view="
+                        "completion&request_seq=3"));
+    CHECK(
+        !until(one, data, SL_WWW_FRAME_MAX + 1, "\"request\":\"trim-empty\"") &&
+        strstr(data, "\"type\":\"error\""));
+    CHECK(!ws_text(one, "action=send&request=trim-raw&text=+%09+&view="
+                        "completion&request_seq=4"));
+    CHECK(!until(one, data, SL_WWW_FRAME_MAX + 1, "\"request\":\"trim-raw\"") &&
+          strstr(data, "\"type\":\"accepted\""));
+    CHECK(!until(two, data, SL_WWW_FRAME_MAX + 1, "IAkg"));
+    CHECK(!ws_text(one, "action=trim-on&request=trim-on"));
+    CHECK(!until(one, data, SL_WWW_FRAME_MAX + 1, "\"type\":\"prompt_trim\"") &&
+          strstr(data, "\"enabled\":\"1\""));
+    {
+      int fresh = ws_open(port), event, policy_frames = 0;
+      CHECK(fresh >= 0);
+      for (event = 0; event < 250; ++event) {
+        CHECK(ws_read(fresh, data, SL_WWW_FRAME_MAX + 1, &opcode) >= 0);
+        if (strstr(data, "\"type\":\"prompt_trim\"")) {
+          CHECK(strstr(data, "\"enabled\":\"1\""));
+          ++policy_frames;
+        }
+        if (strstr(data, "\"type\":\"replay_end\""))
+          break;
+      }
+      close(fresh);
+      CHECK(event < 250 && policy_frames == 1);
+    }
   }
   CHECK(ws_text(one, "action=image_begin&id=upload&media_type=image%2Fpng&"
                      "filename=x.png&size=16") == 0);
@@ -1668,6 +1748,7 @@ int main(int argc, char **argv) {
           break;
       }
       CHECK(iteration < 5000 && items == 64);
+      CHECK(!until(one, data, SL_WWW_FRAME_MAX + 1, "\"type\":\"replay_end\""));
     }
     close(one);
     one = -1;

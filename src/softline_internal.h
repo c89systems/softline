@@ -139,17 +139,28 @@ typedef struct sl_impl {
   int image_literal;
   struct sl_pty *terminal_children;
   int terminal_active;
+  int terminal_recovery_pending;
+  int terminal_recovery_display;
+  /* Producer endpoint before a teardown or recovery write moves the cursor. */
+  int terminal_recovery_row, terminal_recovery_col;
+  int terminal_recovery_rows, terminal_recovery_width;
+  int terminal_recovery_line_open;
+  /* Only the geometry of any prompt rows left by a failed clear. */
+  int terminal_recovery_frame_top, terminal_recovery_frame_count;
+  int terminal_recovery_frame_height, terminal_recovery_frame_width;
   struct sl_transcripts *transcripts;
   struct sl_output_backlog *output_backlog;
   int input_fd;
   int output_fd;
+  /* Input handed back by a terminal relay as it exits. */
+  char *pending_input;
+  size_t pending_input_len;
   int screen_width;
   int live_scroll_region;
   int clear_prompt_on_exit;
   int auto_scroll_pinned;
-  int scroll_region_probe_pending;
+  int scroll_region_pin_pending;
   int output_stream_active;
-  /* Feed calls never wait for a terminal cursor-position reply. */
   int output_write_active;
   int output_trailing_newlines;
   int output_ansi_state;
@@ -158,16 +169,15 @@ typedef struct sl_impl {
   char output_pending[SL_OSC8_MAX_BYTES];
   size_t output_pending_len;
   sl_surface_t *output_surface;
-  int cursor_position_probe;
-  int probed_cursor_col;
-  /* Last native teardown position, for terminals without cursor reports. */
+  /* Append point after an ordinary stream close. */
   int native_cursor_valid;
-  int native_cursor_below;
+  int native_cursor_row, native_cursor_height, native_cursor_width;
   int native_history_rows; /* Viewport shifts only; no transcript storage. */
   char *buf;
   size_t len;
   size_t cap;
   size_t line_max_len;
+  int disable_prompt_trim;
   int disable_image_paste;
   char *image_paste_path_template;
   size_t cursor;
@@ -244,11 +254,8 @@ typedef struct sl_impl {
   int request_cancel;
   int request_suspend;
   int request_queue_dispatch;
-  int plain_pending;
-  char plain_pending_ch;
-  char *pending_input;
-  size_t pending_input_len;
-  size_t pending_input_cap;
+  int plain_skip_lf;
+  int input_lookahead; /* One undecoded byte plus one, or zero when empty. */
   sl_readline_status_t last_readline_status;
   sl_idle_callback_t idle_callback;
   void *idle_userdata;
@@ -264,8 +271,10 @@ typedef struct sl_impl {
 
 void sl_terminal_reap(sl_impl_t *impl);
 void sl_terminal_cleanup(sl_impl_t *impl);
+void sl_terminal_init_receiver(sl_t *self);
 void sl_terminal_abandon(sl_t *self);
 void sl_transcript_destroy(sl_t *self);
+void sl_transcript_init_receiver(sl_t *self);
 int sl_transcript_key(sl_t *self, int key, const char *bytes, size_t length);
 int sl_transcript_paint(sl_t *self, int rows, int columns);
 int sl_transcript_leave(sl_t *self);
@@ -298,6 +307,7 @@ void sl_backend_pump(sl_t *self);
 int sl_backend_submit(sl_t *self, sl_prompt_queue_mode_t mode);
 int sl_backend_edit(sl_t *self, int index);
 int sl_backend_promote_newest(sl_t *self);
+int sl_prompt_is_empty(const sl_impl_t *impl);
 int sl_backend_wait_edit(const sl_impl_t *impl);
 int sl_backend_wait_keys(const sl_impl_t *impl);
 int sl_backend_wait_key(const sl_impl_t *impl, int key);

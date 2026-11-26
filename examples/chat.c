@@ -899,6 +899,8 @@ static int exit_editor_key(sl_t *sl, sl_key_t key, void *userdata,
   struct chat_state *state = (struct chat_state *)userdata;
   const char *text = sl_buffer(sl);
   sl_prompt_queue_entry_info_t draft;
+  char *prompt;
+  int demo, quit;
   int immediate = key == SL_KEY_ALT_BASE + 'q';
   int leaving = key == SL_KEY_CTRL_D && text[0] == '\0';
   *action = SL_KEY_ACTION_PASS;
@@ -914,9 +916,16 @@ static int exit_editor_key(sl_t *sl, sl_key_t key, void *userdata,
     *action = SL_KEY_ACTION_SUSPEND;
     return show_goodbye(state) == 0 ? SL_OK : SL_ERROR_IO;
   }
-  if ((key == SL_KEY_ENTER || key == SL_KEY_ALT_ENTER ||
-       key == SL_KEY_CTRL_ENTER) &&
-      !strcmp(text, "/demo")) {
+  if (key != SL_KEY_ENTER && key != SL_KEY_ALT_ENTER &&
+      key != SL_KEY_CTRL_ENTER)
+    return SL_OK;
+  prompt = sl_prepare_prompt(sl, text);
+  if (!prompt)
+    return SL_ERROR_NOMEM;
+  demo = !strcmp(prompt, "/demo");
+  quit = state->remote && !strcmp(prompt, "/quit");
+  sl_free_string(sl, prompt);
+  if (demo) {
     if (sl_prompt_queue_draft_info(sl, &draft) != SL_OK)
       return SL_ERROR_IO;
     if (!draft.id) {
@@ -930,7 +939,7 @@ static int exit_editor_key(sl_t *sl, sl_key_t key, void *userdata,
                                                      : "Prompt demo off.");
     }
   }
-  if (state->remote && key != SL_KEY_CTRL_D && !strcmp(text, "/quit")) {
+  if (quit) {
     if (sl_prompt_queue_draft_info(sl, &draft) != SL_OK)
       return SL_ERROR_IO;
     if (!draft.id) {

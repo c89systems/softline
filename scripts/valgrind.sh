@@ -8,8 +8,7 @@ source "${BASH_SOURCE[0]%/*}/require-workspace.sh" || exit $?
 ROOT_DIR=$(cd "${BASH_SOURCE[0]%/*}/.." && pwd)
 command -v valgrind >/dev/null || { echo 'ERROR: install host Valgrind for the native memory-check gate' >&2; exit 1; }
 cd "$ROOT_DIR"
-cmake --preset valgrind
-cmake --build --preset valgrind
+"$ROOT_DIR/scripts/build.sh" build valgrind
 cd "$ROOT_DIR/build/debug"
 exec ctest --stop-on-failure --output-on-failure --no-tests=error \
   -L memcheck \

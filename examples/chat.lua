@@ -95,7 +95,7 @@ end
 -- terminal release/restoration and preserves the suspended editor.
 local function run_shell(preserve_draft)
   stream_open = false
-  local ok, status, escaped = softline.terminal_local(sl)
+  local ok, status, escaped = sl:terminal_local()
   stream_open = true
   local message
   if not ok then

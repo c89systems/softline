@@ -8,7 +8,7 @@ mkdir -p "$fixture/scripts" "$fixture/cmake" "$fixture/build" "$fixture/dist" "$
 cp "$root/scripts/"{require-workspace.sh,clean.sh,require-host-bash.sh,stage_lua_rock_sources.sh,release_version.sh} "$fixture/scripts/"
 cp "$root/cmake/softline_workspace.cmake" "$fixture/cmake/"
 cp "$root/scripts/"{package-sdk.sh,package-consumer-smoke.sh,release-targets.sh} "$fixture/scripts/"
-entrypoints=(deps.sh fuzz.sh valgrind.sh test_clangd.sh package-verify.sh validate_luarocks.sh verify-artifact-runtime.sh lua-env.sh lua-debug-env.sh terminal-test-runtime.sh relocate-terminal-test-tools.sh)
+entrypoints=(build.sh package.sh test.sh terminal-test-env.sh deps.sh fuzz.sh valgrind.sh test_clangd.sh package-verify.sh validate_luarocks.sh verify-artifact-runtime.sh lua-env.sh lua-debug-env.sh terminal-test-runtime.sh relocate-terminal-test-tools.sh)
 for script in "${entrypoints[@]}"; do cp "$root/scripts/$script" "$fixture/scripts/"; done
 printf keep > "$work/borrowed/sentinel"
 export XDG_CACHE_HOME="$work/global"
@@ -68,7 +68,7 @@ for helper in cpkt-toolchains.sh cpkt-aflpp.sh; do
   chmod +x "$fixture/scripts/$helper"
 done
 export PROVISION_CALLS="$work/provision-calls"
-for target in deps-cross deps-fuzz; do
+for target in build-release package test fuzz-smoke; do
   : > "$PROVISION_CALLS"
   CPKT_TOOLCHAIN_CACHE="$work/borrowed" reject make --no-print-directory -C "$fixture" "$target"
   grep -q 'CPKT_TOOLCHAIN_CACHE must use' "$work/error"

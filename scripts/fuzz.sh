@@ -11,6 +11,7 @@ case "$mode" in smoke|long) ;; *) echo 'Usage: fuzz.sh [smoke|long]' >&2; exit 2
 # Validate owned inputs before compiler discovery or provisioning.
 [[ -s "$ROOT_DIR/fuzz/corpus/basic" ]] || { echo 'ERROR: fuzz/corpus/basic must be a nonempty seed' >&2; exit 1; }
 cd "$ROOT_DIR"
+"$ROOT_DIR/scripts/cpkt-aflpp.sh" ensure
 resolved_env=$("$ROOT_DIR/scripts/cpkt-aflpp.sh" env) || exit $?
 eval "$resolved_env"
 afl_fuzz="$CPKT_AFLPP_ROOT/bin/afl-fuzz"

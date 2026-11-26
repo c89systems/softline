@@ -27,6 +27,7 @@ typedef struct pressure {
 typedef struct outcome {
   int status, closed, preserved, restored;
 } outcome_t;
+enum pressure_phase { RELAY_EXIT, RELAY_ENTRY, DIRECT_CLOSE, DIRECT_NONBLOCK };
 static double seconds(void) {
   struct timespec t;
   clock_gettime(CLOCK_MONOTONIC, &t);
@@ -57,22 +58,9 @@ static int adapter(void *context, sl_terminal_event_t *event) {
     ++p->closed;
   return SL_OK;
 }
-/* Only cursor-report framing is retained by this terminal fixture. */
 static void drain(int master) {
-  static const char query[] = "\033[6n";
   char bytes[2048];
-  size_t i;
-  ssize_t got = read(master, bytes, sizeof(bytes));
-  static size_t matched;
-  for (i = 0; got > 0 && i < (size_t)got; ++i) {
-    matched = bytes[i] == query[matched] ? matched + 1
-              : bytes[i] == '\033'       ? 1
-                                         : 0;
-    if (matched == sizeof(query) - 1) {
-      (void)write(master, "\033[1;1R", 6);
-      matched = 0;
-    }
-  }
+  (void)read(master, bytes, sizeof(bytes));
 }
 static int backpressure(int entry) {
   int master, slave, notice[2], control[2], report[2], status, received;
@@ -113,7 +101,11 @@ static int backpressure(int entry) {
       _exit(3);
     if (entry && (fill_output(slave) || write(notice[1], "o", 1) != 1))
       _exit(4);
-    result.status = sl_terminal_handoff(sl, adapter, &p);
+    if (entry == DIRECT_NONBLOCK && fcntl(slave, F_SETFL, flags | O_NONBLOCK))
+      _exit(8);
+    result.status = entry >= DIRECT_CLOSE
+                        ? sl_output_stream_end_for_handoff(sl)
+                        : sl_terminal_handoff(sl, adapter, &p);
     result.closed = p.closed;
     result.preserved =
         !strcmp(sl_buffer(sl), "preserved draft") && sl_cursor(sl) == 4;
@@ -121,6 +113,11 @@ static int backpressure(int entry) {
         !tcgetattr(slave, &after) && original.c_lflag == after.c_lflag &&
         original.c_iflag == after.c_iflag &&
         original.c_oflag == after.c_oflag && flags == fcntl(slave, F_GETFL);
+    if (entry >= DIRECT_CLOSE &&
+        (sl_output_stream_begin(sl) != SL_ERROR_IO ||
+         tcgetattr(slave, &after) || original.c_lflag != after.c_lflag ||
+         flags != fcntl(slave, F_GETFL)))
+      _exit(9);
     if (write(report[1], &result, sizeof(result)) != (ssize_t)sizeof(result) ||
         read(control[0], &byte, 1) != 1)
       _exit(5);
@@ -348,6 +345,7 @@ int main(int argc, char **argv) {
     return foreground(argv[0]);
   if (argc == 2 && !strcmp(argv[1], "closed-stdio"))
     return closed_stdio();
-  return backpressure(0) || backpressure(1) || foreground(argv[0]) ||
-         closed_stdio();
+  return backpressure(RELAY_EXIT) || backpressure(RELAY_ENTRY) ||
+         backpressure(DIRECT_CLOSE) || backpressure(DIRECT_NONBLOCK) ||
+         foreground(argv[0]) || closed_stdio();
 }

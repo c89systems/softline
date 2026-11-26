@@ -9,16 +9,19 @@ function randomId() {
 }
 const $ = id => document.getElementById(id);
 const prompt = $('prompt'), scroll = $('scroll'), messages = $('messages'), toolbar = $('toolbar');
+const chat = $('chat');
 const previews = new ImagePreviews(document, window, { notice: toast });
 const requestLimit = 32;
 const state = { socket: null, online: false, follow: true, messages: new Map(),
+  replaying: false, started: false,
   queue: new Map(), seq: '', upload: null,
   view: randomId(), generation: 0, imageLimit: 32 * 1024 * 1024,
   queueDelay: 500, queueTimer: null, pending: new Map(), recovery: [], epoch: null,
   images: true, attachments: [], requestSeq: 0, approval: null, edit: null,
   editPending: null, canEdit: false, terminal: '', promptDisabled: false, restorePromptAfterTerminal: false,
   promptExplicitDisabled: false, promptReason: '', terminalPromptLock: false, terminalHandoffs: 0,
-  terminalUnlockCommand: '' };
+  terminalUnlockCommand: '', promptTrim: true };
+const hasPromptText = text => state.promptTrim ? /\P{White_Space}/u.test(text) : !!text;
 const icon = () => $('copy-icon').content.cloneNode(true);
 let toastTimer, simulation = null, simulationInput = null;
 function toast(text) { $('toast').textContent = text; $('toast').hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => { $('toast').hidden = true; }, 3500); }
@@ -61,7 +64,7 @@ function resizePrompt() {
   const height = `${Math.min(Math.max(prompt.scrollHeight, projection.hidden ? 0 : projection.scrollHeight), 200)}px`;
   if (prompt.style.height !== height) prompt.style.height = height;
   if (prompt.clientWidth) projection.style.width = `${prompt.clientWidth}px`;
-  $('send').disabled = state.promptDisabled || !state.online || !prompt.value.trim() || !!state.attachments.length;
+  $('send').disabled = state.promptDisabled || !state.online || !hasPromptText(prompt.value) || !!state.attachments.length;
   previews.draft();
 }
 function follow(immediate = false) {
@@ -83,7 +86,15 @@ const followResize = new ResizeObserver(entries => {
   follow(entries.some(entry => entry.target === scroll));
 });
 followResize.observe(messages); followResize.observe(scroll); followResize.observe(prompt);
-function started() { $('chat').classList.remove('welcome-state'); }
+function showWelcome() {
+  if (!state.replaying && !state.started) chat.classList.add('welcome-state');
+}
+function leaveWelcome() {
+  state.started = true;
+  if (!chat.classList.contains('welcome-state')) return;
+  if (!state.replaying) chat.dispatchEvent(new Event('softline:composer-dock'));
+  chat.classList.remove('welcome-state');
+}
 function feedTimestamp(text) {
   const stamp = document.createElement('div');
   stamp.className = 'feed-timestamp'; stamp.textContent = text;
@@ -94,7 +105,7 @@ function message({ id, role = 'assistant', format, copy: copyPolicy, timestamp, 
   if (format === undefined) format = role === 'user' ? null : 'markdown';
   else if (!['markdown', 'diff'].includes(format)) format = 'text';
   const labeled = role !== 'user' && typeof label === 'string' && !!label;
-  if (role !== 'note' || labeled) started();
+  leaveWelcome();
   const article = document.createElement('article'), body = document.createElement('div');
   article.className = `message ${['user', 'assistant', 'note'].includes(role) ? role : 'assistant'}`;
   article.dataset.message = id; body.className = 'body';
@@ -183,7 +194,9 @@ function queue() {
     }
     $('queue').append(row);
   }
-  $('queue').hidden = !$('queue').childElementCount;
+  const visible = $('queue').childElementCount > 0;
+  if (visible) leaveWelcome();
+  $('queue').hidden = !visible;
   if (restoreFocus) {
     const row = state.approval && [...$('queue').children].find(item => item.dataset.id === state.approval.id);
     (row || prompt).focus();
@@ -258,7 +271,7 @@ function saveEdit() {
   if (!state.edit || state.editPending) return;
   const text = $('queue-edit-text').value;
   if (text === state.edit.original) { $('queue-editor').close(); return; }
-  if (!text.trim() || new TextEncoder().encode(text).length > 128 * 1024) { $('queue-edit-error').textContent = 'Use nonempty text within 128 KiB.'; return; }
+  if (!hasPromptText(text) || new TextEncoder().encode(text).length > 128 * 1024) { $('queue-edit-error').textContent = 'Use nonempty text within 128 KiB.'; return; }
   if (state.pending.size >= requestLimit) { $('queue-edit-error').textContent = 'Wait for the host to confirm pending requests.'; return; }
   const request = randomId(), fields = { id: state.edit.id, revision: state.edit.revision, text, request, request_seq: ++state.requestSeq };
   if (send('edit', fields)) {
@@ -338,7 +351,7 @@ window.addEventListener('keydown', event => {
   event.preventDefault();
   if (!event.repeat) toggleToolbar();
 }, { capture: true });
-const terminalPanel = new TerminalPanel({ document, window, toggleToolbar, closed: () => {
+const terminalPanel = new TerminalPanel({ document, window, toggleToolbar, opening: leaveWelcome, closed: () => {
   state.restorePromptAfterTerminal = !editor.focus();
   if (state.restorePromptAfterTerminal) scroll.focus({ preventScroll: true });
 } });
@@ -380,6 +393,7 @@ function sendPrompt(text, action) {
   const request = randomId(), fields = { text, request, request_seq: ++state.requestSeq };
   if (!send(action, fields)) return false;
   state.pending.set(request, { action, fields, text });
+  leaveWelcome();
   return request;
 }
 function reportSimulation(id, status, details = {}) {
@@ -424,7 +438,7 @@ function simulationEvent(event) {
       reportSimulation(id, 'declined', { reason: 'invalid_options' });
       return;
     }
-    const reason = simulation ? 'busy' : prompt.value.trim() ? 'draft_present' : simulationUnavailable();
+    const reason = simulation ? 'busy' : hasPromptText(prompt.value) ? 'draft_present' : simulationUnavailable();
     if (reason) {
       toast('The prompt is busy. Simulated input was skipped.');
       reportSimulation(id, 'declined', { reason });
@@ -447,7 +461,7 @@ function simulationEvent(event) {
   const job = simulationInput;
   simulationInput = null;
   const text = job.chunks.join('');
-  const reason = !text.trim() ? 'invalid_prompt' : prompt.value.trim() ? 'draft_present' : simulationUnavailable();
+  const reason = !hasPromptText(text) ? 'invalid_prompt' : hasPromptText(prompt.value) ? 'draft_present' : simulationUnavailable();
   if (reason) { reportSimulation(id, 'declined', { reason }); return; }
   if (prompt.value) {
     prompt.value = '';
@@ -497,13 +511,12 @@ prompt.addEventListener('keydown', event => {
 function submit(steer = false, automatic = false) {
   if (state.promptDisabled || state.attachments.length) return;
   editor.finish();
-  if (!prompt.value.trim()) return;
+  if (!hasPromptText(prompt.value)) return;
   if (new TextEncoder().encode(prompt.value).length > 128 * 1024) { toast('The prompt exceeds 128 KiB. Your draft is kept.'); return; }
   const request = sendPrompt(prompt.value, steer ? 'steer' : 'send');
   if (request) {
     stopSimulation('manual_input');
-    $('chat').dispatchEvent(new Event('softline:composer-dock'));
-    prompt.value = ''; prompt.setSelectionRange(0, 0); started();
+    prompt.value = ''; prompt.setSelectionRange(0, 0);
     if (!automatic) state.follow = true;
     editor.reset();
     if (!automatic) editor.focus();
@@ -610,7 +623,9 @@ function clearConversation() {
   previews.hide(); previews.viewer.close();
   for (const m of state.messages.values()) m.stream?.end();
   state.messages.clear(); messages.replaceChildren(); state.queue.clear(); state.stagingQueue = null;
-  $('chat').classList.add('welcome-state');
+  chat.dispatchEvent(new Event('softline:welcome-reset'));
+  state.started = false;
+  showWelcome();
   state.approval = null; state.busy = false; $('activity').textContent = ''; queue();
 }
 function receive(event) {
@@ -618,6 +633,14 @@ function receive(event) {
   if (e.seq) state.seq = e.seq;
   if (e.view && e.view !== state.view) return;
   switch (e.type) {
+    case 'replay_begin': state.replaying = true; break;
+    case 'replay_end':
+      if (state.replaying) {
+        if (state.queue.size) leaveWelcome();
+        state.replaying = false;
+        showWelcome();
+      }
+      break;
     case 'reset':
       clearConversation();
       if (e.text) toast(e.text); break;
@@ -692,6 +715,7 @@ function receive(event) {
       }
       state.epoch = e.id;
       state.online = true; $('connection').textContent = 'Connected';
+      showWelcome();
       updatePromptState(); queue();
       if (!restarted && e.disable_auto_resend !== '1') {
         for (const item of state.pending.values()) send(item.action, item.fields);
@@ -713,6 +737,7 @@ function receive(event) {
       if (!state.terminal) terminalPanel.close();
       queue(); break;
     }
+    case 'prompt_trim': state.promptTrim = e.enabled !== '0'; resizePrompt(); break;
     case 'accepted': requestResult(e.request); break;
     case 'error':
       requestResult(e.request, e.text || 'The entry changed or was consumed. Your edit is kept.');
@@ -721,6 +746,7 @@ function receive(event) {
 }
 function connect() {
   const generation = ++state.generation;
+  state.replaying = false;
   const url = new URL('./events', document.baseURI || location.href); url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
   url.searchParams.set('after', state.seq); url.searchParams.set('view', state.view);
   const socket = state.socket = new WebSocket(url);
@@ -742,7 +768,11 @@ try {
   state.images = config.images === '1';
   if (Number(config.image_bytes) > 0) state.imageLimit = Number(config.image_bytes);
   if (Number(config.queue_delay) >= 0) state.queueDelay = Number(config.queue_delay);
-  $('welcome-text').replaceChildren(); const welcome = new MarkdownStream($('welcome-text')); welcome.write(config.welcome || 'Welcome to softline'); welcome.end();
+  if (config.welcome) {
+    const welcome = new MarkdownStream($('welcome-text'));
+    welcome.write(config.welcome);
+    welcome.end();
+  }
   // This is host-supplied branding, separate from model Markdown.
   $('banner').innerHTML = config.banner || '';
   $('brand').innerHTML = config.header || '';

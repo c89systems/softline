@@ -32,11 +32,7 @@ if [ "${REQUIRE_DARWIN}" = "1" ]; then
       exit 1
       ;;
   esac
-  description=$("${ROOT_DIR}/scripts/cpkt-toolchains.sh" discover arm64-apple-darwin)
-  if ! grep -qx 'status=ready' <<< "$description"; then
-    echo "ERROR: Darwin artifact is required for make release, but osxcross is unavailable" >&2
-    exit 1
-  fi
+  "$ROOT_DIR/scripts/cpkt-toolchains.sh" ensure arm64-apple-darwin >/dev/null
 fi
 
 mkdir -p "${DIST_DIR}"
@@ -45,17 +41,17 @@ for target in ${TARGETS}; do
   preset="${target}-release"
   build_dir="${ROOT_DIR}/build/${preset}"
   echo "Building ${target}..."
-  if [ "${target}" = "arm64-apple-darwin" ]; then
+  if [ "${target}" = "arm64-apple-darwin" ] && [ "${REQUIRE_DARWIN}" = "0" ]; then
     description=$("${ROOT_DIR}/scripts/cpkt-toolchains.sh" discover "$target")
-    if ! grep -qx 'status=ready' <<< "$description"; then
-      if [ "${REQUIRE_DARWIN}" = "1" ]; then
-        echo "ERROR: Darwin artifact is required for make release, but osxcross is unavailable" >&2
-        exit 1
-      fi
+    # An installed SDK may still need the build-owned host MIG collection.
+    if ! grep -q '^root=' <<< "$description"; then
       echo "SKIP: ${target}: optional osxcross toolchain unavailable"
       SKIPPED_TARGETS="${SKIPPED_TARGETS} ${target}"
       continue
     fi
+  fi
+  if [[ "$target" != arm64-apple-darwin || "$REQUIRE_DARWIN" != 1 ]]; then
+    "$ROOT_DIR/scripts/cpkt-toolchains.sh" ensure "$target" >/dev/null
   fi
   configure=(cmake --preset "$preset")
   if [[ "$target" == x86_64-linux-gnu ]]; then

@@ -1,7 +1,7 @@
 #ifndef SOFTLINE_H
 #define SOFTLINE_H
 
-/** @file
+/**
  * C89 editor, queue, completion, image handover and output APIs.
  * The thread that owns an editor drives its methods and receives callbacks
  * synchronously. Descriptors and callback contexts supplied by the host are
@@ -21,6 +21,18 @@ typedef unsigned long sl_watch_id_t;
 
 /** Image transfer identity; nonzero and never reused during a handle's life. */
 typedef unsigned long sl_image_paste_id_t;
+
+/** Nonzero handle-local transcript identity assigned at registration. */
+typedef unsigned long sl_transcript_id_t;
+
+/** Encoding of a producer output chunk. */
+typedef enum sl_transcript_format {
+  /** UTF-8 text. LF starts a new line and Tab advances to a tab stop.
+   * Other ASCII control bytes are discarded. */
+  SL_TRANSCRIPT_TEXT = 0,
+  /** Terminal output bytes, using the source PTY's rows and columns. */
+  SL_TRANSCRIPT_VT = 1
+} sl_transcript_format_t;
 
 /** Notification delivered to the constructor's image-paste callback. */
 typedef enum sl_image_paste_operation {
@@ -211,15 +223,15 @@ typedef enum sl_completion_scope {
  * Return SL_OK or an error. Providers must stop emitting on error. */
 typedef int (*sl_completion_emit_t)(const char *text, void *context);
 
-/** Decide whether an eligible trigger may start a new completion activation.
- * Runs synchronously on the input owner before the provider. It may inspect
- * sl_buffer() and sl_cursor(). Treat the editor as read-only for the call.
- * A declined token can be checked again on a later input turn.
- * @param self Editor with the current draft and cursor.
- * @param trigger Registered introductory character under consideration.
- * @param userdata Borrowed context supplied to sl_set_completion_predicate().
- * @return Positive to call the provider, zero or negative to decline silently.
- * @see sl_set_completion_predicate */
+/** Decide whether a registered trigger can activate completion.
+ *
+ * Runs synchronously before the provider. Inspect the editor with
+ * `sl_buffer(self)` and `sl_cursor(self)` without modifying it.
+ * `trigger` is the introductory character and `userdata` is the borrowed
+ * context passed to `sl_set_completion_predicate()`.
+ *
+ * Return a positive value to call the provider, or zero or a negative value
+ * to decline silently. A later input turn can check the token again. */
 typedef int (*sl_completion_predicate_t)(sl_t *self, char trigger,
                                          void *userdata);
 
@@ -292,25 +304,33 @@ typedef struct sl_osc8_info {
 /** Successful local termination of a terminal relay by beginning-of-line ~. */
 #define SL_TERMINAL_ESCAPED 1
 
-/** Run a local/remote PTY byte relay between editor calls. End/begin an open
- * output session automatically; preserve the editor and never store transcript.
- * Enter then ~. escapes locally, ~~ sends a literal tilde. Return SL_OK on EOF,
- * SL_TERMINAL_ESCAPED on escape, or an SL_ERROR_* value. Adapter callbacks must
- * not block. Bounded input overflow fails explicitly instead of growing memory.
- * Pending output is discarded on cancellation/failure. This free function adds
- * no shell-control method to the receiver.
- * If terminal output prevents teardown/reacquisition, return SL_ERROR_IO with
- * input modes released and the output session closed. The editor continuation
- * remains intact; reopen with sl_output_stream_begin() when output is writable.
- */
+/** Relay a TTY through a nonblocking PTY adapter between editor calls.
+ *
+ * Call on the editor's owner thread. The relay uses the ordinary close policy
+ * for an open output session and reopens it on return. It preserves the
+ * editor continuation. The callback borrows `context` through CLOSE.
+ *
+ * Enter then `~.` escapes locally. At the beginning of a line, `~~` sends a
+ * literal tilde. Returns `SL_OK` on output EOF, `SL_TERMINAL_ESCAPED` on local
+ * escape, or an error such as `SL_ERROR_FULL` for pending input overflow.
+ * Cancellation or failure discards pending output.
+ *
+ * If terminal output prevents teardown or reacquisition, returns
+ * `SL_ERROR_IO` with input modes released and the session closed. The
+ * continuation is preserved. Reopen with `sl_output_stream_begin()` once
+ * the terminal is writable. */
 int sl_terminal_handoff(sl_t *self, sl_terminal_callback_t callback,
                         void *context);
 
-/** Run the built-in local PTY adapter through sl_terminal_handoff(). shell is
- * one executable path (NULL uses SHELL or /bin/sh), invoked with -i. Optional
- * exit_status receives the shell exit code, 128+signal, or -1 if unavailable.
- * After shell exit, drain currently available output up to 64 KiB; background
- * jobs retaining the PTY slave do not keep this handoff open.
+/** Run an interactive shell in a new local PTY between editor calls.
+ *
+ * `shell` is one executable path, invoked with `-i`. A null or empty value
+ * selects `$SHELL`, falling back to `/bin/sh`. Returns the relay result from
+ * `sl_terminal_handoff()`. If supplied, `exit_status` separately receives
+ * the shell exit code, 128 plus its terminating signal, or -1 if unavailable.
+ *
+ * After shell exit, drain currently available output up to 64 KiB, then
+ * return even if a background job still holds the PTY slave.
  * The handle owns eventual nonblocking child reaping after cancellation. */
 int sl_terminal_local(sl_t *self, const char *shell, int *exit_status);
 
@@ -988,8 +1008,9 @@ typedef struct sl_config {
   int input_fd;
   /** Output file descriptor; default is STDOUT_FILENO. */
   int output_fd;
-  /** Editable line wrapping width; zero follows the terminal. Native chat
-   * always uses the physical terminal width. */
+  /** Editable line wrapping width; zero follows the terminal. Pinned ordinary
+   * readline caps this at the terminal width. Native chat uses physical width.
+   */
   int screen_width;
   /** Non-zero lets an ordinary readline prompt pin itself at the terminal
    * bottom and stream output through a temporary scroll region. Disabled by
@@ -1072,6 +1093,8 @@ typedef struct sl_config {
   void *queue_backend_context;
   /** OSC 8 policy; default OFF. See sl_get_osc8_info(). */
   sl_osc8_mode_t osc8_mode;
+  /** Non-zero preserves leading and trailing whitespace on submission. */
+  int disable_prompt_trim;
 } sl_config_t;
 
 /**
@@ -1101,7 +1124,7 @@ struct sl {
   /**
    * Read a submitted prompt, or NULL for the outcome reported by
    * last_readline_status(). Release returned text with free_string().
-   * @see sl_readline
+   * See `sl_readline()` for result and ownership details.
    */
   char *(*readline)(sl_t *self, const char *prompt);
   /** Destroy the handle; NULL-safe through sl_destroy(). */
@@ -1129,7 +1152,7 @@ struct sl {
   /** Enable or disable bottom-pinned scroll-region output for ordinary
    * readline. The setting applies to subsequent print_above() calls; native
    * chat always uses its own scroll region. Acquisition occurs at startup or
-   * between producer callbacks, without requesting cursor replies in feeds. */
+   * between producer callbacks. */
   int (*set_live_scroll_region)(sl_t *self, int enabled);
   /** Register or clear the per-handle idle callback. */
   int (*set_idle_callback)(sl_t *self, sl_idle_callback_t callback,
@@ -1164,7 +1187,6 @@ struct sl {
   /**
    * Stream finite callback-produced output above the active prompt.
    * An open persistent session must be closed first.
-   * @see sl_print_above
    */
   int (*print_above)(sl_t *self, sl_stream_callback_t callback, void *userdata);
   /** Return the most recent readline() status for this handle. */
@@ -1176,7 +1198,6 @@ struct sl {
   /**
    * Receive an eligible queued turn or enter the editor. Set the optional
    * source output and release returned text with free_string().
-   * @see sl_next_prompt
    */
   char *(*next_prompt)(sl_t *self, const char *prompt,
                        sl_prompt_source_t *source);
@@ -1320,24 +1341,26 @@ struct sl {
   int (*watch_clear)(sl_t *self);
   /**
    * Open one live output session on this editor's owner thread.
-   * @see sl_output_stream_begin
+   * A new native terminal owner starts on a fresh bottom row. An ordinary
+   * close and reopen can reuse the tracked append point.
    */
   int (*output_stream_begin)(sl_t *self);
   /**
-   * Observe a settled resize before resuming synchronous output.
-   * @see sl_output_stream_reconcile
+   * Reconcile a settled resize before resuming synchronous output. Requires
+   * an open stream. Uses terminal dimensions and the tracked prompt geometry.
+   * Terminal I/O failure returns `SL_ERROR_IO`.
    */
   int (*output_stream_reconcile)(sl_t *self);
   /**
-   * Write one chunk of validated output. A visible transcript defers it
-   * to the bounded chat backlog. Complete units otherwise appear immediately.
-   * @see sl_output_stream_write
+   * Feed a byte span to the open stream, keeping split ANSI and UTF-8 units
+   * for the next write. Complete units reach the terminal immediately when
+   * chat is visible. A read-only viewer defers them to a bounded backlog.
    */
   int (*output_stream_write)(sl_t *self, const char *bytes, size_t length);
   /**
-   * Close a live output session after the renderer finishes. Incomplete
-   * ANSI/UTF-8 leaves the session open with SL_ERROR_INVALID.
-   * @see sl_output_stream_end
+   * Close a live output session using the configured exit policy. An active
+   * editor retains its frame. Incomplete ANSI or UTF-8 returns
+   * `SL_ERROR_INVALID` and leaves the session open.
    */
   int (*output_stream_end)(sl_t *self);
   /** Set, replace, or clear the italic message above the status line.
@@ -1393,10 +1416,11 @@ struct sl {
   int (*history_set_auto_add)(sl_t *self, int enabled);
   /**
    * Return nonzero during reverse history search, including a failed match.
-   * @see sl_history_search_active
    */
   int (*history_search_active)(const sl_t *self);
-  /** Hand off a typed backend request; see sl_queue_backend_request(). */
+  /** Hand off a typed backend request on the owner thread. The optional
+   * `out_request_id` receives the assigned ID. `SL_OK` confirms handoff.
+   * Admission arrives separately via `queue_backend_result`. */
   int (*queue_backend_request)(sl_t *self, const sl_queue_request_t *request,
                                sl_queue_request_id_t *out_request_id);
   /** Apply an asynchronous response on the owner thread. */
@@ -1423,15 +1447,63 @@ struct sl {
   int (*set_osc8_mode)(sl_t *self, sl_osc8_mode_t mode);
   /** Read cached hyperlink policy/detection; see sl_get_osc8_info(). */
   int (*get_osc8_info)(const sl_t *self, sl_osc8_info_t *info);
-  /** Schedule one simulated input turn; see sl_simulate_prompt(). */
+  /** Copy and schedule a prompt on an empty TTY draft. Null `options` inserts
+   * and submits immediately with queued intent once the editor runs.
+   * An occupied draft or active simulation returns `SL_ERROR_NOT_READY`. */
   int (*simulate_prompt)(sl_t *self, const char *text,
                          const sl_prompt_simulation_options_t *options);
   /** Cancel a pending simulation, preserving the visible draft. */
   int (*cancel_prompt_simulation)(sl_t *self);
-  /** Set or clear the optional activation predicate.
-   * @see sl_set_completion_predicate */
+  /** Set the activation predicate, or pass null `allow` to clear it.
+   * Borrows `userdata` until replacement or destruction. Changing the
+   * predicate clears the preview while preserving the draft and cursor. */
   int (*set_completion_predicate)(sl_t *self, sl_completion_predicate_t allow,
                                   void *userdata);
+  /** Close the open stream before lending the TTY to a foreground program.
+   * Clears prompt, queue and status rows for this close. Preserves the draft
+   * and scrollback. Call between editor calls with chat visible. Incomplete
+   * ANSI or UTF-8 returns `SL_ERROR_INVALID` and leaves the stream open.
+   * The native close does not wait for output drainage. `SL_ERROR_IO` closes
+   * the stream and releases terminal input ownership. */
+  int (*output_stream_end_for_handoff)(sl_t *self);
+  /** Lend the TTY to a nonblocking PTY adapter between editor calls.
+   * Preserves the draft and reopens a live output session on return.
+   * Returns `SL_OK` on EOF or `SL_TERMINAL_ESCAPED` on local escape. */
+  int (*terminal_handoff)(sl_t *self, sl_terminal_callback_t callback,
+                          void *context);
+  /** Run `shell -i` in a local PTY between editor calls. Null or empty
+   * `shell` uses `$SHELL` or `/bin/sh`. The optional `exit_status` output
+   * is separate from the relay result. */
+  int (*terminal_local)(sl_t *self, const char *shell, int *exit_status);
+  /** Register a read-only viewer in Ctrl+T cycle order. Row and column limits
+   * are 200 and 320. On success, writes the new viewer ID through `id`. */
+  int (*transcript_add)(sl_t *self, const char *title, int rows, int columns,
+                        sl_transcript_id_t *id);
+  /** Feed borrowed bytes to a viewer as `SL_TRANSCRIPT_TEXT` or
+   * `SL_TRANSCRIPT_VT`. Split UTF-8 and VT units can continue in the next
+   * chunk. Change format only at a complete unit boundary. */
+  int (*transcript_write)(sl_t *self, sl_transcript_id_t id,
+                          sl_transcript_format_t format, const void *bytes,
+                          size_t length);
+  /** Update the source grid for `id`, independent of the viewport.
+   * Accepts 1–200 rows and 1–320 columns. */
+  int (*transcript_resize)(sl_t *self, sl_transcript_id_t id, int rows,
+                           int columns);
+  /** Clear the screen, parser, scrollback and search for `id`, preserving
+   * the viewer's identity and source geometry. */
+  int (*transcript_reset)(sl_t *self, sl_transcript_id_t id);
+  /** Remove `id`. If it is visible, return to chat and display retained
+   * chat output. */
+  int (*transcript_remove)(sl_t *self, sl_transcript_id_t id);
+  /** Return nonzero while a read-only viewer is on screen. */
+  int (*transcript_visible)(const sl_t *self);
+  /** Configure whitespace trimming for subsequent prompt submissions. */
+  int (*set_prompt_trim)(sl_t *self, int enabled);
+  /** Return nonzero when prompt trimming is enabled. */
+  int (*get_prompt_trim)(const sl_t *self);
+  /** Copy text using this handle's submission policy. See sl_prepare_prompt().
+   */
+  char *(*prepare_prompt)(const sl_t *self, const char *text);
 };
 
 /**
@@ -1445,7 +1517,7 @@ struct sl {
  * theme is SL_PROMPT_THEME_DEFAULT, the status line and spinner are disabled,
  * busy is false, the idle status marker is '+', and clear_prompt_on_exit is
  * zero. X11 image paste is enabled and uses the XDG cache directory. OSC 8
- * hyperlinks are disabled (SL_OSC8_OFF).
+ * hyperlinks are disabled (SL_OSC8_OFF). Prompt trimming is enabled.
  */
 void sl_config_init(sl_config_t *config);
 
@@ -1469,7 +1541,8 @@ sl_t *sl_create_with_config(const sl_config_t *config);
  * readline() returns a project-allocated string on submitted input and NULL for
  * EOF, cancellation, interrupt, suspension, or error. Call
  * sl_last_readline_status() before the next readline() call to classify NULL
- * precisely. While raw mode is owned, kernel tab expansion (TAB3/OXTABS) is
+ * precisely. Non-TTY input accepts CRLF even across separate reads.
+ * While raw mode is owned, kernel tab expansion (TAB3/OXTABS) is
  * disabled; OPOST/ONLCR are preserved and original flags are restored on
  * release. Ctrl-C restores terminal state before raising SIGINT. A returning
  * handler leaves an existing native output session available.
@@ -1580,14 +1653,15 @@ int sl_history_set_auto_add(sl_t *self, int enabled);
 int sl_history_search_active(const sl_t *self);
 
 /** Set ordinary readline wrapping width; zero follows the terminal.
- * Native chat always uses physical terminal width. Updates active prompt
- * wrapping when its effective width changes. Without an active readline,
- * changing this hint does not move or resize a native output session. */
+ * Pinned ordinary readline caps this at the terminal width. Native chat uses
+ * physical width. Updates active prompt wrapping when its effective width
+ * changes. Without an active readline, changing this hint does not move or
+ * resize a native output session. */
 int sl_set_screen_width(sl_t *self, int width);
 
 /** Enable or disable bottom-pinned scroll-region output for ordinary readline.
- * Disabled by default. Ownership is checked at startup and between producer
- * callbacks and acquired once the prompt reaches the terminal bottom.
+ * Disabled by default. Ownership begins at startup or between producer
+ * callbacks. The editor reserves its frame at the bottom of the terminal.
  * Multiple feeds within one callback remain immediate and acquire ownership
  * at the next input-owned boundary. Native chat uses its own scroll region
  * regardless of this setting. */
@@ -1818,19 +1892,18 @@ int sl_watch_remove(sl_t *self, sl_watch_id_t id);
 /** Remove every registered watch from this handle. */
 int sl_watch_clear(sl_t *self);
 
-/** Start Linux X11 image handover at the draft cursor. One transfer per
- * handle. A fresh readline that replaces the draft cancels the transfer.
- * @param self Editor configured with a handover callback.
- * @param id Required destination for the assigned transfer identity.
- * @return SL_OK after scheduling, or an SL_ERROR_* status. */
+/** Start Linux X11 image handover at the draft cursor.
+ *
+ * Requires a configured handover callback and a non-null `id` output.
+ * Returns `SL_OK` after scheduling, with the transfer ID in `*id`.
+ * Each editor allows one transfer. Replacing the draft cancels it. */
 int sl_image_paste_start(sl_t *self, sl_image_paste_id_t *id);
-/** Adopt a streaming source at the draft cursor. A successful adoption
- * delegates source cleanup to its close callback. The caller owns cleanup
- * after a failed adoption.
- * @param self Editor configured with a handover callback.
- * @param source Copied callback table with a borrowed source context.
- * @param id Required destination for the assigned transfer identity.
- * @return SL_OK after adoption, or an SL_ERROR_* status. */
+/** Adopt a streaming image source at the draft cursor.
+ *
+ * Requires a configured handover callback and a non-null `id` output.
+ * Copies the `source` callback table and borrows its context. On `SL_OK`,
+ * assigns `*id` and delegates cleanup to the source's close callback.
+ * On failure, the caller still owns cleanup. */
 int sl_image_paste_start_source(sl_t *self,
                                 const sl_image_paste_source_t *source,
                                 sl_image_paste_id_t *id);
@@ -1843,15 +1916,15 @@ int sl_image_paste_pump(sl_t *self);
 /** Resume paused DATA. Wrong or stale IDs, and invalid ordering, return
  * SL_ERROR_INVALID. */
 int sl_image_paste_resume(sl_t *self, sl_image_paste_id_t id);
-/** After END, supply a nonempty absolute path without control characters,
- * at most 4095 bytes, or NULL and a printable failure reason. Insertion is
- * atomic and deferred until pump/native dispatch. Duplicate/stale results
- * return SL_ERROR_INVALID. Undo removes only the inserted draft bytes.
- * @param self Editor receiving the acknowledgement.
- * @param id Identity supplied to the handover callback.
- * @param path Published storage path, or NULL on failure.
- * @param reason Optional diagnostic for a failed transfer.
- * @return SL_OK when the result is recorded, or an SL_ERROR_* status. */
+/** Acknowledge storage after END for the transfer identified by `id`.
+ *
+ * Supply the published `path` as a nonempty absolute path of at most 4095
+ * bytes, without control characters. On failure, pass a null `path` and
+ * an optional printable `reason`.
+ *
+ * `SL_OK` means the result was recorded. Insertion is atomic and deferred
+ * to pump or native dispatch. Undo removes only the inserted draft bytes.
+ * Duplicate or stale results return `SL_ERROR_INVALID`. */
 int sl_image_paste_complete(sl_t *self, sl_image_paste_id_t id,
                             const char *path, const char *reason);
 /** Cancel one pending transfer, preserving draft text. Duplicate/stale IDs
@@ -1867,7 +1940,9 @@ int sl_bind_key(sl_t *self, sl_key_t key, sl_key_callback_t callback,
 
 /** Insert text bytes at the active cursor on the editor-owner thread. During
  * active or suspended editing, mutations retain undo support. Matching spaces
- * can continue completion phrases; a separating space ends the activation. */
+ * can continue completion phrases; a separating space ends the activation.
+ * Text may be borrowed from buffer(). The cursor advances past any cluster
+ * joined across the insertion boundary. */
 int sl_insert(sl_t *self, const char *text);
 
 /** Replace the active buffer with text bytes and move the cursor to the end.
@@ -1890,22 +1965,39 @@ int sl_set_cursor(sl_t *self, size_t cursor);
  */
 int sl_submit(sl_t *self);
 
+/** Enable or disable trimming of Unicode White_Space at both ends of a
+ * submitted prompt. Enabled by default. Call on the owner thread. The active
+ * draft, including its cursor and undo history, is unaffected by this call.
+ * An all-whitespace submission follows existing empty-draft behavior.
+ * Explicit queue inserts, replacements and typed backend requests accept
+ * their supplied text verbatim. */
+int sl_set_prompt_trim(sl_t *self, int enabled);
+
+/** Report the current submission policy. NULL selects the default (enabled). */
+int sl_get_prompt_trim(const sl_t *self);
+
+/** Allocate a submission-ready copy of text for a host-owned input path.
+ * NULL self uses the default policy. Return NULL for NULL text or allocation
+ * failure. An empty result is a valid allocated string. Release the result
+ * with sl_free_string(). This call does not change the editor or submit text.
+ */
+char *sl_prepare_prompt(const sl_t *self, const char *text);
+
 /** Copy and schedule one nonempty UTF-8 prompt on a TTY editor's owner
  * thread. Requires an empty ordinary draft and no active simulation.
  * The editor advances it during readline/next_prompt and submits via the
  * normal admission path. Steer requires the editor's steer key to be
  * configured. Real input takes over the draft. Escape cancels and clears
  * the simulated text. Paced input follows normal completion-trigger removal.
- * @param self Native editor on its owner thread.
- * @param text UTF-8 prompt copied during this call.
- * @param options Timing and queue intent, or NULL for immediate queued intent.
- * @return SL_OK after scheduling, SL_ERROR_NOT_READY if the draft is occupied
- * or editing is unavailable, or another SL_ERROR_* status. */
+ *
+ * Copies `text` during this call. Null `options` selects all-zero timing
+ * and queued intent. Returns `SL_OK` after scheduling, or
+ * `SL_ERROR_NOT_READY` if the draft is occupied or editing is unavailable. */
 int sl_simulate_prompt(sl_t *self, const char *text,
                        const sl_prompt_simulation_options_t *options);
 /** Cancel automation on this editor, leaving the visible text editable.
- * @return SL_OK even when no simulation is pending, or SL_ERROR_INVALID for
- * an invalid editor. */
+ * Returns `SL_OK` even if no simulation is pending, or `SL_ERROR_INVALID`
+ * for an invalid editor. */
 int sl_cancel_prompt_simulation(sl_t *self);
 
 /** Cancel the active readline() operation from inside a callback. */
@@ -1918,21 +2010,21 @@ int sl_cancel(sl_t *self);
 int sl_suspend(sl_t *self);
 
 /** Write callback-produced chunks above the active prompt. Ordinary readline
- * clears and redraws by default, or uses an
- * enabled live scroll region once the prompt reaches the terminal bottom.
+ * clears and redraws by default, or uses the configured live scroll region.
  * Native chat retains its prompt frame after a live session and reconciles
  * physical resize before writing each callback-produced chunk. Finite output
- * cannot overlap an open live session. The unobserved-resize limits documented
- * for output_stream_write() also apply when resize occurs inside this producer
- * callback. Feed calls never wait for cursor replies. Failed native finite
- * output discards partial ANSI/UTF-8 bytes; later calls start cleanly. */
+ * cannot overlap an open live session. The resize limits of
+ * output_stream_write() also apply inside this producer callback. Failed native
+ * finite output discards partial ANSI/UTF-8 bytes; later calls start cleanly.
+ */
 int sl_print_above(sl_t *self, sl_stream_callback_t callback, void *userdata);
 
 /** Start a persistent output session on self's editor-owner thread. The
  * caller owns its producer, wakeup, renderer, and document lifecycle. A
- * native transcript starts at the current cursor; the editable prompt is
- * initially at the bottom. Physical resize preserves the terminal's prompt
- * position; unchanged cells and the cursor remain untouched. Before that frame,
+ * new native session starts on a fresh bottom row when the prior append point
+ * is unknown, including after a foreground handoff. Existing text remains in
+ * the terminal and its scrollback. The editor anchors its prompt at the bottom.
+ * Before that frame,
  * output uses the full terminal and leaves the producer cursor in place
  * between writes. Redirected streams validate and forward producer bytes
  * without terminal layout controls.
@@ -1941,40 +2033,43 @@ int sl_print_above(sl_t *self, sl_stream_callback_t callback, void *userdata);
  * growth scrolls existing output cells
  * only enough to fit, and shrink returns rows without moving transcript cells.
  * At least three terminal rows are required: two scroll rows and one prompt
- * row. Native transcript reflow belongs to the terminal; Softline never clears
- * or replays it. An unfinished line clipped into scrollback continues at the
- * first visible output row. A clipped hard line boundary resumes next to the
- * prompt; existing scrollback cells and spacing are preserved.
+ * row. The terminal reflows already displayed output. An unfinished line
+ * clipped into scrollback continues at the first visible output row. A
+ * clipped hard line boundary resumes next to the prompt, preserving existing
+ * scrollback cells and spacing.
  * Rapid tmux resizes can leave its grid ahead of the reported PTY size while
  * output is emitted; exact output during that interval is not guaranteed.
  * Returns SL_ERROR_INVALID if a session is already open.
- * Reopening a closed native session probes the cursor again. A nonzero column
- * restarts quote separation for an unfinished externally written line;
- * otherwise known spacing remains. An active editor keeps its
- * continuation state. */
+ * An ordinary close and reopen keep the tracked append point and quote
+ * spacing while Softline has exclusive terminal output. Use the handoff close
+ * before letting another writer use the terminal. With a read-only viewer
+ * selected, opening a stream
+ * defers chat display until the user returns. */
 int sl_output_stream_begin(sl_t *self);
 
-/** Observe a settled resize and repaint the retained prompt before producer
+/** Reconcile a settled resize and update the retained prompt before producer
  * continuation. Call on the owner thread outside producer feeds. An open
  * session is required; invalid/reentrant calls return SL_ERROR_INVALID.
  * Preserves draft/cursor, queue/history/status, queued input, terminal modes
- * and split UTF-8/SGR parsing. Never retains or replays transcript bytes.
- * A required cursor report waits at most 100 ms; failure returns SL_ERROR_IO.
- * Do not resume output assuming reconciliation after failure. No-op off-TTY.
+ * and split UTF-8/SGR parsing. It touches only the owned prompt frame.
+ * Terminal I/O failure returns SL_ERROR_IO. No-op off-TTY.
  * With a read-only transcript selected, return immediately and reconcile the
  * terminal when chat returns, before displaying the backlog.
- * Call before the first write after resize; feeds remain observation-free. */
+ * Call before the first write after resize to update layout independently
+ * of producer activity. */
 int sl_output_stream_reconcile(sl_t *self);
 
 /** Forward length bytes to the live output session. While a read-only
  * transcript is selected, keep the newest 1,000 logical lines or 256 KiB for
- * replay on return to chat. Otherwise forward output immediately. A zero
+ * display on return to chat. Older deferred lines fall out as either limit
+ * fills. With chat visible, complete units are forwarded immediately. A zero
  * length is a no-op and is the only case where bytes may be NULL. Each
  * write continues the same stream without inserting a separator. Valid bytes
  * are printable UTF-8, LF/CR/Tab, ANSI SGR, and opt-in OSC 8; malformed or
  * unsupported control sequences report SL_ERROR_INVALID. A failed write may
- * have emitted a prefix, while a successful write has emitted all complete
- * input units. Native LF positioning follows the output TTY's OPOST/ONLCR
+ * have processed a prefix. A successful write accepts the full span,
+ * including any incomplete unit for the next write.
+ * Native LF positioning follows the output TTY's OPOST/ONLCR
  * settings; producer bytes are unchanged. Kernel tab expansion (TAB3 or OXTABS)
  * is temporarily disabled while Softline owns raw mode and restored on exit;
  * OPOST/ONLCR are preserved and tabs reach the terminal unchanged. Native
@@ -1986,10 +2081,9 @@ int sl_output_stream_reconcile(sl_t *self);
  * tails. Terminal Unicode versions and cluster shaping can differ from the
  * Unicode 16.0 accounting. Wrapping remains producer/terminal-owned. A physical
  * resize can race the VT write and misplace even ASCII output; this is an
- * accepted concurrency limit. A retained frame resized without an input-owned
- * observation, including after readline returns, uses a delta estimate. Earlier
- * hard-ended ASCII reflow or unknown terminal history can misplace continuation
- * even after resize settles. The active input loop observes resize before
+ * accepted concurrency limit. Native width reflow of earlier hard-ended lines
+ * can change their visible row count beyond the tracked endpoint geometry.
+ * The active input loop observes resize before
  * dispatching producer watches. Synchronous producers use
  * sl_output_stream_reconcile() after resize settles and before the next feed.
  * Feeds never observe input or model transcript text. Width reflow of an
@@ -2000,9 +2094,8 @@ int sl_output_stream_reconcile(sl_t *self);
  * the cursor handoff. This hard row boundary can remain split after width
  * growth, and a Unicode cluster split there may lose its attachment. At the
  * bottom output margin, native reflow differs between terminals; width growth
- * may leave a continuation on a separate row. A last-column report cannot
- * distinguish Unicode pending wrap from a cursor before the final cell;
- * continuation can overwrite that cell. These are intentional opaque-feed
+ * may leave a continuation on a separate row. Pending wrap is tracked from
+ * the producer's cell widths. These are intentional opaque-feed
  * limits. Transcript cells are never reconstructed, cleared or replayed to
  * compensate. */
 int sl_output_stream_write(sl_t *self, const char *bytes, size_t length);
@@ -2016,13 +2109,32 @@ int sl_output_stream_write(sl_t *self, const char *bytes, size_t length);
  * clear_prompt_on_exit selects clearing the whole prompt area and returning
  * below output instead. Without a prompt, return below output.
  * Closing an idle native session also releases terminal input ownership.
- * Applications may run a foreground child and then output_stream_begin() to
- * probe its final cursor and create a fresh prompt, keeping handle history
- * and settings. This handoff must run outside active editor callbacks.
- * The application owns child execution.
+ * A disconnected native TTY returns SL_ERROR_IO and releases the input TTY.
  * Incomplete ANSI/UTF-8 returns SL_ERROR_INVALID and leaves the session open.
+ * Use `sl_output_stream_end_for_handoff()` to clear the full frame for a
+ * foreground program.
  */
 int sl_output_stream_end(sl_t *self);
+
+/** End an idle stream before the host runs a foreground terminal program.
+ *
+ * Call on the owner thread outside callbacks, between editor calls and with
+ * chat visible. The native close releases terminal input ownership, clears
+ * queue, status and input rows, and places the cursor below the output.
+ * It preserves the draft, cursor, undo, history, queue, edit and status
+ * state. After the program returns, call `sl_output_stream_begin()` and
+ * resume the same editor. The full-frame policy applies to this close only.
+ * The native close does not wait for output drainage.
+ *
+ * Returns `SL_OK` on success, `SL_ERROR_INVALID` for an unavailable editor,
+ * closed stream or incomplete ANSI/UTF-8. An open stream stays open on
+ * validation failure. On `SL_ERROR_IO`, the stream closes and terminal
+ * input ownership is released. Reopening uses the saved producer endpoint
+ * and prompt geometry to restore margins, visibility and surviving frame
+ * rows. Recovery of this geometry requires the same terminal dimensions.
+ * A clipped producer row follows the usual continuation policy. The editor
+ * clears surviving prompt rows before accepting more output. */
+int sl_output_stream_end_for_handoff(sl_t *self);
 
 /** Write a submitted prompt as a themed quote into an open output stream.
  * Word-wrap at the current output width and prefix every visible row. Add only
@@ -2064,32 +2176,30 @@ int sl_set_quoted_prompt_style(sl_t *self, const sl_quote_style_t *style);
  * candidates. Deeper lists are separate snapshots. Backspace selects the
  * original parent list. A fully present unique match with no descendants, or
  * an unmatched token, lets Tab reach ordinary host/queue handling.
- * @param self Editor on its owner thread.
- * @param providers Array copied on success. Pass NULL with count zero.
- * The callbacks and their borrowed contexts must remain valid while registered.
- * @param count Number of registrations.
- * @return SL_OK, SL_ERROR_INVALID for invalid registrations or unavailable
- * editor, SL_ERROR_NOT_READY during resolution, SL_ERROR_NOMEM if the registry
- * could not be copied, or SL_ERROR if the old completion could not be finished.
- * SL_ERROR_IO means the new registry was installed and its redraw failed.
- * @see sl_set_completion_predicate */
+ *
+ * Copies `count` entries from `providers` on success. Pass zero and a null
+ * array to clear. Callbacks and borrowed contexts must remain valid while
+ * registered.
+ *
+ * Returns `SL_OK` on success. Invalid registrations or an unavailable
+ * editor return `SL_ERROR_INVALID`. Resolution in progress returns
+ * `SL_ERROR_NOT_READY`. A failed allocation returns `SL_ERROR_NOMEM`.
+ * `SL_ERROR` means the old activation could not be finished.
+ * `SL_ERROR_IO` means the new registry was installed but redraw failed. */
 int sl_set_completion_providers(sl_t *self,
                                 const sl_completion_provider_t *providers,
                                 size_t count);
 
-/** Set or clear an editor-wide completion activation predicate.
- * Changing it clears any active preview and cached candidates while preserving
- * the draft and cursor. A declined activation skips the provider silently.
- * @param self Editor on its owner thread, outside terminal relay and queue
- * backend callbacks.
- * @param allow Callback to run before a provider resolves a new token. NULL
- * restores normal trigger eligibility.
- * @param userdata Borrowed callback context, valid until replacement or
- * editor destruction.
- * @return SL_OK, SL_ERROR_INVALID for an unavailable editor,
- * SL_ERROR_NOT_READY during completion resolution, or SL_ERROR_IO if the
- * predicate changed but the prompt redraw failed.
- * @see sl_completion_predicate_t */
+/** Set the predicate that runs before a provider resolves a new token.
+ *
+ * Call on the owner thread outside terminal relay and backend callbacks.
+ * Null `allow` restores normal trigger eligibility. `userdata` is borrowed
+ * until replacement or destruction. Updating the predicate clears cached
+ * candidates and preview, preserving the draft and cursor.
+ *
+ * Returns `SL_OK` on success, `SL_ERROR_INVALID` for an unavailable editor,
+ * or `SL_ERROR_NOT_READY` during resolution. `SL_ERROR_IO` means the
+ * predicate changed but the prompt redraw failed. */
 int sl_set_completion_predicate(sl_t *self, sl_completion_predicate_t allow,
                                 void *userdata);
 
@@ -2128,10 +2238,16 @@ int sl_queue_backend_request(sl_t *self, const sl_queue_request_t *request,
 /** Opaque lease on a backend request's retained text fields. */
 typedef struct sl_queue_request_lease sl_queue_request_lease_t;
 
-/** Pin the text fields of the request passed to the active backend callback.
- * Copy the request's scalar fields before returning from the callback. The
- * lease keeps its strings valid across partial writes without another copy.
- * Owner-thread only. Release all adapter leases by backend detach. */
+/** Pin the strings of the exact `request` passed to the active backend
+ * callback.
+ *
+ * Call on the owner thread with a non-null `lease` output. Copy any scalars
+ * you need before the callback returns. The lease keeps the strings valid
+ * across partial writes without another copy.
+ *
+ * Returns `SL_OK` with `*lease` set on success. Release once with
+ * `sl_queue_backend_unpin_request()`, by backend detach. Failure leaves a
+ * null lease and returns `SL_ERROR_INVALID` or `SL_ERROR_FULL`. */
 int sl_queue_backend_pin_request(sl_t *self, const sl_queue_request_t *request,
                                  sl_queue_request_lease_t **lease);
 /** Release one successful pin. NULL is allowed. */

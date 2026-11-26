@@ -4,18 +4,15 @@ foreach(terminal_root "${SOFTLINE_TERMINAL_TEST_ROOT}" "$ENV{SOFTLINE_TERMINAL_T
   endif()
 endforeach()
 find_package(Threads REQUIRED)
-function(softline_test_silent_cursor target)
-  if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND TARGET softline_static)
-    target_link_libraries(${target} PRIVATE softline_static ${ARGN})
-    target_compile_definitions(${target} PRIVATE SOFTLINE_TEST_SILENT_CURSOR_PROBE)
-    target_link_options(${target} PRIVATE -Wl,--wrap=write -Wl,--wrap=select)
-  else()
-    target_link_libraries(${target} PRIVATE softline ${ARGN})
-  endif()
-endfunction()
 if(UNIX)
   add_executable(test_transcript test_transcript.c)
-  softline_test_silent_cursor(test_transcript Threads::Threads)
+  if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND TARGET softline_static)
+    target_link_libraries(test_transcript PRIVATE softline_static Threads::Threads)
+    target_compile_definitions(test_transcript PRIVATE SOFTLINE_TEST_HANDOFF_WRITE)
+    target_link_options(test_transcript PRIVATE -Wl,--wrap=write)
+  else()
+    target_link_libraries(test_transcript PRIVATE softline Threads::Threads)
+  endif()
   if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_link_libraries(test_transcript PRIVATE util)
   endif()
@@ -273,7 +270,7 @@ add_test(NAME softline_history COMMAND test_history "${PROJECT_BINARY_DIR}")
 set_tests_properties(softline_history PROPERTIES LABELS "unit;history" TIMEOUT 30)
 
 add_executable(test_softline test_softline.c)
-softline_test_silent_cursor(test_softline)
+target_link_libraries(test_softline PRIVATE softline)
 softline_apply_warnings(test_softline)
 softline_local_runtime(test_softline)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
@@ -380,7 +377,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     set_tests_properties(softline_queue_tcp PROPERTIES LABELS "integration;queue;editing;memcheck" TIMEOUT 15)
   endif()
   add_executable(test_queue_backend test_queue_backend.c)
-  softline_test_silent_cursor(test_queue_backend util)
+  target_link_libraries(test_queue_backend PRIVATE softline util)
   softline_apply_warnings(test_queue_backend)
   softline_local_runtime(test_queue_backend)
   add_test(NAME softline_queue_backend COMMAND test_queue_backend)
@@ -422,7 +419,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   add_test(NAME softline_undo_bounds COMMAND test_edit)
   set_tests_properties(softline_undo_bounds PROPERTIES LABELS "unit;editing;memcheck" TIMEOUT 5)
   add_executable(test_suspend test_suspend.c)
-  softline_test_silent_cursor(test_suspend util)
+  target_link_libraries(test_suspend PRIVATE softline util)
   softline_apply_warnings(test_suspend)
   softline_local_runtime(test_suspend)
   add_test(NAME softline_suspend COMMAND test_suspend)
@@ -461,14 +458,14 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     LABELS "unit;queue;editing;memcheck" TIMEOUT 15)
   set_tests_properties(softline_queue_policy PROPERTIES
     LABELS "unit;queue;editing;memcheck" TIMEOUT 30)
-  softline_test_silent_cursor(test_queue_approval util)
+  target_link_libraries(test_queue_approval PRIVATE softline util)
   softline_apply_warnings(test_queue_approval)
   softline_local_runtime(test_queue_approval)
   add_test(NAME softline_queue_approval COMMAND test_queue_approval)
   set_tests_properties(softline_queue_approval PROPERTIES
     LABELS "unit;queue" TIMEOUT 10)
   add_executable(test_approval_ui test_approval_ui.c)
-  softline_test_silent_cursor(test_approval_ui util)
+  target_link_libraries(test_approval_ui PRIVATE softline util)
   softline_apply_warnings(test_approval_ui)
   softline_local_runtime(test_approval_ui)
   add_test(NAME softline_approval_ui COMMAND test_approval_ui)
@@ -937,6 +934,12 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND TARGET example_chat)
     set_tests_properties(softline_terminal_blank_reflow PROPERTIES ENVIRONMENT "${terminal_test_environment}")
     set_tests_properties(softline_terminal_blank_reflow PROPERTIES
       LABELS "integration;streaming" TIMEOUT 60)
+    add_test(NAME softline_terminal_multiline_resize COMMAND "${SOFTLINE_TEST_XVFB_RUN}" -a
+      "$<TARGET_FILE:test_vte_chat>" multiline-resize "$<TARGET_FILE:example_chat>")
+    # The transcript assertion checks the visible plain-text URL fallback.
+    set_tests_properties(softline_terminal_multiline_resize PROPERTIES
+      ENVIRONMENT "${terminal_test_environment};SOFTLINE_OSC8=off"
+      LABELS "integration;streaming;resize" TIMEOUT 12)
     add_test(NAME softline_chat_line_keys COMMAND "${SOFTLINE_TEST_XVFB_RUN}" -a
       "$<TARGET_FILE:test_vte_chat>" line-keys "$<TARGET_FILE:example_chat>")
     set_tests_properties(softline_chat_line_keys PROPERTIES
@@ -1013,6 +1016,22 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND TARGET example_chat)
       "${SOFTLINE_TEST_TMUX}" "$<TARGET_FILE:native_output_fixture>" "${PROJECT_BINARY_DIR}")
     set_tests_properties(softline_terminal_retained_fragment_resize PROPERTIES
       LABELS "integration;streaming;resize" TIMEOUT 20)
+    foreach(mode submit wrap)
+      add_test(NAME softline_terminal_cursor_${mode} COMMAND bash
+        "${CMAKE_CURRENT_SOURCE_DIR}/lifecycle/terminal-cursor-matrix.sh"
+        "${SOFTLINE_TEST_TMUX}" "$<TARGET_FILE:native_output_fixture>"
+        "${PROJECT_BINARY_DIR}" "${mode}")
+      set_tests_properties(softline_terminal_cursor_${mode} PROPERTIES
+        LABELS "integration;resize;terminal" TIMEOUT 20)
+    endforeach()
+    foreach(policy cleared disabled limited retained)
+      add_test(NAME softline_terminal_cursor_append_${policy} COMMAND bash
+        "${CMAKE_CURRENT_SOURCE_DIR}/lifecycle/terminal-cursor-matrix.sh"
+        "${SOFTLINE_TEST_TMUX}" "$<TARGET_FILE:native_output_fixture>"
+        "${PROJECT_BINARY_DIR}" append "${policy}")
+      set_tests_properties(softline_terminal_cursor_append_${policy} PROPERTIES
+        LABELS "integration;resize;terminal" TIMEOUT 45)
+    endforeach()
     function(retained_resize_case name columns rows mode variant draft)
       add_test(NAME "softline_retained_${name}" COMMAND bash
         "${CMAKE_CURRENT_SOURCE_DIR}/lifecycle/retained-resize.sh"
@@ -1122,3 +1141,5 @@ foreach(_softline_test IN LISTS _softline_tests)
   set_property(TEST "${_softline_test}" APPEND PROPERTY ENVIRONMENT
     "SOFTLINE_HISTORY_DIR=${PROJECT_BINARY_DIR}/test-history/${_softline_test}")
 endforeach()
+
+add_subdirectory(repros)

@@ -7,26 +7,29 @@ deciding which views a conversation can see.
 
 ## Native editor
 
-Include `<softline/transcript.h>`. The C89 interface uses the editor's owner
-thread, as do the watch and idle callbacks. For example, register a viewer
-and feed each chunk from a watch on a background PTY.
+The transcript methods are on `sl_t` in `<softline/softline.h>`. Use them on
+the editor's owner thread, including from watch or idle callbacks. For example,
+register a viewer and feed each chunk from a watch on a background PTY.
 
 ```c
 sl_transcript_id_t id;
 int result;
 
-result = sl_transcript_add(editor, "Build", source_rows, source_columns, &id);
+result = editor->transcript_add(editor, "Build", source_rows, source_columns, &id);
 if (result == SL_OK)
-  result = sl_transcript_write(editor, id, SL_TRANSCRIPT_VT, bytes, length);
+  result = editor->transcript_write(editor, id, SL_TRANSCRIPT_VT, bytes, length);
 ```
 
 Use `SL_TRANSCRIPT_TEXT` for plain UTF-8 text. Text supports newlines and tabs
 and discards other ASCII controls. VT mode interprets terminal output.
 Either format can span calls. When mixing the formats, switch at complete UTF-8
-and VT sequence boundaries. Use `sl_transcript_resize` for source geometry
-changes and `sl_transcript_reset` before replacing a source or replaying it.
+and VT sequence boundaries. Use `transcript_resize` for source geometry
+changes and `transcript_reset` before replacing a source or replaying it.
 The last rendered screen remains available after the producer stops, until
-the host calls `sl_transcript_remove`.
+the host calls `transcript_remove`. Removing the active viewer returns to chat
+and displays retained chat output. Use `transcript_visible` to query the
+current screen. The matching C free functions are in `<softline/transcript.h>`,
+and all six methods are available in the [Lua facade](../lua/README.md#read-only-transcripts).
 
 **Ctrl+T** cycles through registered viewers in order and returns to chat
 after the last one. The header gives the current viewer's position and total

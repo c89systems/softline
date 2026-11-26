@@ -549,7 +549,7 @@ static int watched_redraw(int pump) {
   int failed = 1, submitted = 0, done_notice = 0, status;
   pid_t child = -1;
   char *output = calloc(1, 8192);
-  size_t used = 0, scanned = 0;
+  size_t used = 0;
   double deadline = redraw_time() + 4;
   struct winsize size;
   memset(&size, 0, sizeof(size));
@@ -609,18 +609,12 @@ static int watched_redraw(int pump) {
     if (poll(fds, 2, 10) < 0 && errno != EINTR)
       goto cleanup;
     if (fds[0].revents & POLLIN) {
-      const char *query;
       ssize_t count = read(master, output + used, 8191 - used);
       if (count > 0)
         used += (size_t)count;
       output[used] = 0;
       if (used == 8191)
         goto cleanup;
-      while ((query = strstr(output + scanned, "\033[6n")) != NULL) {
-        if (write(master, "\033[1;1R", 6) != 6)
-          goto cleanup;
-        scanned = (size_t)(query - output) + 4;
-      }
     }
     if (fds[1].revents & POLLIN) {
       char notice;
@@ -722,7 +716,7 @@ static int split_input(int mode, int kind) {
   int launched = 0;
   pid_t child = -1;
   char *output = calloc(1, 8192);
-  size_t used = 0, scanned = 0;
+  size_t used = 0;
   double started = 0, deadline = redraw_time() + 3;
   struct winsize size;
   memset(&size, 0, sizeof(size));
@@ -790,18 +784,12 @@ static int split_input(int mode, int kind) {
     if (poll(fds, 2, 2) < 0 && errno != EINTR)
       goto cleanup;
     if (fds[0].revents & POLLIN) {
-      const char *query;
       ssize_t count = read(master, output + used, 8191 - used);
       if (count > 0)
         used += (size_t)count;
       output[used] = 0;
       if (used == 8191)
         goto cleanup;
-      while ((query = strstr(output + scanned, "\033[6n")) != NULL) {
-        if (write(master, "\033[1;1R", 6) != 6)
-          goto cleanup;
-        scanned = (size_t)(query - output) + 4;
-      }
     }
     now = redraw_time();
     if (mode == 3 && !launched && strstr(output, "input> ")) {

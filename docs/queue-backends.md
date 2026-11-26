@@ -23,9 +23,9 @@ editor = sl_create_with_config(&config);
 The constructor copies the callback table; its context stays borrowed until
 detach returns during destruction. A backend requires queueing enabled.
 Unsupported capabilities return `SL_ERROR_UNSUPPORTED` without local fallback.
-This public C layout extends released v0.15.1's ABI 3 to ABI 4: rebuild consumers
-with matching headers/libraries. The [Lua reference](../lua/README.md) describes
-the matching constructor fields, typed operations, results and updates.
+The [Lua reference](../lua/README.md#constructor-selected-queue-backend)
+describes the matching constructor fields, typed operations, results and
+updates.
 
 ## Requests and observations
 
@@ -201,7 +201,8 @@ Missing archives are downloaded and checked against the pinned SHA-256 digests.
 To use your own SDKs, pass their prefixes as a semicolon-separated
 `SL_CBOR_SDK_PREFIXES`. Direct CMake builds opt in with
 `-DSL_ENABLE_CBOR_TCP=ON` and accept the same override.
-The Make targets use `build/cbor-debug`; run its tests with
+The Make targets share `build/cbor-debug` and serialize configure and build
+there before either demo starts. Run its tests with
 `ctest --test-dir build/cbor-debug --output-on-failure`. The default Softline
 build and local/web examples build independently of libcbor.
 
@@ -252,10 +253,12 @@ retaining a serialized frame. Large snapshots retain their typed fields,
 and image and PTY payloads retain at most their independently bounded chunks.
 
 For an application using libcbor, include `<softline/cbor.h>` and link with
-`C89Cbor::static` or `C89Cbor::shared`. Use `sl_queue_backend_pin_request`
-inside the Softline request callback and give the borrowed text fields
-directly to the native `c89cbor_encoder`. Release the pin after your
-transport finishes writing the borrowed bytes.
+`C89Cbor::static` or `C89Cbor::shared`. Call
+`sl_queue_backend_pin_request(editor, request, &lease)` inside the request
+callback. Copy the scalar fields you need before returning and give the
+borrowed strings directly to the native `c89cbor_encoder`. Release the lease
+with `sl_queue_backend_unpin_request(lease)` when the transport finishes or
+discards the write. Release outstanding leases by backend detach.
 
 Both C executables share the current chat frontend, preserving the v0.15.1
 interaction model while adding backend adapters: Softline renders the

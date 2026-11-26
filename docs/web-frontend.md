@@ -33,7 +33,10 @@ output, a completion receipt, and a diff on replies 1, 4, 7, and so on. See
 
 `SOFTLINE_WEB_TITLE`, `SOFTLINE_WEB_WELCOME` (Markdown), and
 `SOFTLINE_WEB_BANNER` (trusted host HTML/SVG in the welcome area) customize the
-examples. `SOFTLINE_WEB_HEADER` optionally supplies trusted HTML, SVG or image
+examples. The demos show the Vectis logo above “Welcome to softline” by
+default. Set `SOFTLINE_WEB_WELCOME=''` to leave the text empty or
+`SOFTLINE_WEB_BANNER=''` to hide the logo.
+`SOFTLINE_WEB_HEADER` optionally supplies trusted HTML, SVG or image
 markup in the upper-left toolbar; that area is hidden and unbranded by default.
 Use F9 or **Hide toolbar** and **Show toolbar** in the `+` menu to toggle the
 toolbar. F9 also works from the embedded terminal. The toolbar's **Margin**
@@ -88,10 +91,14 @@ web = sl_www_create(&config);
 Set `config.animations = 1` before `sl_www_create(&config)` to serve the animated
 chat page. The setting defaults to zero. The handler adds the separate motion
 stylesheet and module to the page it serves at `/`. The composer moves into
-place on the first successful send or when opening a shell from the welcome
-screen, and user bubbles glide and fade into place. The shell split opens from
-the bottom and the transcript split opens from the right, or from the top when
-stacked on narrow screens.
+place on the first successful send, the first message delivered to the feed,
+the first visible queue entry or approval, or when opening a shell. The welcome
+banner and text dip briefly and accelerate upward out of the viewport. Typing
+in the draft leaves the welcome in place. After replay, an empty conversation
+shows its welcome and a conversation with history or queued entries opens
+directly in the docked layout. User bubbles glide and fade into place. The
+shell split opens from the bottom and the transcript split opens from the
+right, or from the top when stacked on narrow screens.
 Both splits collapse toward the same edge when closed. The shell is asked to
 stop as soon as its pane begins closing.
 The conversation fades and blurs at the top once scrolled away from the start,
@@ -115,8 +122,10 @@ paths, MIME types, bytes, and callback contexts are borrowed until destruction.
 Set `config.header` to optional upper-left toolbar HTML, for example
 `<a href="./"><img src="./logo.svg" alt="My project"></a>`. NULL, empty or
 whitespace-only headers hide the area without reserving space. The existing
-`config.banner` independently controls welcome-area branding. Toolbar graphics
-fit within a 32px height and the available toolbar width.
+`config.banner` independently controls welcome-area branding. `config.welcome`
+accepts Markdown and defaults to empty. NULL and an empty string both leave
+the welcome text blank. Toolbar graphics fit within a 32px height and the
+available toolbar width.
 
 Header and banner HTML are trusted host input; Markdown/model output is rendered as text
 and safe DOM elements. Optional graphics are custom assets registered in
@@ -153,11 +162,12 @@ concurrent prompt input. A host prompt lock, a replaced draft, or an image
 attachment in progress stops automatic submission. Delivery is transient and
 a disconnect or session change cancels unfinished automation.
 
-For optional feedback, call `sl_www_simulate_prompt_tracked()` with a fresh
-simulation ID and the selected peer's writer. The browser sends advisory
-`simulation_status` actions to the existing `sl_www_action_t` callback.
+For optional feedback, call
+`receiver->simulate_prompt_tracked(receiver, writer, writer_context, id, text, options)`
+with a fresh simulation ID and the selected peer's writer. The browser sends
+advisory `simulation_status` actions to the existing `sl_www_action_t` callback.
 Match each report against the host-owned `peer` and the simulation ID. The
-writer's `SL_OK` confirms frame delivery to the writer. A missing browser
+method returns `SL_OK` when the writer consumes every frame. A missing browser
 report leaves the outcome unknown. The browser drops reports if the socket
 is congested or has changed, and the host decides whether to surface them.
 
@@ -168,11 +178,14 @@ is congested or has changed, and the host decides whether to surface them.
 | `cancelled` | The browser stopped the request. `reason` can identify manual input, host cancellation, or a failed submit. |
 | `submitted` | The browser sent the ordinary queue or steer action. `request` is that action's existing request ID. The normal `accepted` or `error` response describes admission. |
 
-Call `sl_www_cancel_prompt_simulation()` with the same writer and ID to stop
-a pending or active simulation. The browser leaves any inserted text in the
-composer and ignores the command once the simulation has submitted. Use IDs of
+Call `receiver->cancel_prompt_simulation(receiver, writer, writer_context, id)`
+with the same writer and ID to stop a pending or active simulation.
+The browser leaves any inserted text in the composer and ignores the command
+once the simulation has submitted. Use IDs of
 1 to 64 ASCII letters, digits, underscores, or hyphens. Send each tracked
 simulation and cancellation directly to the peer as transient events.
+The matching free functions are `sl_www_simulate_prompt_tracked()` and
+`sl_www_cancel_prompt_simulation()`.
 
 ## Browser event contract
 
@@ -182,13 +195,23 @@ by the host's history owner. Bind them to the session epoch: the examples use
 expired cursors. A bare number never authorizes replay across host restarts.
 Replies may omit `seq`.
 
+Hosts that replay history or a queue snapshot send `replay_begin` before
+`session`, `reset`, and any restored content for that peer. Send `replay_end`
+after delivering the retained feed and current queue projection, including for
+an empty conversation. Deliver later live feed and queue events after that
+boundary. Emit both markers with `sl_www_emit()` and zero fields. The browser
+uses the boundary to select its initial layout without animating restored
+content. A host that provides live events only can send `session` directly.
+
 See [read-only terminal transcripts](transcripts.md#web-handler) for
 `transcript_*` event fields, source geometry, and reconnect behavior.
 
 | Event | Fields and behavior |
 | --- | --- |
 | `session` | `id`: host epoch. `disable_auto_resend=1` disables automatic retries on same-epoch reconnects. The field defaults to `0`. |
-| `capabilities` | `edit=1` enables revision-checked queue edits. Optional `terminal` is a same-origin absolute path to a terminal page. Optional `terminal_unlock_command` is a single-line host command. During an automatic terminal lock, the `+` menu displays that text and submits it verbatim through the normal prompt handler, preserving the draft. |
+| `replay_begin`, `replay_end` | Peer-scoped replay boundaries with no fields. |
+| `capabilities` | `edit=1` enables revision-checked queue edits. Optional `terminal` is a same-origin absolute path to a terminal page. Optional `terminal_unlock_command` is a single-line host command. During an automatic terminal lock, the `+` menu sends that command through the normal prompt handler and preserves the draft. |
+| `prompt_trim` | `enabled=1` selects trimming of Unicode whitespace at both ends of submissions. `enabled=0` preserves it. The host announces the policy on connect and when it changes. |
 | `reset` | Optional `text`; clear the retained transcript and queue before replay |
 | `begin` | `id`, `role` (`user`, `assistant`, `note`), optional `format`, `copy=0/1`, `timestamp`, `label`, and `tone` |
 | `delta` | `id`, `role`, `text` or `encoding=base64` plus `data`; append incrementally. Diff messages can set the row `kind`. Carry the message settings when a delta can open a message during replay. |

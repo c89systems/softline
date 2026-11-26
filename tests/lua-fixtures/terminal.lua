@@ -13,7 +13,7 @@ local held = assert(sl:queue_draft_info())
 assert(held.id == id and held.held)
 local draft, cursor = sl:buffer(), sl:cursor()
 local closed = 0
-local ok, escaped = softline.terminal_handoff(sl, function(event)
+local ok, escaped = sl:terminal_handoff(function(event)
   if event.operation == softline.TERMINAL_OPEN then
     assert(not pcall(function() sl:set_buffer("bad") end))
     assert(not pcall(function() sl:close() end))

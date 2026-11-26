@@ -2,6 +2,7 @@
 #include "web_chat.h"
 #include "completion_resolve.h"
 #include "queue_demo_image.h"
+#include "softline_demo_assets.h"
 #include "transcript_demo.h"
 #include <errno.h>
 #include <limits.h>
@@ -58,6 +59,7 @@ struct demo_web_chat {
   char response_timestamp[WEB_TIMESTAMP_SIZE];
   char *status;
   int busy;
+  int prompt_trim;
   size_t image_limit;
   /* Example idempotency window. A session epoch prevents retrying requests
    * into a restarted volatile owner with no outcome records. */
@@ -65,6 +67,7 @@ struct demo_web_chat {
     char id[65];
     char view[65];
     char *text;
+    char *edit_text;
     unsigned long sequence;
     sl_queue_request_id_t backend_request;
     int status, steer, edit_phase;
@@ -327,6 +330,11 @@ static int replay(void *context, void *peer, const char *after) {
   f.value = w->session;
   (void)demo_www_reply(peer, "session", &f, 1);
   transcript_frames(w, peer);
+  {
+    sl_www_field_t trim = {"enabled", NULL, 0};
+    trim.value = sl_get_prompt_trim(w->editor) ? "1" : "0";
+    (void)demo_www_reply(peer, "prompt_trim", &trim, 1);
+  }
   {
     sl_www_field_t capabilities[3] = {{"edit", NULL, 0},
                                       {"terminal", NULL, 0},
@@ -652,7 +660,7 @@ static int action(void *context, const sl_www_request_t *r) {
     if (i == 128 && sequence <= w->actors[actor].high)
       result = SL_ERROR_CONFLICT;
     else if (i == 128) {
-      char *copy;
+      char *copy, *prepared;
       if (editing) {
         target = queue_target(w, id, field(r, "revision"));
         if (!w->ops.edit || target == WEB_QUEUE_MAX) {
@@ -678,25 +686,39 @@ static int action(void *context, const sl_www_request_t *r) {
           goto report;
         }
       }
+      prepared = sl_prepare_prompt(w->editor, text);
+      if (!prepared) {
+        free(copy);
+        result = SL_ERROR_NOMEM;
+        goto report;
+      }
       w->actors[actor].high = sequence;
       w->requests[w->next_request].backend_request = 0;
-      if (editing) {
+      if (!*prepared)
+        result = SL_ERROR_INVALID;
+      else if (editing) {
         w->requests[w->next_request].mode = w->queue[target].steer
                                                 ? SL_PROMPT_QUEUE_MODE_STEER
                                                 : SL_PROMPT_QUEUE_MODE_QUEUED;
-        result = w->ops.edit(w->context, id, field(r, "revision"), text, NULL,
-                             w->requests[w->next_request].mode,
+        result = w->ops.edit(w->context, id, field(r, "revision"), prepared,
+                             NULL, w->requests[w->next_request].mode,
                              &w->requests[w->next_request].backend_request);
       } else
         result =
             w->ops.submit
-                ? w->ops.submit(w->context, text, steer,
+                ? w->ops.submit(w->context, prepared, steer,
                                 &w->requests[w->next_request].backend_request)
                 : SL_ERROR_INVALID;
       if (result != SL_OK)
         w->requests[w->next_request].backend_request = 0;
       deferred = w->requests[w->next_request].backend_request != 0;
       free(w->requests[w->next_request].text);
+      sl_free_string(w->editor, w->requests[w->next_request].edit_text);
+      w->requests[w->next_request].edit_text = NULL;
+      if (editing && deferred)
+        w->requests[w->next_request].edit_text = prepared;
+      else
+        sl_free_string(w->editor, prepared);
       (void)snprintf(w->requests[w->next_request].id, 65, "%s", request);
       (void)snprintf(w->requests[w->next_request].view, 65, "%s", view);
       w->requests[w->next_request].sequence = sequence;
@@ -774,6 +796,8 @@ demo_web_chat_t *demo_web_open(sl_t *editor, const demo_web_ops_t *ops,
                                int *enabled) {
   const char *on = getenv("SOFTLINE_WEB"), *port = getenv("SOFTLINE_WEB_PORT");
   const char *animations = getenv("SOFTLINE_WEB_ANIMATIONS");
+  const char *welcome = getenv("SOFTLINE_WEB_WELCOME");
+  const char *banner = getenv("SOFTLINE_WEB_BANNER");
   int terminal_lock;
   demo_web_chat_t *w;
   sl_www_config_t config;
@@ -801,6 +825,7 @@ demo_web_chat_t *demo_web_open(sl_t *editor, const demo_web_ops_t *ops,
   if (!w)
     return NULL;
   w->editor = editor;
+  w->prompt_trim = sl_get_prompt_trim(editor);
   w->ops = *ops;
   w->context = context;
   w->transcript_step = DEMO_TRANSCRIPT_SEED;
@@ -831,10 +856,13 @@ demo_web_chat_t *demo_web_open(sl_t *editor, const demo_web_ops_t *ops,
   }
   if (getenv("SOFTLINE_WEB_TITLE"))
     config.title = getenv("SOFTLINE_WEB_TITLE");
-  if (getenv("SOFTLINE_WEB_WELCOME"))
-    config.welcome = getenv("SOFTLINE_WEB_WELCOME");
-  config.banner = getenv("SOFTLINE_WEB_BANNER");
+  config.welcome = welcome ? welcome : "Welcome to softline";
+  config.banner = banner ? banner
+                         : "<img src=\"./assets/vectis-logo.svg\" "
+                           "alt=\"Vectis\" width=\"208\">";
   config.header = getenv("SOFTLINE_WEB_HEADER");
+  config.assets = demo_assets;
+  config.asset_count = sizeof(demo_assets) / sizeof(demo_assets[0]);
   w->www = demo_www_open(&config, (unsigned short)number, closed);
   if (!w->www) {
     demo_web_close(w);
@@ -850,8 +878,10 @@ void demo_web_close(demo_web_chat_t *w) {
   if (w) {
     size_t i;
     demo_www_close(w->www);
-    for (i = 0; i < 128; ++i)
+    for (i = 0; i < 128; ++i) {
       free(w->requests[i].text);
+      sl_free_string(w->editor, w->requests[i].edit_text);
+    }
     release_queue(w->building, w->queue_build, w->queue, w->queue_count);
     release_queue(w->queue, w->queue_count, NULL, 0);
     free(w->status);
@@ -860,8 +890,16 @@ void demo_web_close(demo_web_chat_t *w) {
 }
 int demo_web_tick(demo_web_chat_t *w) {
   web_view_t *v;
+  int trim;
   if (!w)
     return 0;
+  trim = sl_get_prompt_trim(w->editor);
+  if (w->prompt_trim != trim) {
+    sl_www_field_t field = {"enabled", NULL, 0};
+    field.value = trim ? "1" : "0";
+    w->prompt_trim = trim;
+    (void)demo_www_publish(w->www, "prompt_trim", &field, 1);
+  }
   for (v = w->views; v; v = v->next)
     if (service_image(v) != SL_OK)
       return -1;
@@ -888,9 +926,11 @@ void demo_web_result(demo_web_chat_t *w, const sl_queue_result_t *result) {
         int status =
             result->edit_token && result->item_revision
                 ? w->ops.edit(w->context, w->requests[i].item,
-                              result->item_revision, w->requests[i].text,
+                              result->item_revision, w->requests[i].edit_text,
                               result->edit_token, w->requests[i].mode, &next)
                 : SL_ERROR;
+        sl_free_string(w->editor, w->requests[i].edit_text);
+        w->requests[i].edit_text = NULL;
         if (status == SL_OK && next) {
           (void)snprintf(w->requests[i].token, 128, "%s", result->edit_token);
           w->requests[i].edit_phase = 2;

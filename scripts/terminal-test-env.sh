@@ -12,6 +12,7 @@ if [ "$(uname -s):$(uname -m)" != Linux:x86_64 ]; then
   echo "Pinned terminal test tools require native x86_64 Linux" >&2
   exit 1
 fi
+"${ROOT_DIR}/scripts/cpkt-toolchains.sh" ensure x86_64-linux-gnu >/dev/null
 cmake -S "${ROOT_DIR}/cmake/terminal-tests" -B "${ROOT_DIR}/build/terminal-test-tools"
 install="$(cat "${ROOT_DIR}/build/terminal-test-tools/install-root.txt")"
 # Apply cached runtime libraries only to terminal processes. Host build tools

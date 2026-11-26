@@ -121,8 +121,9 @@ static void close_chat(struct chat *c) {
   stop_remote_owner();
   pump();
 }
-static int start_chat(struct chat *c, const char *example, const char *theme,
-                      int height, int delay) {
+static int start_chat_with_scrollback(struct chat *c, const char *example,
+                                      const char *theme, int height, int delay,
+                                      int prior_rows) {
   struct winsize size;
   void *pty;
   int master, slave, index;
@@ -135,7 +136,7 @@ static int start_chat(struct chat *c, const char *example, const char *theme,
     stop_remote_owner();
   c->screen = create();
   resize(&c->screen, 97, height);
-  for (index = 0; index < 100; ++index)
+  for (index = 0; index < prior_rows; ++index)
     used += (size_t)snprintf(prior + used, sizeof(prior) - used,
                              "existing terminal row %03d\r\n", index);
   v.feed(c->screen.terminal, prior, (long)used);
@@ -175,6 +176,10 @@ static int start_chat(struct chat *c, const char *example, const char *theme,
   }
   close(slave);
   return c->child < 0 || wait_frame(c, NULL, "> \n", 0, 8);
+}
+static int start_chat(struct chat *c, const char *example, const char *theme,
+                      int height, int delay) {
+  return start_chat_with_scrollback(c, example, theme, height, delay, 100);
 }
 static void send_input(struct chat *c, const char *bytes) {
   v.send(c->screen.terminal, bytes, (long)strlen(bytes));
@@ -694,6 +699,67 @@ static int occurrences(const char *text, const char *needle) {
   }
   return count;
 }
+
+static int wait_blank_draft(struct chat *c, int rows_below_caret) {
+  double deadline = now() + 1;
+  do {
+    struct snapshot s = visible_frame(c);
+    long first = (long)v.adjustment_value(v.adjustment(c->screen.terminal));
+    if (s.row == first + v.rows(c->screen.terminal) - 1 - rows_below_caret &&
+        s.column == 2 && occurrences(s.text, "streaming demo") == 1 &&
+        occurrences(s.text, "\n> \n") == 1)
+      return 0;
+    pump_once();
+  } while (now() < deadline);
+  return 1;
+}
+
+static int multiline_resize_case(const char *example, int approvals,
+                                 int prior_rows) {
+  struct chat c;
+  const int sizes[][2] = {{82, 12}, {82, 24}, {55, 24}, {40, 12}, {97, 24}};
+  int failed = 0;
+  size_t i;
+  if (approvals) {
+    setenv("SOFTLINE_CHAT_APPROVAL_DEMO", "1", 1);
+    setenv("SOFTLINE_CHAT_APPROVAL_MS", "75", 1);
+    setenv("SOFTLINE_CHAT_APPROVAL_SEED", "1", 1);
+  }
+  REQUIRE(start_chat_with_scrollback(&c, example, "plain", 24, 10,
+                                     prior_rows) == 0);
+  if (approvals)
+    REQUIRE(wait_visible(&c, "4 awaiting approval") == 0);
+  send_input(&c, "\n\n\n\033[A\033[A");
+  REQUIRE(wait_blank_draft(&c, 2) == 0);
+  for (i = 0; i < sizeof(sizes) / sizeof(sizes[0]); i++) {
+    struct snapshot s;
+    char text[sizeof(s.text)];
+    REQUIRE(coordinated_resize(&c, sizes[i][0], sizes[i][1], 1) == 0);
+    /* A marker on the caret's row proves the editor has repainted. */
+    send_input(&c, "z");
+    REQUIRE(wait_visible(&c, "\n  z") == 0);
+    s = visible_frame(&c);
+    if (approvals)
+      REQUIRE(occurrences(s.text, "awaiting approval") == 1);
+    REQUIRE(occurrences(s.text, "streaming demo") == 1);
+    REQUIRE(occurrences(s.text, "\n> \n") == 1);
+    s = transcript(&c.screen);
+    compact(s.text, text);
+    if (approvals)
+      REQUIRE(strstr(text, "/approveon|offsetsit.") != NULL);
+    else
+      REQUIRE(strstr(text, "Hyperlinkdemo(https://pkt.systems).") != NULL);
+    send_input(&c, "\177");
+    REQUIRE(wait_blank_draft(&c, approvals && sizes[i][0] == 40 ? 1 : 2) == 0);
+  }
+cleanup:
+  close_chat(&c);
+  unsetenv("SOFTLINE_CHAT_APPROVAL_DEMO");
+  unsetenv("SOFTLINE_CHAT_APPROVAL_MS");
+  unsetenv("SOFTLINE_CHAT_APPROVAL_SEED");
+  return failed || errors;
+}
+
 static int width_case(const char *example, const char *theme) {
   struct chat c;
   struct snapshot s;
@@ -1185,6 +1251,10 @@ int main(int argc, char **argv) {
   if (!strcmp(argv[1], "completion"))
     return completion_case(argv[2], "plain") ||
            completion_case(argv[2], "default");
+  if (!strcmp(argv[1], "multiline-resize"))
+    return multiline_resize_case(argv[2], 1, 0) ||
+           multiline_resize_case(argv[2], 0, 0) ||
+           multiline_resize_case(argv[2], 1, 100);
   if (!strcmp(argv[1], "line-keys")) {
     for (theme = 0; theme < 2; ++theme)
       for (busy = 0; busy < 2; ++busy)

@@ -314,7 +314,12 @@ int sl_history_read_record(FILE *fp, char *line, size_t cap, int terminated) {
     }
     if (ch == '\\') {
       ch = fgetc(fp);
-      if (ch == EOF)
+      if (ch == '\n' || (!terminated && ch == '\r')) {
+        /* A physical record delimiter cannot be quoted by a trailing
+         * backslash. Leave the delimiter for the next loop iteration. */
+        ungetc(ch, fp);
+        ch = '\\';
+      } else if (ch == EOF)
         ch = '\\';
       else if (ch == 'n')
         ch = '\n';

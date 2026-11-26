@@ -146,7 +146,8 @@ static int quote_spacing(const char *initial, const char *between,
   if (result == SL_OK)
     result = sl_output_stream_write_quoted_prompt(sl, "SECOND");
   if (result == SL_OK)
-    result = sl_output_stream_end(sl);
+    result = *outside ? sl_output_stream_end_for_handoff(sl)
+                      : sl_output_stream_end(sl);
   if (result == SL_OK && (tcgetattr(STDIN_FILENO, &after) != 0 ||
                           !same_input_mode(&before, &after) ||
                           write(STDOUT_FILENO, outside, strlen(outside)) !=
@@ -288,6 +289,12 @@ static int gated_fragment(sl_t *sl, char command) {
   switch (command) {
   case 'p':
     return sl_output_stream_write(sl, "Y", 1);
+  case 'S':
+    return sl_output_stream_write(sl, "\033[32m", 5);
+  case 'n':
+    return sl_output_stream_write(sl, "\nY", 2);
+  case 'h':
+    return sl_output_stream_write(sl, "\rY", 2);
   case 'a':
     return sl_output_stream_write(sl, "\033", 1);
   case 'A':
@@ -303,6 +310,35 @@ static int gated_fragment(sl_t *sl, char command) {
   default:
     return SL_ERROR_INVALID;
   }
+}
+
+static int pinned_readline(const char *width, const char *expected) {
+  sl_config_t config;
+  sl_t *sl;
+  char *line;
+  int result, interrupted = !strcmp(expected, "--interrupt");
+  if (interrupted && signal(SIGINT, SIG_IGN) == SIG_ERR)
+    return 2;
+  sl_config_init(&config);
+  config.live_scroll_region = 1;
+  config.prompt_theme = SL_PROMPT_THEME_PLAIN;
+  config.screen_width = atoi(width);
+  sl = sl_create_with_config(&config);
+  if (!sl)
+    return 2;
+  line = sl_readline(sl, "> ");
+  if (interrupted)
+    result =
+        line != NULL || sl_last_readline_status(sl) != SL_READLINE_INTERRUPTED;
+  else if (!strcmp(expected, "--eof"))
+    result = line != NULL || sl_last_readline_status(sl) != SL_READLINE_EOF;
+  else
+    result = !line || strcmp(line, expected);
+  sl_free_string(sl, line);
+  sl_destroy(sl);
+  if (!result && puts("AFTER") == EOF)
+    result = 1;
+  return result;
 }
 
 struct live_gate {
@@ -364,7 +400,11 @@ static int live_gate_watch(sl_t *sl, const sl_watch_event_t *event,
                 sl_prompt_queue_append(sl, "queued for reset", 0, NULL) == SL_OK
             ? SL_OK
             : SL_ERROR;
-  } else if (command == 'x')
+  } else if (command == 'b')
+    gate->result = sl_set_buffer(sl, "1\n2\n3\n4\n5\n6\n7\n8\n9\n10");
+  else if (command == 'e')
+    gate->result = sl_set_buffer(sl, "");
+  else if (command == 'x')
     gate->done = 1;
   else
     gate->result = gated_fragment(sl, command);
@@ -375,8 +415,10 @@ static int live_gate_watch(sl_t *sl, const sl_watch_event_t *event,
   return gate->result;
 }
 
+enum gate_mode { GATED, GATED_LIVE, GATED_SHELL };
+
 static int gated(const char *command_path, const char *ack_path,
-                 const char *text, const char *prompt, int live_input) {
+                 const char *text, const char *prompt, enum gate_mode mode) {
   sl_t *sl;
   int command_fd, ack_fd, result = SL_OK;
   char command = 'r';
@@ -410,7 +452,7 @@ static int gated(const char *command_path, const char *ack_path,
         result = sl_output_stream_begin(sl);
     } else if (command == 'i') {
       char *input;
-      if (live_input) {
+      if (mode == GATED_LIVE) {
         struct live_gate gate;
         sl_watch_id_t watch;
         gate.command_fd = command_fd;
@@ -444,8 +486,17 @@ static int gated(const char *command_path, const char *ack_path,
       break;
     reply[0] = geometry.ws_col;
     reply[1] = geometry.ws_row;
-    if (write(ack_fd, reply, sizeof(reply)) != (ssize_t)sizeof(reply) ||
-        read(command_fd, &command, 1) != 1) {
+    if (mode == GATED_SHELL) {
+      char message[32];
+      int n = snprintf(message, sizeof(message), "%u %u\n",
+                       (unsigned int)reply[0], (unsigned int)reply[1]);
+      if (n < 1 || n >= (int)sizeof(message) ||
+          write(ack_fd, message, (size_t)n) != n)
+        result = SL_ERROR;
+    } else if (write(ack_fd, reply, sizeof(reply)) != (ssize_t)sizeof(reply)) {
+      result = SL_ERROR;
+    }
+    if (result != SL_OK || read(command_fd, &command, 1) != 1) {
       result = SL_ERROR;
       break;
     }
@@ -457,6 +508,8 @@ static int gated(const char *command_path, const char *ack_path,
 }
 
 int main(int argc, char **argv) {
+  if (argc == 4 && strcmp(argv[1], "--pinned-readline") == 0)
+    return pinned_readline(argv[2], argv[3]);
   if (argc == 5 && strcmp(argv[1], "--quote-spacing") == 0)
     return quote_spacing(argv[2], argv[3], argv[4]);
   if (argc == 2 && strcmp(argv[1], "--consecutive-streams") == 0)
@@ -472,10 +525,12 @@ int main(int argc, char **argv) {
   if (argc == 4 && strcmp(argv[1], "--handoff") == 0)
     return stream_chunks(argv[2], argv[3], 1);
   if (argc == 5 && strcmp(argv[1], "--gated") == 0)
-    return gated(argv[2], argv[3], argv[4], "> ", 0);
+    return gated(argv[2], argv[3], argv[4], "> ", GATED);
   if (argc == 6 && strcmp(argv[1], "--gated") == 0)
-    return gated(argv[2], argv[3], argv[4], argv[5], 0);
+    return gated(argv[2], argv[3], argv[4], argv[5], GATED);
   if (argc == 5 && strcmp(argv[1], "--gated-live") == 0)
-    return gated(argv[2], argv[3], argv[4], "> ", 1);
+    return gated(argv[2], argv[3], argv[4], "> ", GATED_LIVE);
+  if (argc == 5 && strcmp(argv[1], "--gated-shell") == 0)
+    return gated(argv[2], argv[3], argv[4], "> ", GATED_SHELL);
   return 2;
 }

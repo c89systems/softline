@@ -1,5 +1,4 @@
 #define _DEFAULT_SOURCE
-#include "silent_cursor_probe.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <pty.h>
@@ -473,7 +472,6 @@ static int run(enum scenario kind, int native, int width) {
     }
   }
   if (native) {
-    CHECK(send_keys(&state, "\033[1;1R"));
     CHECK(sl_output_stream_begin(sl) == SL_OK);
   }
   if (kind == BINDING)

@@ -18,7 +18,7 @@
   } while (0)
 
 struct active_state {
-  int master, slave, result;
+  int slave, result;
 };
 
 static void submit(sl_t *sl, void *data) {
@@ -30,7 +30,6 @@ static void submit(sl_t *sl, void *data) {
   size.ws_col = 73;
   size.ws_row = 22;
   state->result = ioctl(state->slave, TIOCSWINSZ, &size) != 0 ||
-                  write(state->master, "\033[20;4R", 7) != 7 ||
                   sl_output_stream_reconcile(sl) != SL_OK ||
                   strcmp(sl_buffer(sl), "original draft") != 0 ||
                   sl_cursor(sl) != 3;
@@ -43,14 +42,8 @@ static int same_modes(const struct termios *a, const struct termios *b) {
          memcmp(a->c_cc, b->c_cc, sizeof(a->c_cc)) == 0;
 }
 
-static double now(void) {
-  struct timespec t;
-  clock_gettime(CLOCK_MONOTONIC, &t);
-  return (double)t.tv_sec + (double)t.tv_nsec / 1000000000.0;
-}
-
-static int run_case(int ansi, int timeout) {
-  int master, slave, rc;
+static int run_case(int ansi) {
+  int master, slave;
   sl_config_t config;
   sl_t *sl;
   char *line, *queued;
@@ -60,7 +53,6 @@ static int run_case(int ansi, int timeout) {
   struct termios original, before, after;
   struct winsize size;
   struct active_state active;
-  double started;
   const char *prefix = ansi ? "\033[3" : "\342";
   const char *suffix = ansi ? "2mCOLOR\033[0m\n" : "\224\200\n";
   const char *needle = ansi ? "\033[32mCOLOR" : "\342\224\200";
@@ -76,7 +68,6 @@ static int run_case(int ansi, int timeout) {
   sl = sl_create_with_config(&config);
   CHECK(sl && sl_output_stream_reconcile(sl) == SL_ERROR_INVALID);
   CHECK(sl_output_stream_begin(sl) == SL_OK);
-  active.master = master;
   active.slave = slave;
   active.result = 0;
   CHECK(sl_set_idle_callback(sl, submit, &active) == SL_OK);
@@ -100,15 +91,8 @@ static int run_case(int ansi, int timeout) {
   size.ws_col = 61;
   size.ws_row = 18;
   CHECK(ioctl(slave, TIOCSWINSZ, &size) == 0);
-  if (timeout) {
-    started = now();
-    rc = sl_output_stream_reconcile(sl);
-    CHECK(rc == SL_ERROR_IO && now() - started < 0.5);
-    CHECK(tcgetattr(slave, &after) == 0 && same_modes(&before, &after));
-    CHECK(strcmp(sl_buffer(sl), "preserved draft") == 0 && sl_cursor(sl) == 4);
-  }
-  /* Type ahead before the cursor reply, including a submit byte. */
-  CHECK(write(master, "typed\r\033[16;4R", 13) == 13);
+  /* Reflow leaves queued input for the next read, including submit. */
+  CHECK(write(master, "typed\r", 6) == 6);
   CHECK(sl->output_stream_reconcile(sl) == SL_OK);
   CHECK(tcgetattr(slave, &after) == 0 && same_modes(&before, &after));
   CHECK(strcmp(sl_buffer(sl), "preserved draft") == 0 && sl_cursor(sl) == 4);
@@ -141,6 +125,7 @@ static int run_case(int ansi, int timeout) {
   CHECK(strstr(strstr(output, "PRODUCER_SENTINEL") + 17, "PRODUCER_SENTINEL") ==
         NULL);
   CHECK(strstr(output, "custom> ") != NULL);
+  CHECK(strstr(output, "\033[6n") == NULL);
   close(master);
   close(slave);
   return 0;
@@ -187,8 +172,6 @@ static int without_frame(void) {
   CHECK(sl_output_stream_write(sl, "unframed", 8) == SL_OK);
   size.ws_col = 60;
   CHECK(ioctl(slave, TIOCSWINSZ, &size) == 0);
-  CHECK(sl_output_stream_reconcile(sl) == SL_ERROR_IO);
-  CHECK(write(master, "\033[1;9R", 6) == 6);
   CHECK(sl_output_stream_reconcile(sl) == SL_OK);
   CHECK(sl_output_stream_write(sl, " continuation\n", 14) == SL_OK);
   CHECK(sl_output_stream_end(sl) == SL_OK);
@@ -200,9 +183,8 @@ static int without_frame(void) {
 
 int main(void) {
   CHECK(sl_output_stream_reconcile(NULL) == SL_ERROR_INVALID);
-  CHECK(run_case(0, 0) == 0);
-  CHECK(run_case(1, 0) == 0);
-  CHECK(run_case(0, 1) == 0);
+  CHECK(run_case(0) == 0);
+  CHECK(run_case(1) == 0);
   CHECK(redirected() == 0);
   CHECK(without_frame() == 0);
   return 0;

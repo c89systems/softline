@@ -1,7 +1,6 @@
 #define _GNU_SOURCE
 #define _POSIX_C_SOURCE 200809L
 
-#include "silent_cursor_probe.h"
 #include "softline/softline.h"
 
 #include <assert.h>
@@ -1000,6 +999,59 @@ static void test_plain_readline(void) {
   PASS();
 }
 
+static void test_prompt_trim(void) {
+  static const char input[] = " \t\302\240first  middle\343\200\200\n"
+                              " \t\n  raw \t\n \tlast \t";
+  static const char *const expected[] = {"first  middle", "", "  raw \t",
+                                         "last"};
+  int fd[2];
+  size_t i;
+  sl_config_t cfg;
+  sl_t *sl;
+  char *line;
+
+  TEST("submission trims Unicode whitespace by default and changes live");
+  ASSERT_TRUE(pipe(fd) == 0 && write(fd[1], input, sizeof(input) - 1) ==
+                                   (ssize_t)(sizeof(input) - 1),
+              "failed to feed test input");
+  close(fd[1]);
+  sl_config_init(&cfg);
+  cfg.input_fd = fd[0];
+  sl = sl_create_with_config(&cfg);
+  ASSERT_TRUE(sl && sl->get_prompt_trim(sl), "trimming not enabled");
+  for (i = 0; i < sizeof(expected) / sizeof(expected[0]); ++i) {
+    if (i == 2)
+      ASSERT_TRUE(sl->set_prompt_trim(sl, 0) == SL_OK, "disable failed");
+    if (i == 3)
+      ASSERT_TRUE(sl_set_prompt_trim(sl, 1) == SL_OK, "enable failed");
+    line = sl_readline(sl, NULL);
+    ASSERT_TRUE(line && !strcmp(line, expected[i]) &&
+                    sl_last_readline_status(sl) == SL_READLINE_SUBMITTED,
+                "unexpected plain submission");
+    sl_free_string(sl, line);
+  }
+  ASSERT_TRUE(sl_set_buffer(sl, " \n\tx  y\n \t") == SL_OK &&
+                  sl_set_cursor(sl, 2) == SL_OK,
+              "could not prepare draft");
+  line = sl->prepare_prompt(sl, sl_buffer(sl));
+  ASSERT_TRUE(line && !strcmp(line, "x  y") && sl_cursor(sl) == 2 &&
+                  !strcmp(sl_buffer(sl), " \n\tx  y\n \t"),
+              "preparing a prompt changed the active draft");
+  sl_free_string(sl, line);
+  sl_destroy(sl);
+  close(fd[0]);
+
+  sl_config_init(&cfg);
+  cfg.disable_prompt_trim = 1;
+  sl = sl_create_with_config(&cfg);
+  ASSERT_TRUE(sl && !sl_get_prompt_trim(sl), "constructor opt-out ignored");
+  line = sl_prepare_prompt(sl, " \n\t");
+  ASSERT_TRUE(line && !strcmp(line, " \n\t"), "opt-out changed text");
+  sl_free_string(sl, line);
+  sl_destroy(sl);
+  PASS();
+}
+
 static void test_plain_next_prompt_is_direct(void) {
   int in_pipe[2];
   int out_pipe[2];
@@ -1746,6 +1798,11 @@ static void vt_apply(struct vt_screen *screen, const char *bytes) {
       p += 2;
       continue;
     }
+    if (*p == '\033' && p[1] == 'D') {
+      vt_lf(screen);
+      p += 2;
+      continue;
+    }
     if (*p == '\033' && p[1] == '[') {
       p = vt_csi(screen, p + 2);
       continue;
@@ -1851,13 +1908,14 @@ static void test_redirected_live_output_validates_stream(void) {
   sl = sl_create_with_config(&cfg);
   ASSERT_TRUE(sl && sl_output_stream_begin(sl) == SL_OK &&
                   sl_output_stream_write(sl, "\xc3", 1) == SL_OK &&
-                  sl_output_stream_end(sl) == SL_ERROR_INVALID &&
+                  sl_output_stream_end_for_handoff(sl) == SL_ERROR_INVALID &&
                   sl_output_stream_write(sl, "\xa4\033[31", 5) == SL_OK &&
-                  sl_output_stream_end(sl) == SL_ERROR_INVALID &&
+                  sl_output_stream_end_for_handoff(sl) == SL_ERROR_INVALID &&
                   sl_output_stream_write(sl, "m", 1) == SL_OK &&
                   sl_output_stream_write(sl, "\001", 1) == SL_ERROR_INVALID &&
                   sl_output_stream_write(sl, "X", 1) == SL_OK &&
-                  sl_output_stream_end(sl) == SL_OK,
+                  sl_output_stream_end_for_handoff(sl) == SL_OK &&
+                  sl_output_stream_end_for_handoff(sl) == SL_ERROR_INVALID,
               "redirected stream did not enforce byte protocol");
   ASSERT_TRUE(sl_output_stream_begin(sl) == SL_OK &&
                   sl_output_stream_write(sl, "\xf0\x80\x80\x80", 4) ==
@@ -2243,9 +2301,9 @@ static void test_native_output_without_reported_size(void) {
               "fallback geometry output missing");
   vt_init(&screen, 24, 80);
   vt_apply(&screen, output);
-  ASSERT_TRUE(strncmp(screen.cells[0], "ONE", 3) == 0 &&
-                  strncmp(screen.cells[1], "TWO", 3) == 0 && screen.row == 2 &&
-                  screen.col == 0,
+  ASSERT_TRUE(strncmp(screen.cells[21], "ONE", 3) == 0 &&
+                  strncmp(screen.cells[22], "TWO", 3) == 0 &&
+                  screen.row == 23 && screen.col == 0,
               "fallback geometry lost its output row between producer spans");
   sl_destroy(sl);
   close(slave_fd);
@@ -3837,13 +3895,13 @@ static void test_pty_enter_and_ctrl_j(void) {
   int status;
 
   TEST("pty readline is non-destructive and Ctrl-J inserts newline");
-  ASSERT_TRUE(run_pty_readline_case("ab\ncd\r", 20, 0, NULL, terminal,
-                                    sizeof(terminal), result, sizeof(result),
-                                    &status) == 0,
+  ASSERT_TRUE(run_pty_readline_case("  \nab  \n  cd \n\r", 20, 0, NULL,
+                                    terminal, sizeof(terminal), result,
+                                    sizeof(result), &status) == 0,
               "pty case failed");
   ASSERT_TRUE(WIFEXITED(status) && WEXITSTATUS(status) == 0,
               "child editor failed");
-  ASSERT_TRUE(strcmp(result, "ab\ncd") == 0, "result mismatch");
+  ASSERT_TRUE(strcmp(result, "ab  \n  cd") == 0, "result mismatch");
   ASSERT_TRUE(!contains_bytes(terminal, "\033[2J"), "clear-screen emitted");
   ASSERT_TRUE(!contains_bytes(terminal, "\033[?25l"), "cursor-hide emitted");
   ASSERT_TRUE(!contains_bytes(terminal, "\033[H"), "home-position emitted");
@@ -4517,12 +4575,12 @@ static void test_tab_render_expands_beyond_line_bytes(void) {
 
   TEST("tab rendering can exceed line byte count");
   ASSERT_TRUE(run_pty_readline_case_with_limit(
-                  "\033[200~\t\033[201~\r", 1, 0, 4, NULL, terminal,
+                  "\033[200~a\tb\033[201~\r", 1, 0, 4, NULL, terminal,
                   sizeof(terminal), result, sizeof(result), &status) == 0,
               "pty case failed");
   ASSERT_TRUE(WIFEXITED(status) && WEXITSTATUS(status) == 0,
               "child editor failed");
-  ASSERT_TRUE(strcmp(result, "\t") == 0, "tab result mismatch");
+  ASSERT_TRUE(strcmp(result, "a\tb") == 0, "tab result mismatch");
   PASS();
 }
 
@@ -7538,7 +7596,6 @@ static void test_normal_prompt_pins_at_bottom_for_live_output(void) {
   size_t terminal_len;
   ssize_t n;
   int status;
-  int replied;
   int tries;
   int prompts_after_second;
   int first_row;
@@ -7591,20 +7648,15 @@ static void test_normal_prompt_pins_at_bottom_for_live_output(void) {
   close(result_pipe[1]);
   terminal_len = 0;
   terminal[0] = '\0';
-  replied = 0;
   tries = 0;
   while (!contains_bytes(terminal, "first-live") && tries < 100) {
     n = read_some_with_timeout(master_fd, buf, sizeof(buf));
     if (n > 0)
       append_terminal_bytes(terminal, &terminal_len, sizeof(terminal), buf, n);
-    if (!replied && contains_bytes(terminal, "\033[6n")) {
-      ASSERT_TRUE(write(master_fd, "\033\033[5;4R", 7) == 7,
-                  "nested Escape and cursor report write failed");
-      replied = 1;
-    }
     tries++;
   }
-  ASSERT_TRUE(replied, "normal prompt did not request cursor position");
+  ASSERT_TRUE(!contains_bytes(terminal, "\033[6n"),
+              "live prompt requested cursor position");
   ASSERT_TRUE(contains_bytes(terminal, "first-live"),
               "first live message missing");
   ASSERT_TRUE(count_bytes(terminal, "p> ") == 1,
@@ -7752,16 +7804,13 @@ static void test_pinned_stream_failure_restores_prompt_cursor(void) {
   terminal_len = 0;
   terminal[0] = '\0';
   tries = 0;
-  while (!contains_bytes(terminal, "\033[6n") && tries < 100) {
+  while (!contains_bytes(terminal, "p> ") && tries < 100) {
     n = read_some_with_timeout(master_fd, buf, sizeof(buf));
     if (n > 0)
       append_terminal_bytes(terminal, &terminal_len, sizeof(terminal), buf, n);
     tries++;
   }
-  ASSERT_TRUE(contains_bytes(terminal, "\033[6n"),
-              "pinned stream did not request cursor position");
-  ASSERT_TRUE(write(master_fd, "\033[5;4R", 6) == 6,
-              "cursor report write failed");
+  ASSERT_TRUE(contains_bytes(terminal, "p> "), "pinned prompt missing");
   n = read_some_with_timeout(ready_pipe[0], result, sizeof(result));
   ASSERT_TRUE(n == 1 && result[0] == 'R',
               "failing stream did not report its callback error");
@@ -7795,9 +7844,8 @@ static void test_pinned_stream_failure_restores_prompt_cursor(void) {
   PASS();
 }
 
-static void test_cursor_probe_preserves_concurrent_queue_input(void) {
+static void test_live_prompt_preserves_concurrent_queue_input(void) {
   static const char input[] =
-      "\033[9999999999;9999999999R"
       "queued-012345678901234567890123456789012345\tok\033[13;5u";
   int master_fd;
   int slave_fd;
@@ -7812,7 +7860,7 @@ static void test_cursor_probe_preserves_concurrent_queue_input(void) {
   int status;
   int tries;
 
-  TEST("cursor probe preserves queued input and Ctrl-Enter");
+  TEST("pinned prompt preserves queued input and Ctrl-Enter");
   memset(&ws, 0, sizeof(ws));
   ws.ws_col = 20;
   ws.ws_row = 5;
@@ -7857,18 +7905,18 @@ static void test_cursor_probe_preserves_concurrent_queue_input(void) {
   terminal_len = 0;
   terminal[0] = '\0';
   tries = 0;
-  while (!contains_bytes(terminal, "\033[6n") && tries < 100) {
+  while (!contains_bytes(terminal, "p> ") && tries < 100) {
     n = read_some_with_timeout(master_fd, buf, sizeof(buf));
     if (n > 0)
       append_terminal_bytes(terminal, &terminal_len, sizeof(terminal), buf, n);
     tries++;
   }
-  ASSERT_TRUE(contains_bytes(terminal, "\033[6n"),
-              "cursor-position probe was not requested");
-  ASSERT_TRUE(
-      write(master_fd, input, sizeof(input) - 1) ==
-          (ssize_t)(sizeof(input) - 1),
-      "concurrent malformed cursor report and queue input write failed");
+  ASSERT_TRUE(contains_bytes(terminal, "p> "), "pinned prompt missing");
+  ASSERT_TRUE(!contains_bytes(terminal, "\033[6n"),
+              "pinned prompt requested cursor position");
+  ASSERT_TRUE(write(master_fd, input, sizeof(input) - 1) ==
+                  (ssize_t)(sizeof(input) - 1),
+              "concurrent queue input write failed");
   tries = 0;
   n = 0;
   while (n == 0 && tries < 50) {
@@ -7886,7 +7934,7 @@ static void test_cursor_probe_preserves_concurrent_queue_input(void) {
   ASSERT_TRUE(WIFEXITED(status) && WEXITSTATUS(status) == 0,
               "child editor failed");
   ASSERT_TRUE(strcmp(result, "ok") == 0,
-              "cursor probe did not preserve queued Ctrl-Enter input");
+              "pinned prompt did not preserve queued Ctrl-Enter input");
   PASS();
 }
 
@@ -10258,7 +10306,7 @@ static void retained_shrink_idle(sl_t *sl, void *userdata) {
     goto finish;
   }
   retained_growth_snapshot(state);
-  if (strncmp(state->screen.cells[0], "TRANSCRIPT", 10) != 0 ||
+  if (vt_count(&state->screen, "TRANSCRIPT") != 1 ||
       strncmp(state->screen.cells[7], "> x", 3) != 0 ||
       state->screen.row != 7 || state->screen.col != 3 ||
       sl_set_buffer(sl, "three\nfour") != SL_OK ||
@@ -10267,7 +10315,7 @@ static void retained_shrink_idle(sl_t *sl, void *userdata) {
     goto finish;
   }
   retained_growth_snapshot(state);
-  if (strncmp(state->screen.cells[0], "TRANSCRIPT", 10) != 0 ||
+  if (vt_count(&state->screen, "TRANSCRIPT") != 1 ||
       strncmp(state->screen.cells[6], "> three", 7) != 0 ||
       strncmp(state->screen.cells[7], "  four", 6) != 0 ||
       sl_output_stream_begin(sl) != SL_OK) {
@@ -10483,8 +10531,9 @@ static void test_live_output_prompt_growth_preserves_history(void) {
   if (!vt_contains(&screen, "TWO") || !vt_contains(&screen, "THREE") ||
       !vt_contains(&screen, "SEVEN"))
     vt_dump(&screen);
-  ASSERT_TRUE(screen.history_count == 1 &&
-                  strncmp(screen.history[0], "ONE", 3) == 0 &&
+  ASSERT_TRUE(screen.history_count >= 1 &&
+                  strncmp(screen.history[screen.history_count - 1], "ONE", 3) ==
+                      0 &&
                   strncmp(screen.cells[0], "TWO", 3) == 0 &&
                   strncmp(screen.cells[1], "THREE", 5) == 0 &&
                   strncmp(screen.cells[2], "FOUR", 4) == 0 &&
@@ -11129,8 +11178,8 @@ static void test_normal_prompt_pins_at_bottom_for_live_output(void) {
   printf("SKIP\n");
   tests_passed++;
 }
-static void test_cursor_probe_preserves_concurrent_queue_input(void) {
-  TEST("cursor probe preserves concurrent queue input");
+static void test_live_prompt_preserves_concurrent_queue_input(void) {
+  TEST("pinned prompt preserves concurrent queue input");
   printf("SKIP\n");
   tests_passed++;
 }
@@ -11248,6 +11297,7 @@ int main(int argc, char **argv) {
   test_invalid_config_is_rejected();
   test_invalid_receiver_arguments();
   test_plain_readline();
+  test_prompt_trim();
   test_plain_next_prompt_is_direct();
   test_plain_readline_uses_default_prompt();
   test_plain_readline_consumes_crlf_once();
@@ -11379,13 +11429,11 @@ int main(int argc, char **argv) {
   test_live_output_end_restores_unbounded_cursor();
   test_unbounded_finite_output_preserves_active_prompt();
   test_idle_callback_prints_above_active_prompt();
-  CURSOR_REPLIES_REAL(1);
   test_normal_prompt_pins_at_bottom_for_live_output();
 #if SL_TEST_PTY
   test_pinned_stream_failure_restores_prompt_cursor();
 #endif
-  test_cursor_probe_preserves_concurrent_queue_input();
-  CURSOR_REPLIES_REAL(0);
+  test_live_prompt_preserves_concurrent_queue_input();
   test_utf8_input_and_backspace();
   test_utf8_swedish_input_is_rendered_as_full_sequences();
   test_unicode_width_wraps_japanese_and_emoji();

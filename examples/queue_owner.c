@@ -1087,6 +1087,7 @@ int main(int argc, char **argv) {
   char *end;
   long port = argc > 1 ? strtol(argv[1], &end, 10) : 7635;
   owner_t *o = calloc(1, sizeof(*o));
+  sl_t *prompt_editor = NULL;
   const char *gate = getenv("SOFTLINE_CHAT_GATE_FD");
   const char *stream_delay = getenv("SOFTLINE_CHAT_CHAR_MS");
   if (!o)
@@ -1172,6 +1173,7 @@ int main(int argc, char **argv) {
   fflush(stdout);
   {
     demo_web_ops_t ops;
+    const char *web = getenv("SOFTLINE_WEB");
     int enabled;
     memset(&ops, 0, sizeof(ops));
     ops.submit = web_submit;
@@ -1180,9 +1182,18 @@ int main(int argc, char **argv) {
     ops.snapshot = web_snapshot;
     ops.terminal = 1;
     ops.terminal_unlock_command = "/terminal-lock off";
-    o->web = demo_web_open(NULL, &ops, o, 8081, &enabled);
+    if (web && !strcmp(web, "1")) {
+      prompt_editor = sl_create();
+      if (!prompt_editor) {
+        close(listener);
+        free(o);
+        return 1;
+      }
+    }
+    o->web = demo_web_open(prompt_editor, &ops, o, 8081, &enabled);
     if (enabled && !o->web) {
       perror("web listener");
+      sl_destroy(prompt_editor);
       close(listener);
       free(o);
       return 1;
@@ -1291,6 +1302,7 @@ int main(int argc, char **argv) {
     }
   }
   demo_web_close(o->web);
+  sl_destroy(prompt_editor);
   o->web = NULL;
   disconnect(o);
   {

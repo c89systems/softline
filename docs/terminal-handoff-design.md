@@ -1,8 +1,9 @@
 # Local and remote PTY handoff
 
-Status: implemented by `sl_terminal_handoff()` and the local PTY adapter
-`sl_terminal_local()`. Local C/Lua chat uses the local adapter. Remote C chat
-uses a backend PTY over the demo transport, independently of frontend rendering.
+The editor's `terminal_local` method opens a local PTY shell. Its
+`terminal_handoff` method relays terminal I/O through a host-supplied adapter.
+Local C and Lua chat examples use the local adapter. Remote C chat uses a
+backend PTY over the demo transport.
 
 `<softline/terminal.h>` exposes the server PTY as an independent receiver.
 The remote example uses this public API; it neither includes private PTY headers
@@ -107,26 +108,53 @@ blocked write or stalled close cannot monopolize its loop. Adapter deadlines
 govern connection/setup failure, not how long a user may keep a healthy shell
 open. Inactivity alone is not an error.
 
-Use the existing suspension and output-session lifecycle. Do not add a shell
-method to the public receiver merely to select an adapter. C and Lua hosts must
-be able to select local or remote sessions with the same behavior. Callback
-operations are declared in `sl_terminal_event_t` and `sl_terminal_operation_t`.
-Session selection uses these free functions; suspension retains the editor
-continuation without adding a shell-control method to the receiver.
+Use the existing suspension and output-session lifecycle. The editor receiver
+offers `terminal_local` and `terminal_handoff` in C and Lua. The equivalent
+C free functions and Lua module functions use the same relay. Suspension
+retains the editor continuation. Callback operations are declared in
+`sl_terminal_event_t` and `sl_terminal_operation_t`.
 
 ## Terminal and output ownership
 
-Suspend editing, end the output session outside editor callbacks, and transfer
-exclusive terminal ownership to the relay. The relay controls local terminal
-input modes and forwards PTY output bytes directly to the real terminal.
-Ordinary controls such as Ctrl-C and Ctrl-D reach the PTY. Forward size changes
-while opening and running, including a single shrink or grow.
+Request suspension from a key, idle, or watch callback, then wait for the
+editor call to return with `SL_READLINE_SUSPENDED`. Call
+`editor->terminal_local(editor, shell, &exit_status)` or
+`editor->terminal_handoff(editor, adapter, context)` in the owner loop.
+The relay uses the ordinary close policy for any open output session and
+reopens it on return. It controls local input modes and forwards PTY output
+bytes directly to the terminal. Ctrl-C and Ctrl-D reach the PTY, and resize
+events are forwarded during setup and while the relay is running.
 
 This is a byte relay, not a terminal emulator. Do not parse output into a screen,
 track its cursor using new escape queries, or save/replay transcript contents.
 Softline does not select an alternate screen for handoff; a program in the PTY
 may use the terminal normally. Existing editor terminal acquisition remains
 responsible for reestablishing its prompt position on return.
+
+For a foreground program the host runs directly, such as an alternate-screen
+pager, suspend the editor and call `editor->output_stream_end_for_handoff(editor)`
+with an open stream and the chat screen visible. On success, the native close
+releases terminal input ownership and clears the displayed queue, status, and
+input rows. Prior output, scrollback, and editor state are preserved. If a
+partial ANSI or UTF-8 sequence prevents close, finish the sequence and retry
+before handing over the terminal. If output is blocked or the native TTY
+disconnects, the close returns `SL_ERROR_IO` and releases terminal input
+ownership without waiting for drainage. Reopening after a partial display
+close restores margins and cursor visibility using the saved producer endpoint
+at the same terminal dimensions. If that row has scrolled off screen, recovery
+uses the regular clipped-output policy. Recovery retains
+unfinished lines and keeps a right-edge wrap pending through styling-only
+writes. It clears surviving prompt rows before accepting new output. Changed
+dimensions that invalidate the saved geometry return
+`SL_ERROR_IO` with the stream closed.
+Destroying an editor with unfinished display cleanup attempts to restore
+full-screen scrolling and show the cursor without blocking.
+After a successful handoff and return from the program, call
+`editor->output_stream_begin(editor)` and resume the same editor. The stream
+establishes a new bottom row, preserving the program's output in the terminal
+and its scrollback.
+`sl_output_stream_end_for_handoff()` is the equivalent free function. Use
+`output_stream_end` for application shutdown with the configured exit policy.
 
 Only bounded transport/parser chunks and pending partial writes are retained.
 Backpressure stops further reads in the affected direction without preventing
@@ -137,17 +165,17 @@ pending-input limit, end the session with `SL_ERROR_FULL`; never silently drop
 ordinary keystrokes or grow an unbounded input queue. It continues scanning the
 current input chunk for an escape before reporting overflow.
 
-Other producers must not write to the terminal during handoff. For the remote
-queue demo, retain detachment at a response seam, continued backend execution,
-and subscription recovery on return. Missed producer output is discarded, not
-buffered or replayed. A host can keep a shared transport alive for its shell
-adapter, provided queue output cannot reach the terminal or accumulate unboundedly.
+The host must keep other producers' writes away from the terminal during
+handoff. In the remote queue demo, the frontend detaches at a response
+boundary while the backend keeps running. The frontend discards missed
+output and resubscribes on return. A host can keep a shared transport alive
+for its shell adapter by isolating queue writes from the terminal and
+bounding pending output. The bounded chat backlog belongs to the
+[read-only transcript viewer](transcripts.md#output-and-scrollback).
 
-On every exit path, restore local terminal modes, release the session, reread
-geometry, begin the existing output session and resume the preserved editor.
-Report setup, transport or shell failures without discarding the draft. If the
-local terminal itself is unusable, perform cleanup and return an explicit error
-rather than claiming successful restoration.
+The relay restores local terminal modes and releases the session on exit.
+The host can resume the preserved editor at the current geometry after normal
+exit, setup failure, transport loss, or local escape.
 Output-session teardown and reacquisition remain nonblocking, including after
 escape. If the terminal cannot accept the required controls, return
 `SL_ERROR_IO`, release input modes and discard the unusable UI surface. Retain

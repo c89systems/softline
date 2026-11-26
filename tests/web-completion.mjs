@@ -26,7 +26,11 @@ export async function runWebCompletionTests(source, completionSource, promptSour
     }
     setAttribute(name, value) { this[name] = value; }
     removeAttribute(name) { delete this[name]; }
-    append(...values) { for (const value of values) { if (value && typeof value === 'object') value.parent = this; this.children.push(value); } }
+    append(...values) { for (const value of values) this.insertBefore(value, null); }
+    insertBefore(value, reference) {
+      if (value && typeof value === 'object') { value.remove?.(); value.parent = this; }
+      this.children.splice(reference === null ? this.children.length : this.children.indexOf(reference), 0, value);
+    }
     replaceChildren(...values) { this.children = []; this.append(...values); }
     set textContent(text) { this.replaceChildren(String(text)); }
     get textContent() { return this.children.map(child => typeof child === 'string' ? child : child.textContent).join(''); }
@@ -151,28 +155,35 @@ export async function runWebCompletionTests(source, completionSource, promptSour
     get('transcript-divider').hidden = get('terminal-divider').hidden = true;
     get('workspace').rect = { width: 1024, height: 704 };
     get('transcript-divider').rect = get('terminal-divider').rect = { width: 8, height: 8 };
+    function recordAnimation(list, element, keyframes, timing) {
+      let resolve, reject;
+      const animation = {
+        element, keyframes, timing,
+        finished: new Promise((done, cancelled) => { resolve = done; reject = cancelled; }),
+        finish() { resolve(); },
+        cancel() { this.cancelled = true; reject(new Error('animation cancelled')); }
+      };
+      list.push(animation);
+      return animation;
+    }
     if (options.motion) for (const id of ['terminal-panel', 'terminal-divider', 'transcripts', 'transcript-divider']) {
       const element = get(id);
       element.getAnimations = () => splits.filter(animation => animation.element === element && !animation.cancelled);
-      element.animate = (keyframes, timing) => {
-        let resolve, reject;
-        const animation = {
-          element, keyframes, timing,
-          finished: new Promise((done, cancelled) => { resolve = done; reject = cancelled; }),
-          finish() { resolve(); },
-          cancel() { this.cancelled = true; reject(new Error('animation cancelled')); }
-        };
-        splits.push(animation);
-        return animation;
-      };
+      element.animate = (keyframes, timing) => recordAnimation(splits, element, keyframes, timing);
     }
     get('copy-icon').content = { cloneNode: () => document.createElement('svg') };
     get('transcripts').append(get('transcript-tabs'), get('transcript-close'), get('transcript-screen'));
     get('conversation-pane').rect = { top: 64, height: 704 };
     get('composer-area').rect = { top: 600, height: 120 };
+    const welcome = get('welcome');
+    get('chat').append(welcome, get('composer-area'));
+    welcome.rect = options.config?.banner || options.config?.welcome
+      ? { left: 80, top: 190, width: 864, height: 90, bottom: 280 }
+      : { height: 0, bottom: 0 };
+    welcome.animate = (keyframes, timing) => recordAnimation(animations, welcome, keyframes, timing);
     if (options.motionLayout) {
       const chat = get('chat'), composer = get('composer-area');
-      const classes = new Set(['welcome-state']);
+      const classes = new Set();
       chat.classList = { add: name => classes.add(name), remove: name => classes.delete(name), contains: name => classes.has(name) };
       composer.getBoundingClientRect = () => ({ ...composer.rect, top: classes.has('welcome-state') ? 310 : composer.rect.top });
       composer.animate = (keyframes, timing) => animations.push({ keyframes, timing });
@@ -215,8 +226,13 @@ export async function runWebCompletionTests(source, completionSource, promptSour
       URL: class extends globalThis.URL { static createObjectURL() { const url = 'blob:test-image-' + (++serial); blobs.push(url); return url; } static revokeObjectURL(url) { revoked.push(url); } }, location: { href: 'http://localhost/', protocol: 'http:', origin: 'http://localhost' },
       crypto: { getRandomValues(array) { return array.fill(++serial); } },
       localStorage: { getItem: name => preferences.get(name), setItem: (name, value) => preferences.set(name, value) },
-      ResizeObserver: class { constructor(fn) { this.fn = fn; this.targets = []; observers.push(this); } observe(target) { this.targets.push(target); } }, performance: { now: () => now },
-      MarkdownStream: class { write() {} end() {} },
+      ResizeObserver: class { constructor(fn) { this.fn = fn; this.targets = []; observers.push(this); } observe(target) { this.targets.push(target); } },
+      performance: { now: () => now },
+      MarkdownStream: class {
+        constructor(root) { this.root = root; }
+        write(text) { if (this.root === get('welcome-text')) this.root.append(text); }
+        end() {}
+      },
       fetch: async () => { options.beforeConfig?.(document); return { ok: true, json: async () => ({ images: options.images ? '1' : '0', ...options.config }) }; },
       setTimeout: (fn, delay) => { const id = ++serial; timers.set(id, { fn, delay, due: now + delay }); return id; },
       clearTimeout: id => timers.delete(id)
@@ -252,6 +268,7 @@ export async function runWebCompletionTests(source, completionSource, promptSour
     const AsyncFunction = Object.getPrototypeOf(async function() {}).constructor;
     await new AsyncFunction(...Object.keys(env), stripImports(source))(...Object.values(env));
     socket.fire('open');
+    if (options.replaying) event({ type: 'replay_begin' });
     event({ type: 'session', id: 'initial' });
     if (!options.noProviders) {
       for (const [, trigger, scope, strip, expand] of policies) event({ type: 'completion_provider', trigger, scope, strip, expand });
@@ -436,18 +453,104 @@ export async function runWebCompletionTests(source, completionSource, promptSour
     await ui.type('next prompt'); ui.key('Enter'); await ui.idle();
     assert(ui.sent() === 'next prompt' && ui.animations.length === 1, 'subsequent sends animated the already docked composer');
   }, { motion: true, motionLayout: true });
+  const brandedMotion = {
+    motion: true, motionLayout: true,
+    config: { banner: '<svg aria-label="Example"></svg>', welcome: 'Welcome' }
+  };
+  await check('the welcome pulls down before accelerating out of the viewport', async ui => {
+    await ui.type('initial draft'); ui.key('Enter'); await ui.idle();
+    const welcome = ui.get('welcome'), exit = ui.animations[0];
+    assert(ui.animations.length === 2 && exit.element === welcome && welcome.parent === ui.document.body &&
+      welcome.dataset.leaving !== undefined && welcome.inert, 'welcome was clipped on the first send');
+    const [start, pull, release] = exit.keyframes;
+    assert(start.left === '80px' && start.top === '190px' && start.width === '864px' &&
+      pull.translate === '0 12px' && pull.offset > 0 && pull.offset < .5 &&
+      release.translate === '0 -284px', 'welcome did not dip or clear the viewport');
+    assert(exit.timing.duration === ui.animations[1].timing.duration, 'welcome and composer transitions diverged');
+    exit.finish(); await ui.idle();
+    assert(exit.cancelled && welcome.parent === ui.get('chat') && welcome.dataset.leaving === undefined &&
+      !welcome.inert, 'finished welcome remained visible or inert');
+  }, brandedMotion);
+  await check('reset and reduced motion release a departing welcome', async ui => {
+    await ui.type('initial draft'); ui.key('Enter'); await ui.idle();
+    const welcome = ui.get('welcome'), first = ui.animations[0];
+    ui.event({ type: 'reset' }); await ui.idle();
+    assert(first.cancelled && ui.get('chat').classList.contains('welcome-state') &&
+      welcome.dataset.leaving === undefined && !welcome.inert, 'reset kept the outgoing animation');
+    await ui.type('next draft'); ui.key('Enter'); await ui.idle();
+    const second = ui.animations.filter(animation => animation.element === welcome).at(-1);
+    assert(second !== first && welcome.inert, 'welcome did not animate on the next start');
+    ui.reduced.matches = true; ui.reduced.fire('change'); await ui.idle();
+    assert(second.cancelled && welcome.dataset.leaving === undefined && !welcome.inert, 'reduced motion left a welcome in flight');
+  }, brandedMotion);
   for (const [name, motion, reducedMotion] of [['plain page', false, false], ['reduced motion', true, true]]) {
     await check(`${name} docks the composer immediately`, async ui => {
       await ui.type('initial draft'); ui.key('Enter'); await ui.idle();
       assert(ui.sent() === 'initial draft' && !ui.animations.length && !ui.get('chat').classList.contains('welcome-state'), 'submit did not dock without animation');
-    }, { motion, reducedMotion, motionLayout: true });
+    }, { ...brandedMotion, motion, reducedMotion });
   }
-  await check('history replay docks the composer without flying from the welcome position', async ui => {
-    ui.event({ type: 'delta', id: 'm1', role: 'user', text: 'Existing turn' });
-    assert(!ui.get('chat').classList.contains('welcome-state') && !ui.animations.length, 'history triggered a local send animation');
-    await ui.type('next prompt'); ui.key('Enter'); await ui.idle();
-    assert(ui.sent() === 'next prompt' && !ui.animations.length, 'an already docked composer took the welcome flight');
-  }, { motion: true, motionLayout: true });
+  for (const [source, entry] of [
+    ['a prompt from another client', { type: 'delta', role: 'user', text: 'Remote prompt' }],
+    ['assistant output', { type: 'begin', role: 'assistant' }],
+    ['a plain feed note', { type: 'delta', role: 'note', text: 'Host output' }]
+  ]) await check(`${source} dismisses the welcome without changing the local draft`, async ui => {
+    await ui.type('unsent draft'); ui.prompt.setSelectionRange(2, 5);
+    assert(ui.get('chat').classList.contains('welcome-state') && !ui.animations.length, 'local typing dismissed the welcome');
+    ui.event({ ...entry, id: 'first' }); await ui.idle();
+    assert(!ui.get('chat').classList.contains('welcome-state') && ui.animations.length === 2 &&
+      ui.animations[0].element === ui.get('welcome'), 'incoming feed did not animate the welcome and composer');
+    assert(ui.prompt.value === 'unsent draft' && ui.prompt.selectionStart === 2 &&
+      ui.prompt.selectionEnd === 5 && !ui.sent(), 'incoming feed changed or sent the local draft');
+    ui.event({ type: 'delta', id: 'second', text: 'Next output' });
+    ui.key('Enter'); await ui.idle();
+    assert(ui.sent() === 'unsent draft' && ui.animations.length === 2, 'an already docked composer took the welcome flight');
+  }, brandedMotion);
+  await check('an empty replay shows the welcome and still animates on the first live message', async ui => {
+    const chat = ui.get('chat');
+    ui.event({ type: 'reset' }); queueState(ui, []); ui.advance(5000); await ui.idle();
+    assert(!chat.classList.contains('welcome-state') && !ui.animations.length, 'welcome appeared before replay finished');
+    ui.event({ type: 'replay_end' }); await ui.idle();
+    assert(chat.classList.contains('welcome-state') && ui.get('banner').innerHTML.includes('<svg') &&
+      ui.get('welcome-text').textContent === 'Welcome' && !ui.animations.length, 'empty chat lost its welcome');
+    ui.event({ type: 'delta', id: 'live', role: 'user', text: 'First prompt' }); await ui.idle();
+    assert(!chat.classList.contains('welcome-state') && ui.animations.length === 2 &&
+      ui.animations[0].element === ui.get('welcome'), 'the first live message skipped the welcome motion');
+  }, { ...brandedMotion, replaying: true });
+  for (const content of ['history', 'approval', 'queued prompt']) await check(`replayed ${content} leaves the welcome hidden`, async ui => {
+    const chat = ui.get('chat');
+    assert(!chat.classList.contains('welcome-state'), 'welcome appeared before replay');
+    ui.event({ type: 'reset' }); await ui.idle();
+    assert(!chat.classList.contains('welcome-state'), 'replay reset showed the welcome');
+    if (content === 'history') ui.event({ type: 'delta', id: 'history', role: 'user', text: 'Earlier prompt' });
+    else queueState(ui, [{ id: 'waiting', held: content === 'approval' ? '1' : '0', revision: '1' }]);
+    await ui.idle();
+    assert(!chat.classList.contains('welcome-state') && !ui.animations.length, 'welcome appeared during replay');
+    ui.event({ type: 'replay_end' }); await ui.idle();
+    assert(!chat.classList.contains('welcome-state') && !ui.animations.length, 'welcome appeared after populated replay');
+    if (content === 'history') assert(ui.get('messages').textContent.includes('Earlier prompt'), 'history was not restored');
+    else {
+      if (content === 'queued prompt') ui.advance(500);
+      assert(!ui.get('queue').hidden && !ui.animations.length, 'restored queue did not appear quietly');
+    }
+  }, { ...brandedMotion, replaying: true });
+  await check('the first approval shows and dismisses the welcome immediately', async ui => {
+    queueState(ui, [{ id: 'approval', revision: '1' }]); await ui.idle();
+    const queue = ui.get('queue');
+    assert(!queue.hidden && queue.children[0].dataset.id === 'approval', 'approval waited for the queue delay');
+    assert(!ui.get('chat').classList.contains('welcome-state') && ui.animations.length === 2 &&
+      ui.animations[0].element === ui.get('welcome'), 'approval did not animate the welcome and composer');
+  }, brandedMotion);
+  await check('an ordinary remote queue entry dismisses the welcome when it becomes visible', async ui => {
+    const chat = ui.get('chat'), queue = ui.get('queue');
+    queueState(ui, [{ id: 'transient', held: '0' }]); ui.advance(50);
+    queueState(ui, []); ui.advance(500); await ui.idle();
+    assert(queue.hidden && chat.classList.contains('welcome-state') && !ui.animations.length, 'a consumed entry dismissed the welcome');
+    queueState(ui, [{ id: 'waiting', held: '0', mode: 'steer' }]); ui.advance(499);
+    assert(queue.hidden && chat.classList.contains('welcome-state') && !ui.animations.length, 'debounced entry dismissed the welcome before appearing');
+    ui.advance(1); await ui.idle();
+    assert(!queue.hidden && !chat.classList.contains('welcome-state') && ui.animations.length === 2 &&
+      ui.animations[0].element === ui.get('welcome'), 'visible queue did not animate the welcome and composer');
+  }, brandedMotion);
   await check('a drained queue never appears and the next arrivals age independently', async ui => {
     const queue = ui.get('queue'), queued = { id: 'queued', held: '0' }, steer = { id: 'steer', held: '0', mode: 'steer' };
     await ui.type('sent immediately'); ui.key('Enter'); await ui.idle();
@@ -996,8 +1099,9 @@ export async function runWebCompletionTests(source, completionSource, promptSour
     await ui.idle();
     const panel = ui.get('terminal-panel');
     assert(panel.children[0] === frame && paneSize(panel) === '490px' && ui.prompt.value === 'keep this draft', 'welcome split changed the shell or draft');
-    assert(ui.animations.length === 1 && ui.animations[0].keyframes[0].translate === '0 -290px', 'welcome composer snapped to the dock as the split opened');
-  }, { motion: true, motionLayout: true });
+    assert(ui.animations.length === 2 && ui.animations[0].element === ui.get('welcome') &&
+      ui.animations[1].keyframes[0].translate === '0 -290px', 'welcome or composer snapped as the split opened');
+  }, brandedMotion);
   await check('terminal uses 25 measured rows or one third of the viewport without hiding the prompt', async ui => {
     openTerminal(ui);
     const panel = ui.get('terminal-panel');
@@ -1933,6 +2037,17 @@ export async function runWebCompletionTests(source, completionSource, promptSour
   await check('toolbar branding is hidden and empty by default', async ui => {
     assert(ui.get('brand').hidden && ui.get('brand').innerHTML === '', 'default toolbar included branding');
   });
+  await check('missing welcome text stays blank', async ui => {
+    assert(ui.get('welcome-text').textContent === '', 'browser supplied a default welcome');
+  });
+  const banner = '<svg aria-label="Welcome banner"></svg>';
+  await check('a banner can appear without welcome text', async ui => {
+    assert(ui.get('welcome-text').textContent === '', 'blank welcome was replaced');
+    assert(ui.get('banner').innerHTML === banner, 'banner was lost');
+  }, { config: { welcome: '', banner } });
+  await check('configured welcome goes through Markdown', async ui => {
+    assert(ui.get('welcome-text').textContent === '**Hello**', 'host welcome was not rendered');
+  }, { config: { welcome: '**Hello**' } });
   const header = '<a href="./"><svg aria-label="My project"></svg><img src="./logo.svg" alt="Logo"></a>';
   await check('trusted custom header HTML is visible independently of welcome branding', async ui => {
     assert(!ui.get('brand').hidden && ui.get('brand').innerHTML === header, 'host header HTML was lost or hidden');

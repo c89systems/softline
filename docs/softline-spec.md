@@ -10,7 +10,13 @@ for build and example commands.
 
 The built-in editing keys are:
 
-- `Enter` submits the current buffer.
+- `Enter` submits the current buffer. By default submissions remove Unicode
+  whitespace from both ends and preserve interior bytes. This applies to
+  redirected input, queued/steered drafts, and host `sl_submit()` calls.
+  Whitespace-only submissions follow the empty-draft rules for the action.
+  Set `disable_prompt_trim` or call `sl_set_prompt_trim()` to preserve edges.
+  Queue policy and automatic history see the submitted text. Explicit queue
+  inserts, replacements, and typed backend requests retain their input bytes.
 - `Ctrl-J` inserts a newline.
 - `Ctrl-L` rereads PTY geometry, restores owned scroll margins and repaints
   the prompt, status and queue rows, including unchanged cached cells. It

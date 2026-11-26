@@ -35,10 +35,10 @@ the application through a pipe or another bounded transport. The application
 registers its descriptor with `sl_watch_add()` (Lua: `watch_add()`), drains it
 on the editor thread, feeds its renderer, and forwards each sink emission
 directly into the Softline session. Softline does not buffer whole messages,
-interpret Markdown, own the transport, or run a worker. An already-decided
-fragment is visible when the write returns. While the read-only transcript
-viewer occupies the terminal, chat writes enter its bounded display backlog.
-The backlog replays when the user returns to chat. See
+interpret Markdown, own the transport, or run a worker. Complete units reach
+the terminal when the write returns with chat on screen. While the
+read-only transcript viewer occupies the terminal, chat writes enter a bounded
+backlog. The retained portion is displayed when the user returns to chat. See
 [transcript behavior](transcripts.md#native-editor).
 
 Softline adds no content bytes, response separator, or space at chunk
@@ -60,9 +60,9 @@ native session startup restores raw mode only when
 that startup acquired it, preserving raw mode already owned by the editor.
 Ending a session does not finish a Markdown document. The application calls its
 renderer’s document lifecycle itself. Each successful write accepts its entire
-span; errors are reported on the handle and never silently discard accepted
-data. A zero-length write is a no-op. Writes after end and overlapping begins
-fail. Existing finite `sl_print_above()` remains available in native terminal scrollback. It cannot be interleaved with an open live session.
+span. An error can occur after processing a prefix. A zero-length write is a
+no-op. Writes after end and overlapping begins fail. Use `sl_print_above()`
+for finite output between live sessions.
 
 The quoted-prompt helper writes submitted text literally into an open session
 between external renderer segments. It wraps at the current output width,
@@ -84,8 +84,8 @@ The VT scroll region ends immediately above the current prompt
 frame. Native producer bytes are written unchanged. Softline retains bounded
 partial ANSI/UTF-8 parser state and an output cursor. The terminal owns
 wrapping and scrollback. Positions are distances from the terminal bottom.
-Resize reconciliation queries the live input cursor and combines its observed
-movement with the known layout of the old prompt. Unchanged prompt rows that
+Resize reconciliation uses terminal dimensions and the tracked layout of the
+old prompt. Unchanged prompt rows that
 fit the new width keep their cached cells. The logical prompt frame survives
 successive width changes so a wrapped physical row does not become a new
 independent source row. Width resize rebuilds only prompt
@@ -100,27 +100,25 @@ positioning; producer bytes continue to pass through immediately.
 When no prompt frame has been rendered, the live cursor belongs to the producer.
 Writes leave that cursor in place, preserving native pending wrap and Unicode
 clusters across chunks. No editor rows are reserved until a frame exists.
-A full-height region follows terminal resize without another margin command.
-Cursor reports refresh the producer's bottom-relative row and column at resize,
-first editor handoff, finite-output completion, and session close. At unchanged
-geometry, the handoff corrects the logical column used by later width changes
-as well as the current cursor position. A physical resize's viewport movement
-is not counted as emitted text. Feed writes never request or read cursor reports,
-including Unicode writes and resize reconciliation invoked by a feed call.
-There is no sleep, timeout, timed coalescing or producer-tail delay. Unicode
-scalar advances are accounted locally; the original bytes reach the terminal
-unchanged. Cursor observation remains at non-feed ownership boundaries.
-A bounded viewport-shift estimate survives output-session boundaries. It contains
-no text, cells, glyph spans or Softline scrollback. It limits history restoration
-when growth exposes more rows than Softline's output has scrolled. Pre-existing
-terminal history is unknown; the fallback guesses no history for an initial
-row-zero cursor and otherwise assumes history can fill newly exposed space.
-Neither is a statement about the real terminal history. Resize while input owns
-the cursor observes the actual terminal position.
+On height growth, Softline anchors the live producer cursor with relative moves
+and returns any restored rows to terminal history. With a pending wrap,
+Softline leaves the native cursor in place until a write moves off the edge or
+the editor needs the cursor. Styling and zero-width characters can still reach
+the original row, even across fragmented writes.
+A new terminal owner establishes a fresh row at the bottom and preserves
+prior contents in the terminal and its scrollback. Ordinary stream reopen
+can reuse an append point that Softline still owns. No output boundary
+requests or reads cursor-position reports.
+
+A viewport-shift counter tracks scrolls generated by the session. On height
+growth, Softline anchors a retained frame or a single-row active frame with
+relative moves from its live cursor, even when terminal history was cleared
+or disabled. Any restored rows return to history, and a retained frame can sit
+above the new bottom until editing resumes.
 Moving to an editor or temporary parked cursor releases
 producer ownership, so later writes use the stored output position. Rendering
 a prompt sets its actual margin.
-At a known ASCII right edge with an active prompt, returning to the editor clears the
+At a known right edge with an active prompt, returning to the editor clears the
 terminal's pending-wrap state. A later printable continuation uses CR and IND
 to reach the next row without overwriting the last cell. This is a hard row
 boundary in terminals that distinguish hard and soft wraps. Producer-emitted
@@ -128,18 +126,16 @@ LF is handled normally; no extra row advance is needed when LF comes next.
 Finite callbacks and live writes share the same native geometry reconciliation.
 Finite output reconciles the retained prompt before invoking its producer and
 again after each callback returns, including EOF. A resize during a callback
-uses the same tracked cursor delta as a live write. Input-owned resize
-reconciliation occurs before dispatching ready producer watches; feed calls
-never acquire a cursor report themselves.
-Ordinary readline's optional scroll-region ownership is checked at startup
-and retried between producer callbacks after finite output advances its prompt.
-Multiple feeds in a single callback remain immediate and defer acquisition
-until the next input-owned boundary.
+uses the same tracked cursor delta as a live write. Resize reconciliation
+occurs before dispatching ready producer watches. Ordinary readline reserves
+its optional live scroll region at startup or between producer callbacks when
+enabled later. The pinned frame uses the configured wrap width, capped at the
+physical width, and the terminal dimensions determine its placement. On
+submission Softline restores full-screen margins and advances below the frame.
 Physical resize updates internal geometry, restores the reserved output margin
 and repositions an active editor at the terminal bottom. Restoring margins
 invalidates the cached hardware cursor even when the text is unchanged; the
-renderer restores the input cursor before returning. A prompt-free full-height
-producer retains its hardware cursor and pending wrap. Retained-frame output
+renderer restores the input cursor before returning. Retained-frame output
 preparation also restores the input cursor when an incomplete or rejected
 fragment emits no producer bytes; a later feed is not needed to restore it.
 The incremental ANSI/UTF-8 validator is unchanged. Each batch that positions
@@ -154,9 +150,7 @@ operation does not clear terminal history or replay producer bytes. Hosts may
 remap it through the RESET key action without changing the receiver layout.
 Margin state is not cached across these batches because terminal resize can
 reset it after the new PTY size becomes observable.
-Updating margins after physical resize
-must not scroll the transcript again; cells clipped off the top are not
-recovered or replayed. When an unfinished line leaves the screen, its next
+Softline leaves recovery of cells clipped off the top to the terminal history. When an unfinished line leaves the screen, its next
 fragment resumes at the first visible output row. If the clipped position was
 at a hard line boundary, new output starts next to the prompt. Neither case
 changes cells or blank rows already in scrollback.
@@ -194,14 +188,16 @@ application-owned coordinates to return to the input cursor. Softline applies
 that separation to incremental producer writes and retains only the prompt
 frame for cell comparisons.
 `clear_prompt_on_exit = 1` selects clearing the whole prompt area and returning
-below the transcript. Ending a stream inside an active editor retains the
+below the transcript. `output_stream_end_for_handoff` applies the same
+full-frame close for one call at a foreground-program boundary. See
+[terminal ownership](terminal-handoff-design.md#terminal-and-output-ownership)
+for call order and validation errors.
+Ending an ordinary stream inside an active editor retains the
 prompt and scroll region for later finite output or another stream. Closing
 the handle always restores terminal state. Non-TTY sessions emit no teardown
 controls. Ctrl-C restores unrestricted scroll margins, the bottom input cursor,
 and termios before raising SIGINT. If a handler returns, the existing native
 output session remains available and its scroll margin is reinstated.
-Cursor queries outside an active raw readline temporarily acquire noncanonical,
-non-echo input without flushing pending bytes, then restore the prior attributes.
 Native chat needs at least three terminal rows: two for output and
 one for the prompt.
 
@@ -220,14 +216,10 @@ accepts one-byte fragments indefinitely.
 
 ## Compatibility and public surfaces
 
-The C and Lua surfaces expose a single native chat layout. ABI 1 introduced the
-public `output_stream_reconcile` receiver method. ABI 2 retains it and adds
-per-entry queue approval and stable identities. ABI 3 adds native submission
-policies and per-entry execution/stop state. ABI 4 adds constructor-selected
-asynchronous queue backends. Equivalent free functions validate NULL handles.
-Public declarations document ownership, thread context, lifecycle, errors,
-and chunk semantics for clangd. Lua methods document the same contract in the
-Lua reference and adjacent public binding comments. Lua cannot invoke its VM
+The C and Lua surfaces expose a single native chat layout. Use either the
+editor receiver or its matching free functions in C. The comments on public
+declarations cover ownership, thread context, lifecycle, and errors.
+Lua methods expose the same contract. Lua cannot invoke its VM
 from a foreign producer thread; a watched descriptor supplies owner-thread
 events. The core and Lua libraries do not import libmdf.
 
@@ -239,9 +231,10 @@ Queue approval extends that released receiver layout and changes insertion
 signatures in ABI 2. Native queue policies extend the receiver and entry layouts,
 advancing released v0.13.0's ABI 2 to ABI 3. Constructor-selected backends advance
 released v0.15.1's ABI 3 to ABI 4. Image handover and later receiver extensions
-use ABI 5, one increment from released v0.17.0. Both C and Lua consumers must
-rebuild against the matching header and library. Local release rehearsal tags
-are not the released baseline for this decision.
+use ABI 5, one increment from released v0.17.0. Terminal handoff, transcripts,
+and tracked browser simulation extend the receivers in ABI 6, one increment
+from released v0.20.0. See the [README](../README.md#build-and-test) for the
+current SONAME and consumer requirements.
 
 ### Review exception: active-prompt right-edge continuation
 
@@ -321,45 +314,18 @@ helper has explicit stop/poll and input barriers, including pending replies
 needed to finish a frame, with resume checks after resize/drain failures.
 Input responsiveness is tested with the editor running.
 
-### Review exception: unobserved retained-frame resize
+### Reconciliation after resize
 
-Policy source: the developer's hard zero-delay feed requirement and earlier
-decision to retain terminal-owned transcript reflow without replay or a
-Softline scrollback model. This applies only when a retained editor frame is
-resized without an input-owned cursor observation, including writes after
-`readline()` has returned and resizes performed inside a producer callback.
-The active chat loop observes resize before dispatching producer watches.
+Synchronous producers can call `sl_output_stream_reconcile()` on the owner
+thread after resize settles and before the next write. It reapplies the
+tracked layout using the new PTY dimensions and preserves queued input,
+draft, cursor, queue, history, status and incremental UTF-8/SGR state.
 
-Synchronous producers now have an explicit owner operation:
-`sl_output_stream_reconcile()`. Call it after resize settles and before the
-next producer write. It may wait up to 100 ms for a cursor report, reconciles
-and repaints only the owned prompt frame, and preserves queued input, draft,
-cursor, queue, history, status and incremental UTF-8/SGR state. A missing report
-returns `SL_ERROR_IO`; callers must handle that failure before continuing.
-No transcript is stored or replayed. This does not change observation-free
-feeds or repair a resize that races a physical write.
-
-The fallback uses bottom-relative deltas and current-line scalar geometry.
-It cannot infer reflow of earlier hard-ended lines, or distinguish empty history
-from a cleared and homed screen with preserved terminal history. Even a settled
-resize can therefore misplace ASCII continuation in this path. Row zero is not
-proof of empty history; the row counter is an estimate only. Do not add a feed
-cursor-report wait, transcript buffer, line/span reconstruction or replay to
-repair this ambiguity. The withdrawn 0.8.0 passed these cases by waiting for a
-cursor report inside the feed, which is the behavior being removed.
-
-Reproducers in VTE, initially 40×8: emit 80 ASCII `a`s followed by `\nABC`,
-retain a submitted prompt, grow to 80×8, then emit `Y`; the fallback may put `Y`
-on a separate row. Alternatively, fill terminal history, use ED+CUP to clear
-and home without erasing history, emit `ABC`, retain a submitted prompt, grow
-to 40×12, then emit `Y`; an empty-history estimate can address a history row.
-The native-output regression runs both scenarios with readline still active
-and asserts exact direct-terminal continuation. Feed latency checks assert no
-cursor requests even when a feed must reconcile resize itself.
-
-Callers that omit owner reconciliation retain this fallback limitation.
-A missing input-owned observation is separate from the concurrent physical
-resize race above.
+Width reflow of earlier hard-ended lines can change the visible transcript
+geometry beyond the tracked current line and prompt. The terminal owns this
+reflow. Softline updates its owned frame and forwards producer bytes without
+retaining or replaying the transcript. A concurrent geometry change during
+a physical write remains subject to the resize race described above.
 
 ### Review exception: opaque feed
 
@@ -378,10 +344,9 @@ After an unfinished Unicode/tab line reflows on width resize, its tracked
 endpoint cannot identify the terminal's new logical position. Softline retains
 the tracked column and clamps an offscreen column; continuation can land in
 a gap or overwrite text. This includes CR-overwritten tails, wide cells crossing
-a new margin, and tabs narrowed below their original span. A cursor report at
-the last physical column also cannot distinguish Unicode pending wrap from a
-cursor before the last cell, so an active-prompt continuation there may overwrite
-the last cell or lose a cluster attachment. Softline does not build a glyph/span
+a new margin, and tabs narrowed below their original span. Softline tracks
+pending wrap, including after UTF-8 text at unchanged dimensions. A split
+cluster can still lose its attachment when cursor ownership changes. Softline does not build a glyph/span
 model, add per-character probes, buffer graphemes, or replay the feed to recover
 these cases. This exception does not permit modifying producer bytes or clearing
 transcript cells during resize. Plain ASCII continuation, normal prompt layout,
@@ -418,8 +383,7 @@ opaque-feed/latency contract. The CR-tail diagnostic retains a reproducer.
   by an intervening editor iteration. The full retained transcript, bottom
   input cursor, absence of stale prompts, and final exit cursor are checked.
   Ignored SIGINT and returning handlers leave the input mode restored before
-  more output; subsequent cursor reports remain absent from the transcript and
-  session close restores the original input attributes.
+  more output. Session close restores the original input attributes.
   After `readline` returns, shrinking rows and sometimes columns before session
   close clears the retained input row at its new location and exits at the new
   bottom row.

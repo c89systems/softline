@@ -19,18 +19,17 @@ if [[ "$mode" == preflight ]]; then
      -z ${SOFTLINE_RELEASE_TARGETS:-} && -z ${SOFTLINE_CHECKSUM_FILE:-} && -z ${SL_VERSION_ROOT:-} ]] || {
     echo 'ERROR: final release refuses partial targets, alternate dist roots or evidence selectors' >&2; exit 1;
   }
-  # Fail before clean if any required toolchain is not prepared.
-  source "$ROOT_DIR/scripts/release-targets.sh"
-  for target in $SOFTLINE_RELEASE_TARGETS; do
-    description=$("$ROOT_DIR/scripts/cpkt-toolchains.sh" discover "$target")
-    grep -qx 'status=ready' <<< "$description" || {
-      echo "ERROR: required collection missing; run scripts/cpkt-toolchains.sh ensure $target" >&2; exit 1;
-    }
-  done
-  "$ROOT_DIR/scripts/cpkt-aflpp.sh" discover >/dev/null
   for tool in cmake ninja bash clang-format clangd pkg-config luarocks valgrind tar gzip zip unzip; do
     command -v "$tool" >/dev/null || { echo "ERROR: required release tool missing: $tool" >&2; exit 1; }
   done
+  # Prepare pinned collections before the release removes generated outputs.
+  source "$ROOT_DIR/scripts/release-targets.sh"
+  "$ROOT_DIR/scripts/cpkt-toolchains.sh" ensure arm64-apple-darwin >/dev/null
+  for target in $SOFTLINE_RELEASE_TARGETS; do
+    [[ "$target" != arm64-apple-darwin ]] || continue
+    "$ROOT_DIR/scripts/cpkt-toolchains.sh" ensure "$target" >/dev/null
+  done
+  "$ROOT_DIR/scripts/cpkt-aflpp.sh" ensure
   exit 0
 fi
 # make release has already checked the tag and emptied local generated state.

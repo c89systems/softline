@@ -1,8 +1,7 @@
 #ifndef SOFTLINE_VERSION_H
 #define SOFTLINE_VERSION_H
 
-/** @file
- * Build-time release version information for the installed C library. */
+/** Build-time release version information for the installed C library. */
 
 /** Full softline release version string, such as "0.1.0". */
 #define SOFTLINE_VERSION "@PROJECT_VERSION@"

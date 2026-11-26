@@ -141,6 +141,8 @@ static int run(int native, const char *initial, size_t cursor, const char *keys,
   config.prompt_queue = 1;
   config.prompt_theme = SL_PROMPT_THEME_PLAIN;
   config.line_max_len = limit;
+  /* Check the exact text produced by the completion editor. */
+  config.disable_prompt_trim = 1;
   sl = sl_create_with_config(&config);
   CHECK(sl);
   if (limit > 20) {
@@ -412,6 +414,7 @@ static int provider_cases(int native) {
     config.input_fd = config.output_fd = slave;
     config.prompt_theme = SL_PROMPT_THEME_PLAIN;
     config.prompt_queue = 1;
+    config.disable_prompt_trim = 1;
     sl = sl_create_with_config(&config);
     CHECK(sl);
     CHECK(sl_set_prompt_queue_delivery(sl, SL_PROMPT_QUEUE_DELIVERY_MANUAL) ==

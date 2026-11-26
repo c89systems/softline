@@ -42,6 +42,7 @@ static int start_session(struct session *g, const char *fixture,
                          const char *build, const char *mode,
                          const char *source, int filled, int homed, int tabs,
                          int rows, const char *prompt) {
+  static const char initial_boundary[] = "\033[r\033[65535;1H\033D";
   char prior[4096];
   size_t used = 0;
   int master, slave, index;
@@ -70,6 +71,9 @@ static int start_session(struct session *g, const char *fixture,
     if (output_parsed(&g->actual, -1) || output_parsed(&g->direct, -1))
       return 1;
   }
+  v.feed(g->direct.terminal, initial_boundary, sizeof(initial_boundary) - 1);
+  if (output_parsed(&g->direct, -1))
+    return 1;
   if (snprintf(g->work, sizeof(g->work), "%s/vte-retained.XXXXXX", build) >=
           (int)sizeof(g->work) ||
       !mkdtemp(g->work))
@@ -340,6 +344,36 @@ cleanup:
   close_session(&g);
   return failed || errors;
 }
+static int multiline_append(const char *fixture, const char *build,
+                            int filled) {
+  static const int sizes[][2] = {
+      {30, 7}, {30, 12}, {50, 12}, {35, 8}, {40, 12}};
+  struct session g;
+  char expected[sizeof("producer tail") + sizeof(sizes) / sizeof(sizes[0])];
+  size_t i;
+  int failed = 0;
+  strcpy(expected, "producer tail");
+  REQUIRE(start_session(&g, fixture, build, "--gated-live", "producer tail",
+                        filled, 0, 0, 12, NULL) == 0);
+  REQUIRE(ack(&g, 40, 12) == 0);
+  REQUIRE(command(&g, 's', 40, 12) == 0);
+  REQUIRE(command(&g, 'i', 40, 12) == 0);
+  REQUIRE(wait_text(&g, "> ") == 0);
+  v.send(g.actual.terminal, "\n\n\n\033[A\033[Az", 10);
+  REQUIRE(wait_text(&g, "\n  z\n") == 0);
+  for (i = 0; i < sizeof(sizes) / sizeof(sizes[0]); i++) {
+    resize(&g.actual, sizes[i][0], sizes[i][1]);
+    REQUIRE(command(&g, 'p', sizes[i][0], sizes[i][1]) == 0);
+    strcat(expected, "Y");
+    REQUIRE(wait_text(&g, expected) == 0);
+    REQUIRE(wait_text(&g, "\n  z\n") == 0);
+  }
+  REQUIRE(finish(&g) == 0);
+cleanup:
+  close_session(&g);
+  return failed || errors;
+}
+
 static int finite_case(const char *fixture, const char *build,
                        const char *source, int filled) {
   struct session g;
@@ -511,6 +545,8 @@ int main(int argc, char **argv) {
       failed = handoff_case(argv[2], argv[3], source, filled, 1, 0, 0, NULL, 0);
     if (!failed)
       failed = handoff_case(argv[2], argv[3], "ABC", 0, 1, 1, 0, NULL, 1);
+    for (filled = 0; filled < 2 && !failed; ++filled)
+      failed = multiline_append(argv[2], argv[3], filled);
   } else if (!strcmp(argv[1], "tabs")) {
     const char *tabs[] = {"\tX", "a\tX", "a\t\tX"};
     for (index = 0; index < 3 && !failed; ++index)

@@ -216,7 +216,7 @@ static int run(int mode) {
     }
   }
   started = seconds();
-  result = sl_terminal_handoff(f.sl, adapter, &f);
+  result = f.sl->terminal_handoff(f.sl, adapter, &f);
   CHECK(seconds() - started < (mode == 14 ? 2.0 : 1.0));
   if (mode < 5 || mode == 14)
     CHECK(result == SL_TERMINAL_ESCAPED);
@@ -340,7 +340,7 @@ static int local_adapter(const char *executable, int mode) {
     _exit(write(master, "fail\n", 5) != 5);
   }
   started = seconds();
-  result = sl_terminal_local(sl, executable, &exit_status);
+  result = sl->terminal_local(sl, executable, &exit_status);
   CHECK(seconds() - started < 2.0);
   CHECK(mode ? result == SL_TERMINAL_ESCAPED
              : result == SL_OK && exit_status == 7);

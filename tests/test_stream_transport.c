@@ -35,11 +35,11 @@ static int run_case(const char *fixture, int feed, int resized) {
   struct pollfd descriptors[2];
   char fd_text[32], resize_text[8], data[65536];
   char *output = NULL;
-  size_t used = 0, offset = 0, length, glyphs = 0;
-  int phase = 0, probes = 0, status = 0, result = 1, done = 0;
+  size_t used = 0, glyphs = 0;
+  int phase = 0, status = 0, result = 1, done = 0;
   double deadline, started = 0;
   ssize_t count;
-  char *request, *begin, *end, *next;
+  char *next;
   memset(&size, 0, sizeof(size));
   size.ws_row = (unsigned short)(feed ? 24 : 5);
   size.ws_col = (unsigned short)(feed ? 80 : 20);
@@ -106,17 +106,6 @@ static int run_case(const char *fixture, int feed, int resized) {
               "fixture capture exceeded bound");
         memcpy(output + used, data, (size_t)count);
         used += (size_t)count;
-        while ((request = strstr(output + offset, "\033[6n")) != NULL) {
-          const char *reply;
-          offset = (size_t)(request - output) + 4;
-          ++probes;
-          CHECK(!feed || phase != 1, "feed requested a cursor round trip");
-          reply =
-              feed ? "\033[24;1R" : (probes == 1 ? "\033[1;3R" : "\033[5;3R");
-          length = strlen(reply);
-          CHECK(write(master, reply, length) == (ssize_t)length,
-                "cursor reply failed");
-        }
       }
     }
   }
@@ -125,9 +114,10 @@ static int run_case(const char *fixture, int feed, int resized) {
   child = -1;
   CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0,
         "terminal fixture failed");
+  CHECK(!strstr(output, "\033[6n"),
+        "terminal fixture requested cursor position");
   if (feed) {
-    CHECK(phase == 2 && started > 0 && probes > 0,
-          "feed/probing coverage missing");
+    CHECK(phase == 2 && started > 0, "feed coverage missing");
     next = output;
     while ((next = strstr(next, "\342\224\200")) != NULL) {
       ++glyphs;
@@ -135,22 +125,10 @@ static int run_case(const char *fixture, int feed, int resized) {
     }
     CHECK(glyphs == 128, "producer bytes were lost");
   } else {
-    CHECK(probes == 2,
-          "late scroll ownership must use exactly two ordinary probes");
     CHECK(strstr(output, "one\r\ntwo\r\nthree\r\nfour\r\n") != NULL,
           "finite output changed");
     CHECK(strstr(output, "\033[1;4r") != NULL,
           "late prompt did not acquire the scroll region");
-  }
-  begin = output;
-  while ((begin = strstr(begin, "\033]777;feed-start\007")) != NULL) {
-    begin += strlen("\033]777;feed-start\007");
-    end = strstr(begin, "\033]777;feed-end\007");
-    CHECK(end != NULL, "unterminated feed marker");
-    request = strstr(begin, "\033[6n");
-    CHECK(request == NULL || request >= end,
-          "feed requested cursor position inside its output frame");
-    begin = end + strlen("\033]777;feed-end\007");
   }
   result = 0;
 cleanup:
@@ -179,7 +157,7 @@ static int chat_commands(const char *chat, const char *guard, const char *theme,
   struct termios attributes;
   struct pollfd descriptor;
   char bytes[262144] = {0}, plain[262144];
-  size_t used = 0, probe = 0, i, p;
+  size_t used = 0, i, p;
   ssize_t count;
   double deadline;
   memset(&size, 0, sizeof(size));
@@ -220,10 +198,7 @@ static int chat_commands(const char *chat, const char *guard, const char *theme,
     CHECK(count > 0, "PTY read failed");
     used += (size_t)count;
     bytes[used] = 0;
-    while (strstr(bytes + probe, "\033[6n")) {
-      probe = (size_t)(strstr(bytes + probe, "\033[6n") - bytes) + 4;
-      CHECK(write(master, "\033[24;3R", 7) == 7, "cursor reply failed");
-    }
+    CHECK(!strstr(bytes, "\033[6n"), "chat requested cursor position");
     for (i = 0, p = 0; i < used; ++i) {
       if (bytes[i] == '\033' && i + 1 < used && bytes[i + 1] == '[') {
         i += 2;

@@ -50,6 +50,7 @@ sl_next_prompt
 sl_output_stream_begin
 sl_output_stream_reconcile
 sl_output_stream_end
+sl_output_stream_end_for_handoff
 sl_output_stream_write
 sl_output_stream_write_quoted_prompt
 sl_print_above
@@ -98,6 +99,9 @@ sl_set_status_message
 sl_set_status_message_prefix
 sl_set_status_message_colors
 sl_submit
+sl_set_prompt_trim
+sl_get_prompt_trim
+sl_prepare_prompt
 sl_simulate_prompt
 sl_cancel_prompt_simulation
 sl_suspend

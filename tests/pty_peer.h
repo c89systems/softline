@@ -6,9 +6,7 @@
 #include <pthread.h>
 #include <unistd.h>
 
-/* The logical editor tests use a real PTY without a renderer. Answer cursor
- * probes there so native setup does not exercise the no-reply timeout on
- * every case. Terminal integration tests supply their own cursor reports. */
+/* Drain output from real PTYs used without an emulator. */
 struct pty_peer {
   pthread_t thread;
   struct pollfd fds[2];
@@ -17,12 +15,10 @@ struct pty_peer {
 
 static void *pty_peer_run(void *context) {
   struct pty_peer *peer = context;
-  const char query[] = "\033[6n", reply[] = "\033[1;1R";
-  size_t matched = 0;
   for (;;) {
     int ready = poll(peer->fds, 2, -1);
     char bytes[512];
-    ssize_t count, index;
+    ssize_t count;
     if (ready < 0 && errno == EINTR)
       continue;
     if (ready < 0)
@@ -34,19 +30,6 @@ static void *pty_peer_run(void *context) {
       continue;
     if (count <= 0)
       return peer;
-    for (index = 0; index < count; ++index) {
-      if (bytes[index] != query[matched]) {
-        matched = bytes[index] == query[0] ? 1 : 0;
-      } else if (++matched == sizeof(query) - 1) {
-        ssize_t written;
-        do {
-          written = write(peer->fds[0].fd, reply, sizeof(reply) - 1);
-        } while (written < 0 && errno == EINTR);
-        if (written != (ssize_t)(sizeof(reply) - 1))
-          return peer;
-        matched = 0;
-      }
-    }
   }
 }
 

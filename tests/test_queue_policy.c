@@ -184,17 +184,26 @@ static void admission(int native) {
   struct fixture f;
   sl_prompt_id_t id;
   setup(&f, native, 8);
-  expect(&f, "/command\r\033eX\r", "/commandX", SL_PROMPT_SOURCE_QUEUED, 0);
+  expect(&f, "  /command  \r\033eX \r", "/commandX", SL_PROMPT_SOURCE_QUEUED,
+         0);
   id = sl_last_prompt_id(f.sl);
   CHECK(id && id == f.edited && f.calls == 2 && f.history == 1);
   CHECK(sl_prompt_queue_count(f.sl) == 0);
   CHECK(sl_set_status_busy(f.sl, 1) == SL_OK);
-  suspend_keys(&f, "ordinary\r/hold first\r/hold second\033\r\033s");
+  suspend_keys(&f, " ordinary \r /hold first \r /hold second \033\r\033s");
   CHECK(entry(&f, 0).policy.enqueue == 0);
   CHECK(entry(&f, 1).policy.enqueue && !entry(&f, 1).policy.executable);
   CHECK(entry(&f, 1).mode == SL_PROMPT_QUEUE_MODE_QUEUED);
   CHECK(entry(&f, 2).mode == SL_PROMPT_QUEUE_MODE_STEER);
   CHECK(!entry(&f, 2).policy.executable);
+  teardown(&f);
+
+  setup(&f, native, 8);
+  CHECK(sl_set_prompt_queue_delivery(f.sl, SL_PROMPT_QUEUE_DELIVERY_MANUAL) ==
+        SL_OK);
+  CHECK(sl_prompt_queue_append(f.sl, "  accepted  ", 0, &id) == SL_OK);
+  expect(&f, "  \n\033\r", "  accepted  ", SL_PROMPT_SOURCE_PROMOTED, id);
+  CHECK(!f.calls && !f.history);
   teardown(&f);
 }
 
@@ -320,8 +329,8 @@ static void shell_and_order(int native) {
   CHECK(sl_prompt_queue_set_executable(f.sl, normal, 2) == SL_ERROR_INVALID);
   CHECK(sl_prompt_queue_set_executable(f.sl, normal, 1) == SL_ERROR_INVALID);
   f.fail_policy = 1;
-  suspend_keys(&f, "/bad\r\033s");
-  CHECK(!strcmp(sl_buffer(f.sl), "/bad"));
+  suspend_keys(&f, "  /bad  \r\033s");
+  CHECK(!strcmp(sl_buffer(f.sl), "  /bad  "));
   CHECK(sl_prompt_queue_count(f.sl) == 0);
   f.fail_policy = 0;
   expect(&f, "\r", "/bad", SL_PROMPT_SOURCE_QUEUED, 0);
@@ -989,8 +998,15 @@ static void empty_edits(int native) {
         CHECK(sl_prompt_queue_append(f.sl, "full", 0, NULL) == SL_ERROR_FULL);
         teardown(&f);
       }
-  /* Only a zero-length edit is deletion; whitespace remains literal content. */
+  /* Trimmed whitespace follows the empty-edit route. */
   setup(&f, native, 8);
+  CHECK(sl_inject_queued_prompt(f.sl, "remove", &removed) == SL_OK);
+  suspend_keys(&f, "\033e\001\013 \r\033s");
+  CHECK(sl_prompt_queue_count(f.sl) == 0 && !*sl_buffer(f.sl));
+  teardown(&f);
+  /* The runtime opt-out preserves whitespace edits verbatim. */
+  setup(&f, native, 8);
+  CHECK(sl_set_prompt_trim(f.sl, 0) == SL_OK);
   CHECK(sl_inject_queued_prompt(f.sl, "keep", &removed) == SL_OK);
   suspend_keys(&f, "\033e\001\013 \r\033s");
   CHECK(entry(&f, 0).id == removed && entry(&f, 0).held);

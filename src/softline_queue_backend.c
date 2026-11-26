@@ -866,8 +866,8 @@ int sl_backend_wait_key(const sl_impl_t *impl, int key) {
          key == SL_KEY_ALT_BASE + 'Y' || key == SL_KEY_ALT_BASE + 'n' ||
          key == SL_KEY_ALT_BASE + 'N' ||
          key == (int)impl->prompt_queue.keys.edit_newest ||
-         (!impl->len &&
-          key == (int)impl->prompt_queue.keys.submit_or_promote_newest);
+         (key == (int)impl->prompt_queue.keys.submit_or_promote_newest &&
+          sl_prompt_is_empty(impl));
 }
 int sl_backend_push_key(sl_t *self, int key, const char *bytes, size_t len,
                         int binding_done) {
@@ -878,6 +878,10 @@ int sl_backend_push_key(sl_t *self, int key, const char *bytes, size_t len,
   /* Leave room for bracketed-paste framing and ordinary edit controls around
    * a full-size draft while keeping deferred keyboard input bounded. */
   size_t limit = impl->line_max_len + SL_PENDING_INPUT_MAX;
+  /* A malformed UTF-8 key has no decoded bytes. Discard it here so replay
+   * cannot take continuation bytes from unrelated live terminal input. */
+  if (key >= 128 && key < 256 && !len)
+    return SL_OK;
   if (len > sizeof(b->keys[0].bytes) || b->key_count >= limit)
     return error(
         self, SL_ERROR_FULL,
@@ -929,27 +933,33 @@ int sl_backend_pop_key(sl_impl_t *impl, int *key, char *bytes, size_t *len,
 int sl_backend_submit(sl_t *self, sl_prompt_queue_mode_t mode) {
   sl_impl_t *impl = editor(self);
   sl_queue_request_t request;
-  backend_entry_t *entry;
-  int status;
+  char *text;
+  int status, empty;
   if (sl_image_pending(impl))
     return SL_ERROR_NOT_READY;
-  if (!impl->len && !impl->prompt_queue.editing.info.id)
-    return SL_OK;
+  empty = sl_prompt_is_empty(impl);
+  if (empty && !impl->prompt_queue.editing.info.id)
+    return impl->len ? sl_set_buffer(self, "") : SL_OK;
   memset(&request, 0, sizeof(request));
   request.operation = SL_QUEUE_OFFER;
   request.mode = mode;
-  request.text = impl->buf;
   if (impl->prompt_queue.editing.info.id) {
-    entry = find_local(impl->backend, impl->prompt_queue.editing.info.id);
+    backend_entry_t *entry =
+        find_local(impl->backend, impl->prompt_queue.editing.info.id);
     if (!entry)
       return SL_ERROR_CONFLICT;
-    request.operation = impl->len ? SL_QUEUE_END_EDIT : SL_QUEUE_WITHDRAW;
+    request.operation = empty ? SL_QUEUE_WITHDRAW : SL_QUEUE_END_EDIT;
     request.item_id = entry->value.id;
     request.mode =
         mode == SL_PROMPT_QUEUE_MODE_STEER ? mode : entry->value.mode;
     request.edit_token = entry->value.edit_token;
   }
+  text = sl_prepare_prompt(self, impl->buf);
+  if (!text)
+    return SL_ERROR_NOMEM;
+  request.text = text;
   status = sl_queue_backend_request_impl(self, &request, NULL);
+  sl_free_string(self, text);
   if (status != SL_OK)
     return status;
   if (impl->prompt_queue.editing.info.id)

@@ -1,5 +1,4 @@
 #define _DEFAULT_SOURCE
-#include "silent_cursor_probe.h"
 #include <fcntl.h>
 #include <poll.h>
 #include <pty.h>
@@ -135,10 +134,10 @@ static int api(void) {
   bridge.reentry = 1;
   memset(&offer, 0, sizeof(offer));
   offer.operation = SL_QUEUE_OFFER;
-  offer.text = "first";
+  offer.text = " first ";
   CHECK(sl_queue_backend_request(sl, &offer, &first) == SL_OK && first);
   CHECK(sl_queue_backend_pending(sl, 0, &pending) == SL_OK && pending.pending);
-  CHECK(!strcmp(pending.request.text, "first"));
+  CHECK(!strcmp(pending.request.text, " first "));
   CHECK(sl_set_buffer(sl, "newer draft") == SL_OK);
   memset(&entry, 0, sizeof(entry));
   entry.id = "opaque/backend-A";
@@ -189,7 +188,7 @@ static int api(void) {
   CHECK(sl_queue_backend_recover(sl, first) == SL_ERROR_INVALID);
   CHECK(sl_set_buffer(sl, "") == SL_OK);
   CHECK(sl_queue_backend_recover(sl, first) == SL_OK &&
-        !strcmp(sl_buffer(sl), "first"));
+        !strcmp(sl_buffer(sl), " first "));
   memset(&change, 0, sizeof(change));
   change.kind = SL_QUEUE_DISCONNECTED;
   CHECK(sl_queue_backend_update(sl, &change) == SL_OK);
@@ -390,6 +389,7 @@ static int native_watch(sl_t *sl, const sl_watch_event_t *event,
   char byte;
   CHECK(read(event->fd, &byte, 1) == 1);
   CHECK(!strcmp(sl_buffer(sl), "new"));
+  CHECK(!strcmp(bridge->text, "alpha"));
   memset(&result, 0, sizeof(result));
   result.request_id = bridge->request.request_id;
   if (bridge->stage == 2) {
@@ -431,7 +431,7 @@ static void native_idle(sl_t *sl, void *context) {
   }
   if (!bridge->stage) {
     bridge->stage = 1;
-    if (write(bridge->master, "alpha\rnew", 9) != 9)
+    if (write(bridge->master, "  alpha \rnew", 12) != 12)
       bridge->failed = 1;
   } else if ((bridge->stage == 1 || bridge->stage == 4) &&
              !strcmp(sl_buffer(sl), "new")) {
@@ -555,7 +555,7 @@ static int edit_step(sl_t *sl, struct bridge *bridge) {
       break;
     CHECK(draft.id == bridge->local_id && draft.held &&
           !strcmp(sl_buffer(sl), "original"));
-    CHECK(sl_set_buffer(sl, "edited") == SL_OK);
+    CHECK(sl_set_buffer(sl, "  edited \n") == SL_OK);
     CHECK(write(bridge->master, "\r", 1) == 1);
     bridge->stage = 4;
     break;
@@ -742,19 +742,26 @@ static int delayed_result(struct delayed *d, sl_queue_request_id_t id,
   return 0;
 }
 
+static const char *delayed_expected(const struct delayed *d) {
+  if (d->kind == 5)
+    return d->paste + 6;
+  if (d->kind == 0)
+    return "x\303\251tail";
+  return d->kind == 1 ? "x\303\251\nz" : "x\303\251";
+}
+
 static int delayed_step(sl_t *sl, struct delayed *d) {
   struct bridge *b = &d->bridge;
   char drain[2048];
   sl_prompt_queue_entry_info_t draft;
-  const char *expected = d->kind == 5   ? d->paste + 6
-                         : d->kind == 1 ? "x\303\251\nz"
-                                        : "x\303\251";
+  const char *expected = delayed_expected(d);
   if (d->kind != 5)
     while (read(b->master, drain, sizeof(drain)) > 0) {
     }
   CHECK(sl_prompt_queue_draft_info(sl, &draft) == SL_OK);
   if (!d->phase) {
-    const char *keys = d->kind == 5 ? "original\r\033e\025"
+    const char *keys = d->kind == 5   ? "original\r\033e\025"
+                       : d->kind == 0 ? "original\r\033e\025\303x\303\251"
                        : d->kind == 1
                            ? "original\r\033e\025\033[200~x\303\251\nz\033[201~"
                            : "original\r\033e\025x\303\251";
@@ -853,6 +860,10 @@ static int delayed_step(sl_t *sl, struct delayed *d) {
     } else {
       CHECK(d->control_calls == 1);
       CHECK(delayed_result(d, d->original, 1) == 0);
+      /* The discarded lead byte cannot consume this later stray
+       * continuation and turn it into an edit during replay. */
+      if (d->kind == 0)
+        CHECK(write(b->master, "\251tail", 5) == 5);
       d->phase = 3;
     }
   } else if (d->phase == 9) {
@@ -978,9 +989,7 @@ static int delayed_edit(int kind) {
   } else if (kind < 2 || kind == 5 || kind >= 7) {
     CHECK(d->phase == 7 &&
           sl_last_readline_status(d->bridge.sl) == SL_READLINE_SUSPENDED);
-    CHECK(!strcmp(sl_buffer(d->bridge.sl), kind == 5   ? d->paste + 6
-                                           : kind == 1 ? "x\303\251\nz"
-                                                       : "x\303\251"));
+    CHECK(!strcmp(sl_buffer(d->bridge.sl), delayed_expected(d)));
     CHECK(d->bridge.calls == 2);
     if (kind < 2)
       CHECK(d->control_calls == 1);

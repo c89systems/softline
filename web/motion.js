@@ -1,5 +1,6 @@
 const chat = document.getElementById('chat');
 const composer = document.getElementById('composer-area');
+const welcome = document.getElementById('welcome');
 const reduced = window.matchMedia('(prefers-reduced-motion: reduce)');
 const scroll = document.getElementById('scroll');
 const scrollFrame = document.getElementById('scroll-frame');
@@ -47,15 +48,47 @@ scroll.addEventListener('softline:feed-scroll', event => {
   else stopFeedMotion();
 });
 
+let welcomeExit;
+function cancelWelcomeExit() {
+  if (!welcomeExit) return;
+  const animation = welcomeExit;
+  welcomeExit = null;
+  delete welcome.dataset.leaving;
+  welcome.inert = false;
+  chat.insertBefore(welcome, composer);
+  animation.cancel();
+}
+chat.addEventListener('softline:welcome-reset', cancelWelcomeExit);
+reduced.addEventListener('change', () => {
+  if (reduced.matches) cancelWelcomeExit();
+});
+
 chat.addEventListener('softline:composer-dock', () => {
-  if (reduced.matches || !chat.classList.contains('welcome-state')) return;
+  if (reduced.matches) return;
+  const duration = 540;
   const top = composer.getBoundingClientRect().top;
+  const bounds = welcome.getBoundingClientRect();
+  if (bounds.height && bounds.bottom > 0) {
+    const position = { left: `${bounds.left}px`, top: `${bounds.top}px`, width: `${bounds.width}px` };
+    welcome.dataset.leaving = '';
+    welcome.inert = true;
+    // Let the banner travel past the chat pane and toolbar to the viewport edge.
+    document.body.append(welcome);
+    const exit = welcome.animate([
+      { ...position, translate: '0 0', easing: 'cubic-bezier(.18, .65, .35, 1)' },
+      { ...position, translate: '0 12px', offset: .27, easing: 'cubic-bezier(.55, 0, .88, .46)' },
+      { ...position, translate: `0 -${Math.ceil(bounds.bottom + 4)}px` }
+    ], { duration, fill: 'both' });
+    welcomeExit = exit;
+    const complete = () => { if (welcomeExit === exit) cancelWelcomeExit(); };
+    exit.finished.then(complete, complete);
+  }
   // Measure the docked position after its layout changes take effect.
   queueMicrotask(() => {
     const distance = top - composer.getBoundingClientRect().top;
     if (!distance || reduced.matches) return;
     composer.animate([{ translate: `0 ${distance}px` }, { translate: '0 0' }], {
-      duration: 540,
+      duration,
       easing: 'cubic-bezier(.42, 0, .20, 1)'
     });
   });

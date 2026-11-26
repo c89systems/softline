@@ -55,15 +55,11 @@ format-check: ## Assert formatting without changing source
 
 .PHONY: deps-debug
 deps-debug: ## Configure debug build dependencies
-	@cmake --preset debug
+	@./scripts/build.sh configure debug
 
 .PHONY: deps-release
 deps-release: ## Configure release build dependencies
-	@cmake --preset x86_64-linux-gnu-release
-
-.PHONY: deps-cross
-deps-cross: ## Provision and inspect all pinned cross toolchains
-	@source ./scripts/require-workspace.sh && ./scripts/cpkt-toolchains.sh ensure all
+	@./scripts/build.sh configure x86_64-linux-gnu-release
 
 .PHONY: deps
 deps: ## Configure one dependency closure (DEPENDENCY=libmdf|lua PRESET=debug)
@@ -78,8 +74,7 @@ build-debug: build ## Build debug target
 
 .PHONY: build-cbor-debug
 build-cbor-debug: ## Build with the opt-in CBOR TCP demos
-	@cmake --preset debug -B "$(CBOR_BUILD_DIR)" -DSL_ENABLE_CBOR_TCP=ON $(if $(SL_CBOR_SDK_PREFIXES),-DSL_CBOR_SDK_PREFIXES="$(SL_CBOR_SDK_PREFIXES)")
-	@cmake --build "$(CBOR_BUILD_DIR)"
+	@cmake "-DBINARY_DIR=$(CBOR_BUILD_DIR)" "-DSL_CBOR_SDK_PREFIXES=$(SL_CBOR_SDK_PREFIXES)" -P cmake/build-cbor-debug.cmake
 
 .PHONY: run-simple
 run-simple: build-debug ## Run C simple example (THEME=default|plain|...)
@@ -144,8 +139,7 @@ run-chat-synthwave: $(CHAT_BUILD) ## Run C chat example with the synthwave theme
 
 .PHONY: build-release
 build-release: ## Build release target
-	@cmake --preset x86_64-linux-gnu-release
-	@cmake --build --preset x86_64-linux-gnu-release
+	@./scripts/build.sh build x86_64-linux-gnu-release
 
 .PHONY: test
 test: ## Run debug tests with cached native terminal tools
@@ -212,12 +206,8 @@ valgrind-portable: ## Run native Valgrind on supported Linux hosts, skip where u
 		*) echo "SKIP: valgrind requires native x86_64 Linux" ;; \
 	esac
 
-.PHONY: deps-fuzz
-deps-fuzz: ## Explicitly provision pinned native AFL++ instrumentation
-	@source ./scripts/require-workspace.sh && ./scripts/cpkt-aflpp.sh ensure
-
 .PHONY: fuzz-smoke
-fuzz-smoke: ## Build and execute a bounded native AFL++ smoke run (prepare with deps-fuzz)
+fuzz-smoke: ## Build and execute a bounded native AFL++ smoke run
 	@./scripts/fuzz.sh
 
 .PHONY: fuzz-portable

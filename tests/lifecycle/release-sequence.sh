@@ -12,15 +12,17 @@ cp "$root/cmake/softline_workspace.cmake" "$fixture/cmake/"
 cp "$root/Makefile" "$fixture/"
 cat > "$fixture/scripts/cpkt-toolchains.sh" <<'SH'
 #!/usr/bin/env bash
+[[ $1 == ensure ]] || exit 2
+printf 'ensure:%s\n' "$2" >> "$CALL_LOG"
 if [[ $2 == arm64-apple-darwin && ${TEST_MISSING_DARWIN_SDK:-0} == 1 ]]; then
-  printf 'status=missing\nnote=osxcross SDK unavailable\n'
-else
-  printf 'status=ready\n'
+  echo 'osxcross SDK unavailable' >&2
+  exit 1
 fi
 SH
 cat > "$fixture/scripts/cpkt-aflpp.sh" <<'SH'
 #!/usr/bin/env bash
-exit 0
+[[ $1 == ensure ]] || exit 2
+printf 'ensure:afl\n' >> "$CALL_LOG"
 SH
 for helper in package-source package-checksums package-verify release_lua_artifacts package-consumer-smoke; do
   printf '#!/usr/bin/env bash\nprintf '\''%%s:%%s\\n'\'' %q "$*" >> "$CALL_LOG"\n' "$helper" > "$fixture/scripts/$helper.sh"
@@ -63,10 +65,15 @@ if "$fixture/scripts/release.sh" preflight > "$work/error" 2>&1; then echo 'Feat
 [[ -f "$fixture/build/retained" && ! -s "$CALL_LOG" ]]
 git -C "$fixture" checkout -q trunk
 "$fixture/scripts/release.sh" preflight
+mapfile -t provision < "$CALL_LOG"
+[[ ${#provision[@]} == 8 && ${provision[0]} == ensure:arm64-apple-darwin && ${provision[7]} == ensure:afl ]]
+: > "$CALL_LOG"
 if TEST_MISSING_DARWIN_SDK=1 "$fixture/scripts/release.sh" preflight > "$work/error" 2>&1; then
   echo 'Release preflight accepted an unavailable Darwin SDK' >&2; exit 1
 fi
-grep -q 'required collection missing' "$work/error"
+grep -q 'osxcross SDK unavailable' "$work/error"
+[[ -f "$fixture/build/retained" && $(cat "$CALL_LOG") == ensure:arm64-apple-darwin ]]
+: > "$CALL_LOG"
 [[ -f "$fixture/build/retained" && ! -s "$CALL_LOG" ]]
 for area in build .cache; do
   for kind in DEPENDENCY TOOLCHAIN; do
@@ -87,6 +94,7 @@ grep -q 'survive make clean' "$work/error"
 if SOFTLINE_RELEASE_TARGETS=x86_64-linux-gnu "$fixture/scripts/release.sh" preflight > "$work/error" 2>&1; then
   echo 'Partial final release accepted' >&2; exit 1
 fi
+[[ ! -s "$CALL_LOG" ]]
 "$fixture/scripts/release.sh"
 mapfile -t calls < "$CALL_LOG"
 [[ ${#calls[@]} == 9 ]]
@@ -101,6 +109,7 @@ mapfile -t calls < "$CALL_LOG"
 : > "$CALL_LOG"
 "$real_make" --no-print-directory -C "$fixture" release MAKE="$work/bin/make"
 mapfile -t calls < "$CALL_LOG"
-[[ ${#calls[@]} == 11 && ${calls[0]} == make:lifecycle-version-contract && ${calls[1]} == make:clean ]]
-[[ ${calls[2]} == "make:-C $fixture prerelease-runtime-checks" && ${calls[10]} == package-verify: ]]
-echo 'Read-only preflight preserves outputs; final sequence shares source-native and checkout-cross ownership.'
+[[ ${#calls[@]} == 19 && ${calls[0]} == make:lifecycle-version-contract && ${calls[9]} == make:clean ]]
+[[ "${calls[*]:1:8}" == "${provision[*]}" ]]
+[[ ${calls[10]} == "make:-C $fixture prerelease-runtime-checks" && ${calls[18]} == package-verify: ]]
+echo 'Release preflight validates identity, provisions tools and preserves outputs before clean.'

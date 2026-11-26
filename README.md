@@ -40,6 +40,12 @@ with content, Alt+J appends the stash, and Ctrl+_ undoes draft edits.
 Up/Down navigate visual rows and history. Ctrl+R searches history and Enter
 selects the match for editing.
 
+Submissions trim leading and trailing Unicode whitespace by default. The live
+draft and its interior whitespace are preserved. Set `disable_prompt_trim` in
+`sl_config_t` or call `sl_set_prompt_trim()` on the owner thread to change the
+policy. Hosts with another input source can apply the same policy through
+`sl_prepare_prompt()`, as the browser chat does before admission.
+
 The editor supports multiline UTF-8, bracketed paste, inline completion,
 host-owned status messages and a prompt queue. Hooks run on the editor's
 owner thread. When either descriptor is redirected, input falls back to a
@@ -57,11 +63,12 @@ cancellation, interruption, suspension and errors.
 | [Web frontend](docs/web-frontend.md) and [browser terminal](docs/web-terminal.md) | HTTP/WebSocket host integration, replay, and xterm.js |
 | [Lua API](lua/README.md) | Lua 5.5 editor methods and callback contracts |
 
-The installed `<softline/softline.h>` documents the editor, including ownership,
-return values and receiver equivalents. `<softline/terminal.h>` exposes the
-host-driven server PTY, `<softline/transcript.h>` the native transcript viewer,
-and `<softline/www.h>` the opt-in web handler. `<softline/cbor.h>` is a
-convenience include for applications that link libcbor and supply a transport.
+The installed `<softline/softline.h>` documents the editor receiver, including
+terminal handoff and transcript methods. `<softline/transcript.h>` declares
+the matching transcript free functions. `<softline/terminal.h>` exposes the
+independent server PTY receiver, and `<softline/www.h>` the opt-in web handler.
+`<softline/cbor.h>` is a convenience include for applications that link
+libcbor and supply a transport.
 
 ## Examples
 
@@ -105,9 +112,9 @@ and [remote queue settings](docs/queue-backends.md#two-terminal-demo).
 ## Terminal-native chat
 
 Use a persistent output session to stream above a bottom-anchored prompt.
-The renderer owns formatting and the terminal owns scrollback. Softline owns
-prompt placement and updates only its rows. Feed writes consume bounded
-chunks without waiting for cursor reports.
+The renderer owns formatting and the terminal owns scrollback. Softline
+tracks the output position, anchors the prompt at the bottom and updates its
+owned rows without querying the terminal cursor.
 
 ```c
 sl_output_stream_begin(sl);
@@ -117,7 +124,14 @@ sl_output_stream_write(sl, bytes, length);
 sl_output_stream_end(sl);
 ```
 
-Check each return value. At a settled resize boundary, call
+Check each return value. To lend the TTY to an external pager, call
+`sl->output_stream_end_for_handoff(sl)` after the editor returns. It clears
+the complete prompt frame for that close and preserves the draft and prior
+output. Reopen the stream after the pager returns. For a built-in local shell
+or a host PTY adapter, `terminal_local` and `terminal_handoff` manage the
+stream boundary themselves. See the [terminal handoff guide](docs/terminal-handoff-design.md#terminal-and-output-ownership).
+
+At a settled resize boundary, call
 `sl_output_stream_reconcile()` before resuming a synchronous producer.
 `sl_output_stream_write_quoted_prompt()` writes literal submitted text with
 a themed prefix. Softline can also present finite output using
@@ -222,16 +236,18 @@ diagnosis until `make clean`.
 Every project-owned C target is compiled as C89 with POSIX terminal APIs.
 For editor setup, run `make build-debug` to prepare the dependencies, generated
 headers and `build/debug/compile_commands.json`. The checked-in `.clangd` uses
-that database; public-header Doxygen comments supply API hover documentation.
+that database. Public header comments supply API help on hover, and clangd
+uses the declared parameter names for signature help at call sites.
 `make test-clangd` verifies configuration/database discovery and semantic parsing
 of `src/softline.c`. `make test-public-header-docs` checks documentation coverage
 for installed C declarations. Lua usage and callback contracts are documented in
 [lua/README.md](lua/README.md) and the facade's source comments.
 
-Shared builds use `SOFTLINE_ABI_VERSION=5` for SONAME/SOVERSION. Image-paste handover
-extends the public configuration and receiver layout. Rebuild consumers against
-the new header/library pair. ABI 5 advances exactly once from released v0.17.0's
-ABI 4, independently of the project release version.
+Shared builds use `SOFTLINE_ABI_VERSION=6` for SONAME/SOVERSION. Terminal
+handoff, transcripts, prompt trimming, and tracked browser simulation extend
+the public editor and web receiver layouts. Rebuild C and Lua consumers against the matching
+header and library. ABI 6 advances from released v0.20.0's ABI 5,
+independently of the project release version.
 The ABI is fixed by the source, not a CMake option. Reconfiguring an existing
 build discards any obsolete cached ABI value before generating library names
 and installed metadata.
@@ -253,6 +269,12 @@ Host `clangd`, `clang-format`, Valgrind, Lua 5.5, LuaRocks, and packaging
 utilities are development tools; the C compiler, linker, archiver, and sysroot
 for project-owned Linux release builds come from the lifecycle toolchain
 resolver.
+
+The standard build, test, package, and fuzz targets prepare their pinned tools.
+Package builds prepare only their selected targets. Linux-host Darwin builds
+use the installed osxcross SDK and prepare its pinned host MIG tool. The fuzz
+targets prepare AFL++ before configuration, and Lua's build fetches its pinned
+source archive through CMake.
 
 Local tests, examples, fuzzers, and temporary SDK consumers on supported x86-64
 Linux hosts select the
@@ -297,8 +319,8 @@ signed commit attached to the default branch resolved by `origin/HEAD`, without
 a candidate version override. Complete implementation and review on one
 development branch, then squash onto the local default branch before engineer
 amendment/signing. Keep remote refs unchanged during preparation. The gate
-verifies the signature, branch, tag and prepared tools before `make clean`,
-including that the selected toolchain and dependency caches survive that cleanup,
+verifies the signature, branch, tag, workstation tools, and cache locations,
+then prepares the pinned toolchains and AFL++ before `make clean`,
 then builds fresh local proof and all
 seven SDK targets. Delivered source supplies the native Release lane; cross
 lanes stay in the checkout. All source/Lua products and SDKs must appear in the
