@@ -85,6 +85,7 @@ case "$case_name" in
         step r || return
         [[ $(od -An -tu2 acknowledgment | xargs) == '40 12' ]] && return
         ((SECONDS < deadline)) || return 1
+        sleep .01
       done
     }
     setup resized
@@ -95,6 +96,9 @@ case "$case_name" in
     expect grep -Fxq old-output capture
     expect test "$(grep -c '^>' capture)" = 1
     expect test "$(run display-message -p -t repro:0.0 '#{cursor_y},#{cursor_x}')" = 11,7
+    setup step p
+    expect wait_row '^old-outputY$'
+    expect grep -Fxq '> typed' capture
     ;;
   relay-after-close)
     setup launch 16 8 "$native" relay-after-close
@@ -107,25 +111,34 @@ case "$case_name" in
   zero-width-wrap)
     mkfifo commands replies
     exec 8<>commands 9<>replies
-    setup launch 16 8 "$native" zero-width-wrap "$work/commands" "$work/replies"
-    setup read -r -t 3 initial <&9
-    setup test "$initial" = 8
-    setup run resize-window -t repro:0 -x 16 -y 12
     resized() {
-      local rows deadline=$((SECONDS+3))
+      local target=$1 rows deadline=$((SECONDS+3))
+      run resize-window -t repro:0 -x 16 -y "$target" || return
       while :; do
         printf r >&8
         read -r -t 3 rows <&9 || return
-        [[ $rows == 12 ]] && return
+        [[ $rows == "$target" ]] && return
         ((SECONDS < deadline)) || return 1
+        sleep .01
       done
     }
-    setup resized
-    printf x >&8
-    setup dead
-    capture -S -
-    actual=$(sed -n '/^123456789012345e/,+1p' capture)
-    expect test "$actual" = $'123456789012345e\314\201\nZ'
+    for mode in coalesced fragmented printable; do
+      setup run resize-window -t repro:0 -x 16 -y 8
+      setup run clear-history -t repro:0.0
+      setup launch 16 8 "$native" zero-width-wrap "$work/commands" "$work/replies" "$mode"
+      setup read -r -t 3 initial <&9
+      setup test "$initial" = 8
+      setup resized 12
+      if [[ $mode == fragmented ]]; then
+        setup resized 10
+        setup resized 14
+      fi
+      printf x >&8
+      setup dead
+      capture -S -
+      actual=$(sed -n '/^123456789012345e/,+1p' capture)
+      expect test "$actual" = $'123456789012345e\314\201\nZ'
+    done
     ;;
   quote-without-onlcr)
     setup run resize-window -t repro:0 -x 40 -y 12

@@ -228,6 +228,10 @@ static int relay_loop(sl_impl_t *impl, sl_terminal_callback_t callback,
       status = SL_ERROR_IO;
       break;
     }
+    if (fds[1].revents & (POLLHUP | POLLERR | POLLNVAL)) {
+      status = SL_ERROR_IO;
+      break;
+    }
     events = terminal_events(fds[2].revents);
     if (fds[0].revents & (POLLIN | POLLHUP | POLLERR)) {
       n = read(impl->input_fd, bytes, sizeof(bytes));
@@ -308,8 +312,12 @@ static int terminal_handoff(sl_t *self, sl_terminal_callback_t callback,
         fcntl(impl->output_fd, F_SETFL, output_flags | O_NONBLOCK) == 0 &&
         tcgetattr(impl->output_fd, &raw_output) == 0) {
       raw_output.c_oflag &= ~OPOST;
-      if (sl_tty_setattr(impl->output_fd, TCSANOW, &raw_output) == 0)
+      if (sl_tty_setattr(impl->output_fd, TCSANOW, &raw_output) == 0) {
+        /* The relay's output can move the terminal even when no stream was
+         * open for us to close on entry. */
+        impl->native_cursor_valid = 0;
         status = relay_loop(impl, callback, context, relay);
+      }
     }
     if (!stream && impl->raw_active) {
       restore = sl_tty_setattr(impl->output_fd, TCSANOW, &original_output);

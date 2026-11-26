@@ -253,8 +253,8 @@ typedef struct sl_impl {
   int request_cancel;
   int request_suspend;
   int request_queue_dispatch;
-  int plain_pending;
-  char plain_pending_ch;
+  int plain_skip_lf;
+  int input_lookahead; /* One undecoded byte plus one, or zero when empty. */
   sl_readline_status_t last_readline_status;
   sl_idle_callback_t idle_callback;
   void *idle_userdata;

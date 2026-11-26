@@ -1532,7 +1532,8 @@ sl_t *sl_create_with_config(const sl_config_t *config);
  * readline() returns a project-allocated string on submitted input and NULL for
  * EOF, cancellation, interrupt, suspension, or error. Call
  * sl_last_readline_status() before the next readline() call to classify NULL
- * precisely. While raw mode is owned, kernel tab expansion (TAB3/OXTABS) is
+ * precisely. Non-TTY input accepts CRLF even across separate reads.
+ * While raw mode is owned, kernel tab expansion (TAB3/OXTABS) is
  * disabled; OPOST/ONLCR are preserved and original flags are restored on
  * release. Ctrl-C restores terminal state before raising SIGINT. A returning
  * handler leaves an existing native output session available.
@@ -1930,7 +1931,9 @@ int sl_bind_key(sl_t *self, sl_key_t key, sl_key_callback_t callback,
 
 /** Insert text bytes at the active cursor on the editor-owner thread. During
  * active or suspended editing, mutations retain undo support. Matching spaces
- * can continue completion phrases; a separating space ends the activation. */
+ * can continue completion phrases; a separating space ends the activation.
+ * Text may be borrowed from buffer(). The cursor advances past any cluster
+ * joined across the insertion boundary. */
 int sl_insert(sl_t *self, const char *text);
 
 /** Replace the active buffer with text bytes and move the cursor to the end.
@@ -2079,6 +2082,7 @@ int sl_output_stream_write(sl_t *self, const char *bytes, size_t length);
  * clear_prompt_on_exit selects clearing the whole prompt area and returning
  * below output instead. Without a prompt, return below output.
  * Closing an idle native session also releases terminal input ownership.
+ * A disconnected native TTY returns SL_ERROR_IO and releases the input TTY.
  * Incomplete ANSI/UTF-8 returns SL_ERROR_INVALID and leaves the session open.
  * Use `sl_output_stream_end_for_handoff()` to clear the full frame for a
  * foreground program.
@@ -2101,7 +2105,8 @@ int sl_output_stream_end(sl_t *self);
  * input ownership is released. Reopening uses the saved producer endpoint
  * and prompt geometry to restore margins, visibility and surviving frame
  * rows. Recovery of this geometry requires the same terminal dimensions.
- * The editor clears surviving prompt rows before accepting more output. */
+ * A clipped producer row follows the usual continuation policy. The editor
+ * clears surviving prompt rows before accepting more output. */
 int sl_output_stream_end_for_handoff(sl_t *self);
 
 /** Write a submitted prompt as a themed quote into an open output stream.

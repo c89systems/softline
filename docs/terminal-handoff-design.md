@@ -141,7 +141,8 @@ before handing over the terminal. If output is blocked or the native TTY
 disconnects, the close returns `SL_ERROR_IO` and releases terminal input
 ownership without waiting for drainage. Reopening after a partial display
 close restores margins and cursor visibility using the saved producer endpoint
-at the same terminal dimensions. Recovery retains
+at the same terminal dimensions. If that row has scrolled off screen, recovery
+uses the regular clipped-output policy. Recovery retains
 unfinished lines and keeps a right-edge wrap pending through styling-only
 writes. It clears surviving prompt rows before accepting new output. Changed
 dimensions that invalidate the saved geometry return

@@ -173,17 +173,21 @@ case $suite in
     ack() { IFS=' ' read -r -t 4 columns_seen rows_seen <&9; }
     step() { printf %s "$1" >&8; ack; }
     resize() {
-      local rows=$1 deadline=$((SECONDS + 4))
-      run resize-window -t matrix:0 -x 40 -y "$rows"
-      while :; do
-        step r
-        [[ $columns_seen != 40 || $rows_seen != "$rows" ]] || return 0
-        ((SECONDS < deadline)) || return 1
-      done
+      local rows=$1 tty
+      tty=$(run resize-window -t matrix:0 -x 40 -y "$rows" \; \
+        display-message -p -t "$pane" '#{pane_tty}')
+      # The terminal grid has settled. Publish the same geometry to the
+      # fixture's PTY synchronously so tmux's notification timer cannot
+      # affect the cost or ordering of these cases.
+      stty -F "$tty" rows "$rows" cols 40
+      step r
+      [[ $columns_seen == 40 && $rows_seen == "$rows" ]]
     }
     ascii=0123456789012345678901234567890123456789
     unicode=${ascii%?}é
-    for policy in cleared disabled limited retained; do
+    policies=(cleared disabled limited retained)
+    if [[ ${5-} ]]; then policies=("$5"); fi
+    for policy in "${policies[@]}"; do
       limit=2000
       if [[ $policy == disabled ]]; then limit=0; fi
       if [[ $policy == limited ]]; then limit=2; fi

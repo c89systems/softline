@@ -23,6 +23,7 @@ struct sl_surface {
   int native_stream;
   int producer_cursor_live;
   int producer_wrap_lost;
+  int producer_growth_pending;
   int producer_below;
   int history_rows; /* Bounded viewport-shift estimate, not terminal history.
                      * -1 assumes history can fill exposed rows. */
@@ -410,6 +411,21 @@ static int sl_surface_cursor(char *seq, size_t capacity, int below, int col) {
   return count > 0 && (size_t)count < capacity ? count : -1;
 }
 
+/* Normalize a full-height producer after growth without assuming the
+ * terminal restored any rows from history. */
+static int sl_surface_reanchor_producer(sl_surface_t *surface, int width) {
+  char seq[64];
+  int col = surface->col < width ? surface->col : width - 1;
+  int count = sl_surface_cursor(seq, sizeof(seq), surface->producer_below, col);
+  if (count < 0 ||
+      sl_surface_index_full_screen(surface->fd, surface->producer_below) != 0 ||
+      sl_surface_write_all(surface->fd, seq, (size_t)count) != 0)
+    return -1;
+  surface->producer_wrap_lost = surface->col == width;
+  surface->producer_growth_pending = 0;
+  return 0;
+}
+
 static int sl_surface_style(const sl_surface_t *surface, char *seq,
                             size_t capacity) {
   int count = snprintf(seq, capacity, "\033[0");
@@ -542,34 +558,6 @@ void sl_surface_native_history_shift(sl_surface_t *surface, int rows) {
     surface->history_rows = 65535;
 }
 
-/* SGR and OSC 8 do not resolve pending wrap. Find the first byte that can
- * move the cursor, or return -1 for a styling-only write. */
-static int sl_surface_first_output_byte(const char *bytes, size_t length) {
-  size_t i = 0;
-  while (i < length) {
-    unsigned char ch = (unsigned char)bytes[i++];
-    if (ch == 27) {
-      if (i < length && bytes[i++] == ']') {
-        while (i < length) {
-          ch = (unsigned char)bytes[i++];
-          if (ch == 7)
-            break;
-          if (ch == 27 && i < length && bytes[i] == '\\') {
-            ++i;
-            break;
-          }
-        }
-      } else {
-        while (i < length && bytes[i++] != 'm')
-          ;
-      }
-      continue;
-    }
-    return ch;
-  }
-  return -1;
-}
-
 /* Width reflow can invalidate a clipped endpoint. Reset it at that boundary,
  * even if no feed follows before growth, rather than reviving a stale row
  * inside terminal-owned history. Height-only history positions remain valid
@@ -590,13 +578,13 @@ static void sl_surface_clip_producer(sl_surface_t *surface) {
 
 int sl_surface_native_write(sl_surface_t *surface, const char *bytes,
                             size_t length, int prompt_row, int prompt_col) {
-  struct iovec parts[4];
+  struct iovec parts[6];
   sl_surface_t next;
   char prefix[192], suffix[64];
   int count, position, style_count, suffix_count, first, newline_returns;
-  int reposition, wrap_pending = 0;
+  int reposition, wrap_pending;
   struct termios attributes;
-  size_t i, osc_start = 0;
+  size_t i, osc_start = 0, wrap_at = length;
   char *new_link = NULL;
   int link_changed = 0;
   if (!sl_surface_is_native(surface))
@@ -622,20 +610,8 @@ int sl_surface_native_write(sl_surface_t *surface, const char *bytes,
       return -1;
     count += position;
   }
-  /* Style-only writes and successive resizes keep a lost wrap pending. */
-  if (surface->col == surface->width &&
-      (reposition || surface->producer_wrap_lost)) {
-    int byte = sl_surface_first_output_byte(bytes, length);
-    wrap_pending = byte < 0;
-    if (!wrap_pending && byte != '\n' && byte != '\r' && byte != '\t') {
-      memcpy(prefix + count, "\r\033D", 3);
-      count += 3;
-      surface->line_cells = 0;
-      surface->line_extent = 0;
-      surface->ascii_line = 1;
-      surface->line_open = 0;
-    }
-  }
+  wrap_pending = surface->col == surface->width &&
+                 (reposition || surface->producer_wrap_lost);
   style_count =
       sl_surface_style(surface, prefix + count, sizeof(prefix) - (size_t)count);
   if (style_count < 0)
@@ -647,10 +623,23 @@ int sl_surface_native_write(sl_surface_t *surface, const char *bytes,
   next.tracking = 1;
   for (i = 0; i < length; i++) {
     int state = next.parser;
+    size_t cells = next.line_cells;
+    unsigned int utf8_prefix = next.utf8_len;
     if (state == 1 && bytes[i] == ']')
       osc_start = i - 1;
     if (sl_surface_byte(&next, (unsigned char)bytes[i], newline_returns) != 0)
       goto failed;
+    /* Only cursor movement resolves a lost wrap. Emit leading controls
+     * and zero-width scalars on the original row, then insert an index
+     * before the first printable scalar that needs it. */
+    if (wrap_pending && (next.col != next.width || cells != next.line_cells)) {
+      wrap_pending = 0;
+      if (bytes[i] != '\n' && bytes[i] != '\r' && bytes[i] != '\t') {
+        wrap_at = i - utf8_prefix;
+        next.line_cells = next.line_extent = (size_t)next.col;
+        next.ascii_line = utf8_prefix == 0;
+      }
+    }
     if (state >= 6 && !next.parser) {
       free(new_link);
       new_link = NULL;
@@ -684,23 +673,28 @@ int sl_surface_native_write(sl_surface_t *surface, const char *bytes,
   parts[1].iov_base = surface->hyperlink;
   parts[1].iov_len = surface->hyperlink ? strlen(surface->hyperlink) : 0;
   parts[2].iov_base = (void *)bytes;
-  parts[2].iov_len = length;
-  parts[3].iov_base = suffix;
-  parts[3].iov_len = (size_t)suffix_count;
+  parts[2].iov_len = wrap_at;
+  parts[3].iov_base = (void *)"\r\033D";
+  parts[3].iov_len = wrap_at < length ? 3 : 0;
+  parts[4].iov_base = (void *)(bytes + wrap_at);
+  parts[4].iov_len = length - wrap_at;
+  parts[5].iov_base = suffix;
+  parts[5].iov_len = (size_t)suffix_count;
   first = 0;
-  while (first < 4) {
-    ssize_t written = writev(surface->fd, parts + first, 4 - first);
+  while (first < 6) {
+    ssize_t written = writev(surface->fd, parts + first, 6 - first);
     if (written < 0 && errno == EINTR)
       continue;
     if (written <= 0) {
       surface->producer_cursor_live = 0;
+      surface->producer_growth_pending = 0;
       goto failed;
     }
-    while (first < 4 && (size_t)written >= parts[first].iov_len) {
+    while (first < 6 && (size_t)written >= parts[first].iov_len) {
       written -= (ssize_t)parts[first].iov_len;
       first++;
     }
-    if (first < 4) {
+    if (first < 6) {
       parts[first].iov_base = (char *)parts[first].iov_base + written;
       parts[first].iov_len -= (size_t)written;
     }
@@ -721,6 +715,8 @@ int sl_surface_native_write(sl_surface_t *surface, const char *bytes,
     free(surface->hyperlink);
     surface->hyperlink = new_link;
   }
+  if (surface->producer_growth_pending && surface->col != surface->width)
+    return sl_surface_reanchor_producer(surface, surface->width);
   return 0;
 failed:
   free(new_link);
@@ -731,6 +727,9 @@ int sl_surface_native_finish(sl_surface_t *surface, int prompt_row) {
   char seq[96];
   int count, position;
   if (!sl_surface_is_native(surface))
+    return -1;
+  if (surface->producer_growth_pending &&
+      sl_surface_reanchor_producer(surface, surface->width) != 0)
     return -1;
   memcpy(seq, "\033[r\033[0m", 7);
   count = 7;
@@ -807,6 +806,7 @@ int sl_surface_resize(sl_surface_t *surface, int width, int height) {
   struct winsize terminal;
   char seq[64];
   int shift, count, previous_height, retain_cursor, width_changed;
+  int reanchor = 0;
   if (!sl_surface_is_native(surface) || width < 1 || height < 2 ||
       sl_surface_terminal_size(surface->fd, &terminal) != 0)
     return -1;
@@ -826,17 +826,13 @@ int sl_surface_resize(sl_surface_t *surface, int width, int height) {
     int growth = (int)terminal.ws_row - surface->terminal_rows;
     if (growth > 0) {
       if (surface->producer_cursor_live) {
-        /* Scrolled rows may no longer exist. Index from the live endpoint
-         * using zero restored rows as a lower bound. The terminal returns
-         * restored rows to history as the indexes reach the bottom. */
-        int below = (int)terminal.ws_row - 1 - row;
-        int col = surface->col < width ? surface->col : width - 1;
-        count = sl_surface_cursor(seq, sizeof(seq), below, col);
-        if (count < 0 ||
-            sl_surface_index_full_screen(surface->fd, below) != 0 ||
-            sl_surface_write_all(surface->fd, seq, (size_t)count) != 0)
-          return -1;
-        surface->producer_wrap_lost = surface->col == width;
+        /* At the right edge, keep the hardware cursor in place so the
+         * terminal can still combine a following zero-width scalar. */
+        if (retain_cursor && surface->col == width &&
+            !surface->producer_wrap_lost)
+          surface->producer_growth_pending = 1;
+        else
+          reanchor = 1;
       } else {
         int restored = sl_surface_native_history_growth(surface, growth);
         row += restored;
@@ -879,6 +875,11 @@ int sl_surface_resize(sl_surface_t *surface, int width, int height) {
         surface->col = width;
     } else if (surface->col >= width)
       surface->col = width - 1;
+  }
+  if (reanchor ||
+      (surface->producer_growth_pending && (!retain_cursor || width_changed))) {
+    if (sl_surface_reanchor_producer(surface, width) != 0)
+      return -1;
   }
   shift = SL_ROW(surface) >= height ? SL_ROW(surface) - height + 1 : 0;
   if (shift > 0) {
@@ -959,6 +960,8 @@ int sl_surface_validated_hyperlink_active(const sl_surface_t *surface) {
 }
 
 void sl_surface_native_release_cursor(sl_surface_t *surface) {
-  if (sl_surface_is_native(surface))
+  if (sl_surface_is_native(surface)) {
     surface->producer_cursor_live = 0;
+    surface->producer_growth_pending = 0;
+  }
 }

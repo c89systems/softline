@@ -193,7 +193,8 @@ static int relay_reopen(void) {
   return 0;
 }
 
-static int zero_width_wrap(const char *commands, const char *replies) {
+static int zero_width_wrap(const char *commands, const char *replies,
+                           const char *mode) {
   struct winsize size;
   int cmd = open(commands, O_RDWR), reply = open(replies, O_RDWR);
   char byte, ready[64];
@@ -201,6 +202,8 @@ static int zero_width_wrap(const char *commands, const char *replies) {
   SETUP(cmd >= 0 && reply >= 0);
   SETUP(sl_output_stream_begin(sl) == SL_OK);
   SETUP(WRITE(sl, "123456789012345e") == SL_OK);
+  if (!strcmp(mode, "fragmented"))
+    SETUP(WRITE(sl, "\033[32m\314") == SL_OK);
   for (;;) {
     int length;
     SETUP(!ioctl(STDOUT_FILENO, TIOCGWINSZ, &size));
@@ -210,8 +213,17 @@ static int zero_width_wrap(const char *commands, const char *replies) {
     if (byte == 'x')
       break;
     SETUP(byte == 'r');
+    SETUP(sl_output_stream_reconcile(sl) == SL_OK);
   }
-  SETUP(WRITE(sl, "\314\201\nZ") == SL_OK);
+  if (!strcmp(mode, "fragmented")) {
+    SETUP(WRITE(sl, "\201") == SL_OK);
+    SETUP(WRITE(sl, "\033[1m\n") == SL_OK);
+    SETUP(WRITE(sl, "Z") == SL_OK);
+  } else if (!strcmp(mode, "printable")) {
+    SETUP(WRITE(sl, "\314\201Z") == SL_OK);
+  } else {
+    SETUP(WRITE(sl, "\314\201\nZ") == SL_OK);
+  }
   SETUP(sl_output_stream_end(sl) == SL_OK);
   sl_destroy(sl);
   close(reply);
@@ -255,11 +267,11 @@ static int raw_enter(void) {
   sl_t *sl;
   open_terminal(&master, &slave, 12);
   SETUP(!tcgetattr(slave, &attrs));
-  attrs.c_iflag |= IGNCR;
+  attrs.c_iflag |= IGNCR | INLCR;
   SETUP(!tcsetattr(slave, TCSANOW, &attrs));
   sl = editor(slave, slave);
-  text = read_keys(sl, master, "draft\r", 6);
-  accepted = text && !strcmp(text, "draft");
+  text = read_keys(sl, master, "draft\nsecond\r", 13);
+  accepted = text && !strcmp(text, "draft\nsecond");
   SETUP(!tcgetattr(slave, &after) && test_termios_equal(&attrs, &after));
   sl_free_string(sl, text);
   sl_destroy(sl);
@@ -270,14 +282,20 @@ static int raw_enter(void) {
 }
 
 static int utf8_following_key(void) {
+  static const char *const keys[] = {"\303ok\r", "ok\303\r",
+                                     "\033[200~ok\303\033[201~\r"};
   int master, slave, retained;
+  size_t i;
   char *text;
   sl_t *sl;
   open_terminal(&master, &slave, 12);
   sl = editor(slave, slave);
-  text = read_keys(sl, master, "\303ok\r", 4);
-  retained = text && strstr(text, "ok");
-  sl_free_string(sl, text);
+  retained = 1;
+  for (i = 0; i < sizeof(keys) / sizeof(keys[0]); ++i) {
+    text = read_keys(sl, master, keys[i], strlen(keys[i]));
+    retained &= text && !strcmp(text, "ok");
+    sl_free_string(sl, text);
+  }
   sl_destroy(sl);
   close(slave);
   close(master);
@@ -370,6 +388,7 @@ static int split_crlf(void) {
 
 static int insert_borrowed_buffer(void) {
   sl_t *sl = sl_create();
+  char large[251], expected[512];
   int correct;
   SETUP(sl && sl_set_buffer(sl, "abcdef") == SL_OK &&
         sl_set_cursor(sl, 2) == SL_OK);
@@ -377,6 +396,14 @@ static int insert_borrowed_buffer(void) {
   correct = !strcmp(sl_buffer(sl), "abdefcdef");
   if (!correct)
     fprintf(stderr, "draft <%s>\n", sl_buffer(sl));
+  /* With the alias still borrowed, this insertion also grows the buffer. */
+  memset(large, 'a', sizeof(large) - 1);
+  memcpy(large + 4, "suffix", 6);
+  large[sizeof(large) - 1] = 0;
+  SETUP(sl_set_buffer(sl, large) == SL_OK && sl_set_cursor(sl, 2) == SL_OK);
+  SETUP(sl_insert(sl, sl_buffer(sl) + 4) == SL_OK);
+  snprintf(expected, sizeof(expected), "aa%s%s", large + 4, large + 2);
+  correct &= !strcmp(sl_buffer(sl), expected);
   sl_destroy(sl);
   return expect(
       correct,
@@ -452,8 +479,8 @@ int main(int argc, char **argv) {
     return disconnected_relay();
   if (!strcmp(argv[1], "relay-after-close"))
     return relay_reopen();
-  if (!strcmp(argv[1], "zero-width-wrap") && argc == 4)
-    return zero_width_wrap(argv[2], argv[3]);
+  if (!strcmp(argv[1], "zero-width-wrap") && argc == 5)
+    return zero_width_wrap(argv[2], argv[3], argv[4]);
   if (!strcmp(argv[1], "raw-enter"))
     return raw_enter();
   if (!strcmp(argv[1], "utf8-following-key"))

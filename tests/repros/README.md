@@ -1,18 +1,15 @@
 # Regression reproductions
 
-These tests assert the expected behavior and fail on the implementation they
-were written against. They run on Linux with the static library and use
-tmux for assertions about terminal cells. The default suite excludes them
-until the corresponding fixes land.
+These cases run in the standard suite on Linux with the static library.
+Terminal cell checks also require tmux.
 
 ```sh
-cmake --preset debug -DSOFTLINE_TEST_KNOWN_REGRESSIONS=ON
+cmake --preset debug
 cmake --build --preset debug --target test_native_regressions native_output_fixture
-ctest --test-dir build/debug -L '^known-regression$' --output-on-failure
-cmake --preset debug -DSOFTLINE_TEST_KNOWN_REGRESSIONS=OFF
+ctest --test-dir build/debug -L '^regression$' --output-on-failure
 ```
 
-While enabled, select one case with
+Select one case with
 `ctest --test-dir build/debug -R '^softline_repro_grow-cleared-history$' --output-on-failure`.
 The fixture reports setup errors separately from failed assertions.
 

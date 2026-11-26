@@ -741,19 +741,26 @@ static int delayed_result(struct delayed *d, sl_queue_request_id_t id,
   return 0;
 }
 
+static const char *delayed_expected(const struct delayed *d) {
+  if (d->kind == 5)
+    return d->paste + 6;
+  if (d->kind == 0)
+    return "x\303\251tail";
+  return d->kind == 1 ? "x\303\251\nz" : "x\303\251";
+}
+
 static int delayed_step(sl_t *sl, struct delayed *d) {
   struct bridge *b = &d->bridge;
   char drain[2048];
   sl_prompt_queue_entry_info_t draft;
-  const char *expected = d->kind == 5   ? d->paste + 6
-                         : d->kind == 1 ? "x\303\251\nz"
-                                        : "x\303\251";
+  const char *expected = delayed_expected(d);
   if (d->kind != 5)
     while (read(b->master, drain, sizeof(drain)) > 0) {
     }
   CHECK(sl_prompt_queue_draft_info(sl, &draft) == SL_OK);
   if (!d->phase) {
-    const char *keys = d->kind == 5 ? "original\r\033e\025"
+    const char *keys = d->kind == 5   ? "original\r\033e\025"
+                       : d->kind == 0 ? "original\r\033e\025\303x\303\251"
                        : d->kind == 1
                            ? "original\r\033e\025\033[200~x\303\251\nz\033[201~"
                            : "original\r\033e\025x\303\251";
@@ -852,6 +859,10 @@ static int delayed_step(sl_t *sl, struct delayed *d) {
     } else {
       CHECK(d->control_calls == 1);
       CHECK(delayed_result(d, d->original, 1) == 0);
+      /* The discarded lead byte cannot consume this later stray
+       * continuation and turn it into an edit during replay. */
+      if (d->kind == 0)
+        CHECK(write(b->master, "\251tail", 5) == 5);
       d->phase = 3;
     }
   } else if (d->phase == 9) {
@@ -977,9 +988,7 @@ static int delayed_edit(int kind) {
   } else if (kind < 2 || kind == 5 || kind >= 7) {
     CHECK(d->phase == 7 &&
           sl_last_readline_status(d->bridge.sl) == SL_READLINE_SUSPENDED);
-    CHECK(!strcmp(sl_buffer(d->bridge.sl), kind == 5   ? d->paste + 6
-                                           : kind == 1 ? "x\303\251\nz"
-                                                       : "x\303\251"));
+    CHECK(!strcmp(sl_buffer(d->bridge.sl), delayed_expected(d)));
     CHECK(d->bridge.calls == 2);
     if (kind < 2)
       CHECK(d->control_calls == 1);

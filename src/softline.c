@@ -804,20 +804,20 @@ static int sl_wstr(int fd, const char *s) {
 
 static int sl_wchar(int fd, char c) { return sl_write_all(fd, &c, 1); }
 
-/* Let the output terminal's ONLCR setting perform carriage return expansion.
- * Explicit CRLF on a normal terminal becomes CRCRLF and visibly jolts a TUI. */
-static int sl_write_line_break(sl_impl_t *impl) {
+/* Use the line discipline's CR expansion when available. Redirected output
+ * stays LF-delimited. */
+static const char *sl_output_line_break(int fd) {
   struct termios termios_state;
-  if (!impl)
-    return -1;
-  if (!isatty(impl->output_fd))
-    return sl_wchar(impl->output_fd, '\n');
-  if (isatty(impl->output_fd) &&
-      tcgetattr(impl->output_fd, &termios_state) == 0 &&
-      (termios_state.c_oflag & OPOST) != 0 &&
-      (termios_state.c_oflag & ONLCR) != 0)
-    return sl_wchar(impl->output_fd, '\n');
-  return sl_wstr(impl->output_fd, "\r\n");
+  if (!isatty(fd) ||
+      (tcgetattr(fd, &termios_state) == 0 && (termios_state.c_oflag & OPOST) &&
+       (termios_state.c_oflag & ONLCR)))
+    return "\n";
+  return "\r\n";
+}
+
+static int sl_write_line_break(sl_impl_t *impl) {
+  return impl ? sl_wstr(impl->output_fd, sl_output_line_break(impl->output_fd))
+              : -1;
 }
 
 static int sl_write_cursor_up(int fd, int rows) {
@@ -1067,11 +1067,10 @@ static int sl_output_nonblocking(int fd) {
   return flags;
 }
 
-static int sl_handoff_endpoint_matches(const sl_impl_t *impl, int rows,
+static int sl_handoff_geometry_matches(const sl_impl_t *impl, int rows,
                                        int width) {
   return impl->terminal_recovery_rows == rows &&
          impl->terminal_recovery_width == width &&
-         impl->terminal_recovery_row >= 0 &&
          impl->terminal_recovery_row < rows &&
          impl->terminal_recovery_col >= 0 &&
          impl->terminal_recovery_col <= width;
@@ -1122,13 +1121,19 @@ static int sl_output_surface_reconcile(sl_t *self, int prompt_top) {
         goto restore_startup;
     }
     if (saved_endpoint) {
-      if (!sl_handoff_endpoint_matches(impl, rows, width) ||
+      if (!sl_handoff_geometry_matches(impl, rows, width) ||
           (impl->terminal_recovery_frame_count &&
            (impl->terminal_recovery_frame_height != rows ||
             impl->terminal_recovery_frame_width != width)))
         goto restore_startup;
       row = impl->terminal_recovery_row;
       col = impl->terminal_recovery_col;
+      if (row < 0) {
+        /* The old producer row is in terminal-owned history. Use the same
+         * continuation boundary as a live write to a clipped endpoint. */
+        row = impl->terminal_recovery_line_open ? 0 : prompt_top - 1;
+        col = 0;
+      }
       if (sl_reset_scroll_region(impl->output_fd) != 0 ||
           sl_clear_handoff_frame(impl, rows) != 0 ||
           sl_write_cursor_pos(impl->output_fd, row,
@@ -1204,11 +1209,13 @@ static int sl_enable_raw(sl_t *self) {
     return -1;
   }
   raw = impl->original_termios;
-  raw.c_iflag &= ~(BRKINT | ICRNL | INPCK | ISTRIP | IXON);
+  raw.c_iflag &= ~(IGNBRK | BRKINT | PARMRK | ISTRIP | INLCR | IGNCR | ICRNL |
+                   IXON | INPCK);
   /* Preserve output processing: native renderer newlines rely on ONLCR. */
   raw.c_oflag = sl_native_output_flags(raw.c_oflag);
+  raw.c_cflag &= ~(CSIZE | PARENB);
   raw.c_cflag |= CS8;
-  raw.c_lflag &= ~(ECHO | ICANON | IEXTEN | ISIG);
+  raw.c_lflag &= ~(ECHO | ECHONL | ICANON | IEXTEN | ISIG);
   raw.c_cc[VMIN] = 0;
   raw.c_cc[VTIME] = 1;
   impl->raw_guard =
@@ -1475,15 +1482,35 @@ static int sl_buf_delete(sl_t *self, size_t at, size_t n) {
 }
 
 static int sl_buf_insert_cstr(sl_t *self, const char *text) {
-  sl_impl_t *impl;
-  size_t n;
-  impl = sl_impl(self);
+  sl_impl_t *impl = sl_impl(self);
+  size_t n, end;
+  char *copy = NULL;
+  int result;
   if (!impl || !text)
     return SL_ERROR_INVALID;
   n = strlen(text);
-  if (sl_buf_insert(self, impl->cursor, text, n) != 0)
+  if (!n)
+    return SL_OK;
+  /* A suffix borrowed from buffer() can be invalidated by growth or the
+   * move that makes room for the inserted bytes. */
+  if ((uintptr_t)text >= (uintptr_t)impl->buf &&
+      (uintptr_t)text - (uintptr_t)impl->buf < impl->len) {
+    copy = sl_strdup(text);
+    if (!copy) {
+      sl_set_error(self, "out of memory while copying draft text");
+      return SL_ERROR_NOMEM;
+    }
+    text = copy;
+  }
+  result = sl_buf_insert(self, impl->cursor, text, n);
+  free(copy);
+  if (result != 0)
     return SL_ERROR;
-  impl->cursor += n;
+  end = impl->cursor + n;
+  impl->cursor = sl_utf8_clamp_cluster_boundary(impl->buf, impl->len, end);
+  if (impl->cursor < end)
+    impl->cursor +=
+        sl_utf8_next_cluster_len(impl->buf, impl->len, impl->cursor);
   if (impl->completion.active && impl->cursor > impl->completion.end)
     return sl_completion_finish(self);
   return SL_OK;
@@ -2087,6 +2114,17 @@ static void sl_history_clear(sl_history_t *history) {
   history->len = 0;
 }
 
+/* A selected entry that falls out of history is now before the first entry.
+ * Keep the saved draft until the user navigates past the newest entry. */
+enum { SL_HISTORY_BEFORE_FIRST = -2 };
+
+static void sl_history_nav_evict(sl_impl_t *impl, int count) {
+  if (impl->history_index >= 0)
+    impl->history_index = impl->history_index >= count
+                              ? impl->history_index - count
+                              : SL_HISTORY_BEFORE_FIRST;
+}
+
 static int sl_history_set_max(sl_t *self, int max_len) {
   sl_impl_t *impl;
   sl_history_t *history;
@@ -2104,6 +2142,7 @@ static int sl_history_set_max(sl_t *self, int max_len) {
     return SL_OK;
   if (max_len == 0) {
     sl_history_clear(history);
+    sl_history_nav_reset(impl);
     history->max_len = 0;
     return SL_OK;
   }
@@ -2122,6 +2161,7 @@ static int sl_history_set_max(sl_t *self, int max_len) {
   history->items = items;
   history->len = keep;
   history->max_len = max_len;
+  sl_history_nav_evict(impl, start);
   return SL_OK;
 }
 
@@ -2174,6 +2214,7 @@ static int sl_history_add_memory(sl_t *self, const char *line) {
     }
   }
   if (history->len == history->max_len) {
+    sl_history_nav_evict(impl, 1);
     free(history->items[0]);
     for (i = 1; i < history->len; i++)
       history->items[i - 1] = history->items[i];
@@ -2240,12 +2281,14 @@ static int sl_history_set_backend_impl(sl_t *self, const char *key,
   if (!copy)
     return SL_ERROR_NOMEM;
   memset(&import, 0, sizeof(import));
+  import.impl.history_index = -1;
   import.receiver.impl = &import.impl;
   import.impl.line_max_len = impl->line_max_len;
   import.impl.history.max_len = impl->history.max_len;
   status = SL_OK;
   for (i = 0; i < impl->history.len && status == SL_OK; i++)
     status = sl_history_emit(&import, impl->history.items[i]);
+  import.impl.history_index = impl->history_index;
   if (status == SL_OK && load) {
     impl->history_busy = 1;
     status = load(copy, sl_history_emit, &import, userdata);
@@ -2268,6 +2311,7 @@ static int sl_history_set_backend_impl(sl_t *self, const char *key,
   (void)sl_history_close_impl(self);
   sl_history_clear(&impl->history);
   impl->history = import.impl.history;
+  impl->history_index = import.impl.history_index;
   impl->history_key = copy;
   impl->history_append = append;
   impl->history_userdata = userdata;
@@ -4201,21 +4245,23 @@ static int sl_native_reconcile_rendered_frame(sl_t *self, int width, int height,
       space = available;
     if (space > 0) {
       int restored = 0;
-      if (impl->active_prompt || height <= impl->rendered_height)
+      if (height <= impl->rendered_height ||
+          (impl->active_prompt &&
+           (!height_only || span != 1 || !impl->rendered_cursor_valid)))
         restored =
             sl_surface_native_history_growth(impl->output_surface, space);
       top += restored;
       if (height > impl->rendered_height && restored < space) {
         int last = span - 1 - offset;
         int below = height - (top + span);
-        /* Index from the frame's last row through the space below it. For
-         * a retained frame start with zero restored rows: the user may
-         * have cleared or disabled the terminal's history. Any extra rows
-         * the terminal pulled back are returned to history at the bottom. */
+        /* Index from the frame's actual last row. Use zero restored rows
+         * when the caret still anchors the frame: history may be cleared
+         * or disabled. Indexing returns any restored rows to scrollback. */
         if (below > 0 &&
             (sl_write_cursor_down(impl->output_fd, last) != 0 ||
              sl_surface_index_full_screen(impl->output_fd, below) != 0 ||
-             (replace_frame && sl_write_cursor_up(impl->output_fd, last) != 0)))
+             (replace_frame &&
+              sl_write_cursor_up(impl->output_fd, below + last) != 0)))
           return -1;
       }
     }
@@ -5734,6 +5780,7 @@ static int sl_quoted_prompt_styles(sl_impl_t *impl, char *prefix_style,
 
 typedef struct sl_quote_output {
   sl_t *owner;
+  int crlf;
   char bytes[4096];
   size_t len;
 } sl_quote_output_t;
@@ -5792,8 +5839,11 @@ static int sl_quoted_prompt_begin_row(sl_quote_output_t *output,
 
 static int sl_quoted_prompt_end_row(sl_quote_output_t *output,
                                     const char *text_style) {
-  return sl_quote_output_append(output, text_style[0] ? "\033[0m\n" : "\n",
-                                text_style[0] ? 5 : 1);
+  int result = sl_quote_output_append(output, "\033[0m", text_style[0] ? 4 : 0);
+  if (result != SL_OK)
+    return result;
+  return sl_quote_output_append(output, output->crlf ? "\r\n" : "\n",
+                                output->crlf ? 2 : 1);
 }
 
 static int sl_quoted_prompt_next_row(sl_quote_output_t *output,
@@ -5872,13 +5922,18 @@ static int sl_output_stream_write_quoted_prompt_impl(sl_t *self,
   }
   memset(&output, 0, sizeof(output));
   output.owner = self;
+  output.crlf = sl_output_line_break(impl->output_fd)[0] == '\r';
   preceding_breaks = impl->output_trailing_newlines;
   if (preceding_breaks < 2) {
-    result =
-        sl_quote_output_append(&output, "\n\n", (size_t)(2 - preceding_breaks));
-    if (result != SL_OK)
-      return result;
-  }
+    result = sl_quote_output_append(&output, output.crlf ? "\r\n\r\n" : "\n\n",
+                                    (size_t)(2 - preceding_breaks) *
+                                        (output.crlf ? 2 : 1));
+  } else if (output.crlf)
+    result = sl_quote_output_append(&output, "\r", 1);
+  else
+    result = SL_OK;
+  if (result != SL_OK)
+    return result;
   result =
       sl_quoted_prompt_begin_row(&output, prefix, prefix_style, text_style);
   if (result != SL_OK)
@@ -5971,7 +6026,7 @@ static int sl_output_stream_write_quoted_prompt_impl(sl_t *self,
   result = sl_quoted_prompt_end_row(&output, text_style);
   if (result != SL_OK)
     return result;
-  result = sl_quote_output_append(&output, "\n", 1);
+  result = sl_quoted_prompt_end_row(&output, "");
   if (result != SL_OK)
     return result;
   return sl_quote_output_flush(&output);
@@ -6006,8 +6061,11 @@ static int sl_output_stream_end_impl(sl_t *self, int for_handoff) {
     return SL_ERROR_INVALID;
   }
   tty_pair = isatty(impl->input_fd) && isatty(impl->output_fd);
-  if (for_handoff && sl_surface_is_native(impl->output_surface) && !tty_pair)
+  if (sl_surface_is_native(impl->output_surface) && !tty_pair) {
+    if (!for_handoff)
+      sl_terminal_abandon(self);
     return SL_ERROR_IO;
+  }
   if (impl->output_pending_len ||
       (impl->output_surface && !sl_surface_complete(impl->output_surface))) {
     sl_set_error(self,
@@ -6235,6 +6293,11 @@ static sl_watch_t *sl_watch_find(sl_impl_t *impl, sl_watch_id_t id) {
 }
 
 static int sl_pending_input_take(sl_impl_t *impl, char *ch) {
+  if (impl->input_lookahead) {
+    *ch = (char)(impl->input_lookahead - 1);
+    impl->input_lookahead = 0;
+    return 1;
+  }
   if (impl->pending_input_len == 0)
     return 0;
   *ch = impl->pending_input[0];
@@ -6456,10 +6519,6 @@ static ssize_t sl_read_escape_byte(sl_t *self, char *ch) {
   return sl_read_input_byte(self, ch, 100);
 }
 
-static ssize_t sl_read_available_byte(sl_t *self, char *ch) {
-  return sl_read_input_byte(self, ch, 0);
-}
-
 static int sl_decimal_append_int(int *value, char ch) {
   int digit;
   if (!value || ch < '0' || ch > '9')
@@ -6502,15 +6561,17 @@ static int sl_read_utf8_input(sl_t *self, char first, char *buf, size_t *len) {
   if (!buf || !len)
     return -1;
   buf[0] = first;
-  *len = 1;
+  *len = 0;
   c = (unsigned char)first;
-  if ((c & 0x80) == 0)
+  if (c < 0x80) {
+    *len = 1;
     return 0;
-  if ((c & 0xe0) == 0xc0)
+  }
+  if (c >= 0xc2 && c <= 0xdf)
     need = 2;
-  else if ((c & 0xf0) == 0xe0)
+  else if (c >= 0xe0 && c <= 0xef)
     need = 3;
-  else if ((c & 0xf8) == 0xf0)
+  else if (c >= 0xf0 && c <= 0xf4)
     need = 4;
   else
     return 0;
@@ -6520,11 +6581,15 @@ static int sl_read_utf8_input(sl_t *self, char first, char *buf, size_t *len) {
     n = sl_read_escape_byte(self, &next);
     if (n != 1)
       return 0;
-    if (((unsigned char)next & 0xc0) != 0x80)
+    if (((unsigned char)next & 0xc0) != 0x80) {
+      /* Decode it as the next key (or paste byte), including Escape/Enter. */
+      sl_impl(self)->input_lookahead = (unsigned char)next + 1;
       return 0;
+    }
     buf[i] = next;
-    *len = i + 1;
   }
+  if (sl_utf8_decode(buf, need, 0, NULL) == need)
+    *len = need;
   return 0;
 }
 
@@ -6669,6 +6734,8 @@ static int sl_read_paste_input(sl_t *self, char *buf, size_t *len) {
   n = sl_read_input_byte(self, &ch, -1);
   if (n <= 0)
     return SL_KEY_NONE;
+  if (!ch)
+    return SL_KEY_UNKNOWN;
   if (ch == '\r')
     ch = '\n';
   buf[0] = ch;
@@ -6680,7 +6747,7 @@ static int sl_read_paste_input(sl_t *self, char *buf, size_t *len) {
   }
   for (i = 1; i < sizeof(paste_end) - 1; i++) {
     n = sl_read_escape_byte(self, &ch);
-    if (n != 1)
+    if (n != 1 || !ch)
       return SL_KEY_UNKNOWN;
     buf[i] = ch;
     *len = i + 1;
@@ -6707,14 +6774,7 @@ static char *sl_readline_plain(sl_t *self, const char *prompt) {
   }
   got = 0;
   for (;;) {
-    ssize_t nread;
-    if (impl->plain_pending) {
-      ch = impl->plain_pending_ch;
-      impl->plain_pending = 0;
-      nread = 1;
-    } else {
-      nread = read(impl->input_fd, &ch, 1);
-    }
+    ssize_t nread = read(impl->input_fd, &ch, 1);
     if (nread == 0)
       break;
     if (nread < 0) {
@@ -6724,18 +6784,16 @@ static char *sl_readline_plain(sl_t *self, const char *prompt) {
       sl_set_readline_status(self, SL_READLINE_ERROR);
       return NULL;
     }
+    if (impl->plain_skip_lf) {
+      impl->plain_skip_lf = 0;
+      if (ch == '\n')
+        continue;
+    }
     got = 1;
-    if (ch == '\r') {
-      char next;
-      nread = sl_read_available_byte(self, &next);
-      if (nread == 1 && next != '\n') {
-        impl->plain_pending = 1;
-        impl->plain_pending_ch = next;
-      }
+    if (ch == '\r' || ch == '\n') {
+      impl->plain_skip_lf = ch == '\r';
       break;
     }
-    if (ch == '\n')
-      break;
     if (ch == 4 && impl->len == 0) {
       sl_set_readline_status(self, SL_READLINE_EOF);
       return NULL;
@@ -6887,7 +6945,8 @@ static int sl_history_search_find(sl_impl_t *impl, sl_history_search_t *search,
     return -1;
   if (impl->history.len <= 0)
     return -1;
-  if (repeat && search->has_match && search->match_index >= 0) {
+  if (repeat && search->has_match && search->match_index >= 0 &&
+      search->match_index < impl->history.len) {
     found = sl_history_search_find_from(&impl->history, search->query,
                                         search->match_index - 1, 0);
     if (found >= 0)
@@ -8800,7 +8859,8 @@ static void sl_destroy_method(sl_t *self) {
       int flags = sl_output_nonblocking(impl->output_fd);
       if (flags >= 0) {
         if (impl->terminal_recovery_display) {
-          if (sl_handoff_endpoint_matches(impl, sl_terminal_rows(impl),
+          if (impl->terminal_recovery_row >= 0 &&
+              sl_handoff_geometry_matches(impl, sl_terminal_rows(impl),
                                           sl_terminal_columns(impl))) {
             if (sl_wstr(impl->output_fd, "\030\033[r") == 0)
               (void)sl_write_cursor_pos(impl->output_fd,

@@ -13,7 +13,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND TARGET softline_static)
     add_test(NAME softline_repro_${case} COMMAND test_native_regressions
       "${case}" "${PROJECT_BINARY_DIR}")
     set_tests_properties(softline_repro_${case} PROPERTIES
-      LABELS "known-regression" TIMEOUT 5)
+      LABELS "regression" TIMEOUT 5)
   endforeach()
   if(SOFTLINE_TEST_TMUX AND TARGET native_output_fixture)
     foreach(case grow-cleared-history relay-after-close zero-width-wrap quote-without-onlcr)
@@ -22,7 +22,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND TARGET softline_static)
         "$<TARGET_FILE:native_output_fixture>" "$<TARGET_FILE:test_native_regressions>"
         "${PROJECT_BINARY_DIR}" "${case}")
       set_tests_properties(softline_repro_${case} PROPERTIES
-        LABELS "known-regression" TIMEOUT 8)
+        LABELS "regression" TIMEOUT 8)
     endforeach()
   endif()
 endif()

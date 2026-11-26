@@ -878,6 +878,10 @@ int sl_backend_push_key(sl_t *self, int key, const char *bytes, size_t len,
   /* Leave room for bracketed-paste framing and ordinary edit controls around
    * a full-size draft while keeping deferred keyboard input bounded. */
   size_t limit = impl->line_max_len + SL_PENDING_INPUT_MAX;
+  /* A malformed UTF-8 key has no decoded bytes. Discard it here so replay
+   * cannot take continuation bytes from unrelated live terminal input. */
+  if (key >= 128 && key < 256 && !len)
+    return SL_OK;
   if (len > sizeof(b->keys[0].bytes) || b->key_count >= limit)
     return error(
         self, SL_ERROR_FULL,
